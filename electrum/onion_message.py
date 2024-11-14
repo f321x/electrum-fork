@@ -29,9 +29,7 @@ import threading
 import time
 import dataclasses
 from random import random
-from types import MappingProxyType
-
-from typing import TYPE_CHECKING, Optional, Sequence, NamedTuple, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Sequence, NamedTuple, Tuple, Union, Mapping
 
 import electrum_ecc as ecc
 
@@ -44,7 +42,8 @@ from electrum.lnonion import (get_bolt04_onion_key, OnionPacket, process_onion_p
                               OnionHopsDataSingle, decrypt_onionmsg_data_tlv, encrypt_onionmsg_data_tlv,
                               get_shared_secrets_along_route, new_onion_packet, encrypt_hops_recipient_data,
                               next_blinding_from_shared_secret)
-from electrum.lnutil import LnFeatures, MIN_FINAL_CLTV_DELTA_ACCEPTED, MAXIMUM_REMOTE_TO_SELF_DELAY_ACCEPTED
+from electrum.lnutil import (LnFeatures, MIN_FINAL_CLTV_DELTA_ACCEPTED, MAXIMUM_REMOTE_TO_SELF_DELAY_ACCEPTED,
+                             validate_features, IncompatibleOrInsaneFeatures)
 from electrum.util import OldTaskGroup, log_exceptions
 
 
@@ -85,7 +84,7 @@ def create_blinded_path(
         hop_extras: Optional[Sequence[dict]] = None,
         dummy_hops: Optional[int] = 0,
         channels: Optional[Sequence['Channel']] = None,
-) -> dict:
+) -> 'BlindedPath':
     # dummy hops could be inserted anywhere in the path, but for compatibility just add them at the end
     # because blinded paths are usually constructed towards ourselves, and we know we can handle dummy hops.
     if dummy_hops:
@@ -96,7 +95,7 @@ def create_blinded_path(
 
     blinding = ecc.ECPrivkey(session_key).get_public_key_bytes()
 
-    onionmsg_hops = []
+    onionmsg_hops: list[BlindedPathHop] = []
     shared_secrets, blinded_node_ids = get_shared_secrets_along_route(path, session_key)
     for i, node_id in enumerate(path):
         is_non_final_node = i < len(path) - 1
@@ -123,21 +122,19 @@ def create_blinded_path(
 
         encrypted_recipient_data = encrypt_onionmsg_data_tlv(shared_secret=shared_secrets[i], **recipient_data)
 
-        hopdata = {
-            'blinded_node_id': blinded_node_ids[i],
-            'enclen': len(encrypted_recipient_data),
-            'encrypted_recipient_data': encrypted_recipient_data
-        }
+        hopdata = BlindedPathHop(
+            blinded_node_id=blinded_node_ids[i],
+            enclen=len(encrypted_recipient_data),
+            encrypted_recipient_data=encrypted_recipient_data,
+        )
         onionmsg_hops.append(hopdata)
 
-    blinded_path = {
-        'first_node_id': introduction_point,
-        'first_path_key': blinding,
-        'num_hops': bytes([len(onionmsg_hops)]),
-        'path': onionmsg_hops
-    }
-
-    return blinded_path
+    return BlindedPath(
+        first_node_id=introduction_point,
+        first_path_key=blinding,
+        num_hops=bytes([len(onionmsg_hops)]),
+        path=onionmsg_hops,
+    )
 
 
 def encode_blinded_path(blinded_path: dict):
@@ -483,15 +480,14 @@ def get_blinded_paths_to_me(
                         'htlc_minimum_msat': blinded_path_min_htlc_msat
                     }
                 }]
-                payinfo.append({
-                    'fee_base_msat': sum_fee_base_msat,
-                    'fee_proportional_millionths': sum_fee_proportional_millionths,
-                    'cltv_expiry_delta': sum_cltv_expiry_delta + MIN_FINAL_CLTV_DELTA_ACCEPTED,
-                    'htlc_minimum_msat': blinded_path_min_htlc_msat,
-                    'htlc_maximum_msat': blinded_path_max_htlc_msat,
-                    'flen': 0,
-                    'features': bytes(0)
-                })
+                payinfo.append(BlindedPayInfo(
+                    fee_base_msat=sum_fee_base_msat,
+                    fee_proportional_millionths=sum_fee_proportional_millionths,
+                    cltv_expiry_delta=sum_cltv_expiry_delta + MIN_FINAL_CLTV_DELTA_ACCEPTED,
+                    htlc_minimum_msat=blinded_path_min_htlc_msat,
+                    htlc_maximum_msat=blinded_path_max_htlc_msat,
+                    features=LnFeatures(0),
+                ))
             blinded_path = create_blinded_path(os.urandom(32), [chan.node_id, mynodeid], final_recipient_data,
                                                hop_extras=hop_extras, channels=[chan] if not onion_message else None)
             result.append(blinded_path)
@@ -511,6 +507,106 @@ def get_blinded_paths_to_me(
         raise NoRouteBlindingChannelPeers('no OPTION_ROUTE_BLINDING capable channel peers')
 
     return result, payinfo
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class BlindedPathHop:
+    blinded_node_id: bytes
+    enclen: int
+    encrypted_recipient_data: bytes
+
+    def __post_init__(self):
+        ecc.ECPubkey(b=self.blinded_node_id)
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class BlindedPath:
+    """
+    https://github.com/lightning/bolts/blob/34455ffe28b308dd7ac7552234d565890af8605b/04-onion-routing.md?plain=1#L441
+    """
+    first_node_id: bytes
+    first_path_key: bytes
+    num_hops: bytes
+    path: list[BlindedPathHop]
+
+    @property
+    def hop_count(self) -> int:
+        return int.from_bytes(self.num_hops, byteorder='big', signed=False)
+
+    def __post_init__(self):
+        # if num_hops is 0 in any blinded_path in offer_paths: MUST NOT respond to the offer
+        assert isinstance(self.num_hops, bytes), type(self.num_hops)
+        assert isinstance(self.path, list), self.path
+        if self.hop_count == 0:
+            raise ValueError('invalid num_hops of 0')
+        if not self.path:
+            raise ValueError('empty path')
+        if not len(self.path) == self.hop_count:
+            raise ValueError(f'{len(self.path)=} != {self.hop_count=}')
+        ecc.ECPubkey(b=self.first_path_key)
+
+    @classmethod
+    def decode(cls, blinded_path: bytes) -> 'BlindedPath':
+        with io.BytesIO(blinded_path) as blinded_path_fd:
+            blinded_path = OnionWireSerializer.read_field(
+                fd=blinded_path_fd,
+                field_type='blinded_path',
+                count=1)
+        return cls.from_dict(blinded_path)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> 'BlindedPath':
+        if isinstance(d['path'], Mapping):  # single path
+            d['path'] = [d['path']]
+        return BlindedPath(
+            first_node_id=d['first_node_id'],
+            first_path_key=d['first_path_key'],
+            num_hops=d['num_hops'],
+            path=[BlindedPathHop(**p) for p in d['path']],
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class BlindedPayInfo:
+    fee_base_msat: int
+    fee_proportional_millionths: int
+    cltv_expiry_delta: int
+    htlc_minimum_msat: int
+    htlc_maximum_msat: int
+    features: LnFeatures
+
+    @property
+    def requires_unknown_mandatory_features(self) -> bool:
+        """
+        MUST NOT use the corresponding invoice_paths.path if payinfo.features has any unknown even bits set.
+        """
+        try:
+            validate_features(self.features)
+        except IncompatibleOrInsaneFeatures:
+            return True
+        return False
+
+    @classmethod
+    def from_dict(cls, d: dict) -> 'BlindedPayInfo':
+        return BlindedPayInfo(
+            fee_base_msat=int(d['fee_base_msat']),
+            fee_proportional_millionths=int(d['fee_proportional_millionths']),
+            cltv_expiry_delta=int(d['cltv_expiry_delta']),
+            htlc_minimum_msat=int(d['htlc_minimum_msat']),
+            htlc_maximum_msat=int(d['htlc_maximum_msat']),
+            features=LnFeatures(int.from_bytes(d['features'], byteorder="big", signed=False))
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            'fee_base_msat': self.fee_base_msat,
+            'fee_proportional_millionths': self.fee_proportional_millionths,
+            'cltv_expiry_delta': self.cltv_expiry_delta,
+            'htlc_minimum_msat': self.htlc_minimum_msat,
+            'htlc_maximum_msat': self.htlc_maximum_msat,
+            'flen': len(self.features.to_tlv_bytes()),
+            'features': self.features.to_tlv_bytes()
+        }
 
 
 class Timeout(Exception): pass
