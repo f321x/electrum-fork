@@ -1201,7 +1201,9 @@ Warning: setting this to too low will result in lots of payment failures."""),
     # nostr
     NOSTR_RELAYS = ConfigVar(
         'nostr_relays',
-        default='wss://nos.lol,wss://relay.damus.io,wss://brb.io,wss://nostr.mom',
+        default='wss://nos.lol,wss://relay.damus.io,wss://brb.io,wss://nostr.mom,'
+                'wss://relay.primal.net,wss://ftp.halifax.rwth-aachen.de/nostr,'
+                'wss://eu.purplerelay.com,wss://nostr.einundzwanzig.space',
         type_=str,
         short_desc=lambda: _("Nostr relays"),
         long_desc=lambda: ' '.join([

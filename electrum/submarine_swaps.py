@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import ssl
 from typing import TYPE_CHECKING, Optional, Dict, Union, Sequence, Tuple, Iterable
 from decimal import Decimal
 import math
@@ -24,7 +25,7 @@ from .bitcoin import (script_to_p2wsh, opcodes,
                       construct_witness)
 from .transaction import PartialTxInput, PartialTxOutput, PartialTransaction, Transaction, TxInput, TxOutpoint
 from .transaction import script_GetOp, match_script_against_template, OPPushDataGeneric, OPPushDataPubkey
-from .util import log_exceptions, ignore_exceptions, BelowDustLimit, OldTaskGroup, age
+from .util import log_exceptions, ignore_exceptions, BelowDustLimit, OldTaskGroup, age, ca_path
 from .lnutil import REDEEM_AFTER_DOUBLE_SPENT_DELAY
 from .bitcoin import dust_threshold, DummyAddress
 from .logging import Logger
@@ -238,7 +239,7 @@ class SwapManager(Logger):
                 # todo: publish everytime fees have changed
                 self.server_update_pairs()
                 await transport.publish_offer(self)
-                await asyncio.sleep(600)
+                await asyncio.sleep(transport.OFFER_UPDATE_INTERVAL_SEC)
 
     @log_exceptions
     async def main_loop(self):
@@ -1299,9 +1300,9 @@ class NostrTransport(Logger):
     #     (todo: we should use onion messages for that)
 
     NOSTR_DM = 4
-    NOSTR_SWAP_OFFER = 10943
-    NOSTR_EVENT_TIMEOUT = 60*60*24
-    NOSTR_EVENT_VERSION = 1
+    USER_STATUS_NIP38 = 30315
+    NOSTR_EVENT_VERSION = 2
+    OFFER_UPDATE_INTERVAL_SEC = 60 * 10
 
     def __init__(self, config, sm, keypair):
         Logger.__init__(self)
@@ -1313,7 +1314,8 @@ class NostrTransport(Logger):
         self.nostr_private_key = to_nip19('nsec', keypair.privkey.hex())
         self.nostr_pubkey = keypair.pubkey.hex()[2:]
         self.dm_replies = defaultdict(asyncio.Future)  # type: Dict[bytes, asyncio.Future]
-        self.relay_manager = aionostr.Manager(self.relays, private_key=self.nostr_private_key)
+        ssl_context = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH, cafile=ca_path)
+        self.relay_manager = aionostr.Manager(self.relays, private_key=self.nostr_private_key, log=self.logger, ssl_context=ssl_context)
         self.taskgroup = OldTaskGroup()
         self.is_connected = asyncio.Event()
         self.server_relays = None
@@ -1384,9 +1386,6 @@ class NostrTransport(Logger):
     async def publish_offer(self, sm):
         assert self.sm.is_server
         offer = {
-            "type": "electrum-swap",
-            "version": self.NOSTR_EVENT_VERSION,
-            'network': constants.net.NET_NAME,
             'percentage_fee': sm.percentage,
             'normal_mining_fee': sm.normal_fee,
             'reverse_mining_fee': sm.lockup_fee,
@@ -1395,12 +1394,17 @@ class NostrTransport(Logger):
             'max_amount': sm._max_amount,
             'relays': sm.config.NOSTR_RELAYS,
         }
-        self.logger.info(f'publishing swap offer..')
+        # the first value of a single letter tag is indexed and can be filtered for
+        tags = [['d', f'electrum-swapserver-{self.NOSTR_EVENT_VERSION}'],
+                ['r', 'net:' + constants.net.NET_NAME],
+                ['expiration', str(int(time.time() + self.OFFER_UPDATE_INTERVAL_SEC + 10))]]
         event_id = await aionostr._add_event(
             self.relay_manager,
-            kind=self.NOSTR_SWAP_OFFER,
+            kind=self.USER_STATUS_NIP38,
+            tags=tags,
             content=json.dumps(offer),
             private_key=self.nostr_private_key)
+        self.logger.info(f"published offer {event_id}")
 
     async def send_direct_message(self, pubkey: str, relays, content: str) -> str:
         event_id = await aionostr._add_event(
@@ -1422,15 +1426,22 @@ class NostrTransport(Logger):
 
     async def receive_offers(self):
         await self.is_connected.wait()
-        query = {"kinds": [self.NOSTR_SWAP_OFFER], "limit":10}
+        query = {
+            "kinds": [self.USER_STATUS_NIP38],
+            "limit":10,
+            "#d": [f"electrum-swapserver-{self.NOSTR_EVENT_VERSION}"],
+            "#r": [f"net:{constants.net.NET_NAME}"],
+            "since": int(time.time()) - self.OFFER_UPDATE_INTERVAL_SEC
+        }
         async for event in self.relay_manager.get_events(query, single_event=False, only_stored=False):
             try:
                 content = json.loads(event.content)
+                tags = {k: v for k, v in event.tags}
             except Exception as e:
                 continue
-            if content.get('version') != self.NOSTR_EVENT_VERSION:
+            if tags.get('d') != f"electrum-swapserver-{self.NOSTR_EVENT_VERSION}":
                 continue
-            if content.get('network') != constants.net.NET_NAME:
+            if tags.get('r') != f"net:{constants.net.NET_NAME}":
                 continue
             # check if this is the most recent event for this pubkey
             pubkey = event.pubkey
@@ -1447,15 +1458,23 @@ class NostrTransport(Logger):
     async def get_pairs(self):
         if self.config.SWAPSERVER_NPUB is None:
             return
-        query = {"kinds": [self.NOSTR_SWAP_OFFER], "authors": [self.config.SWAPSERVER_NPUB], "limit":1}
+        query = {
+            "kinds": [self.USER_STATUS_NIP38],
+            "authors": [self.config.SWAPSERVER_NPUB],
+            "#d": [f"electrum-swapserver-{self.NOSTR_EVENT_VERSION}"],
+            "#r": [f"net:{constants.net.NET_NAME}"],
+            "since": int(time.time()) - self.OFFER_UPDATE_INTERVAL_SEC,
+            "limit": 1
+        }
         async for event in self.relay_manager.get_events(query, single_event=True, only_stored=False):
             try:
                 content = json.loads(event.content)
-            except Exception as e:
+                tags = {k: v for k, v in event.tags}
+            except:
                 continue
-            if content.get('version') != self.NOSTR_EVENT_VERSION:
+            if tags.get('d') != f"electrum-swapserver-{self.NOSTR_EVENT_VERSION}":
                 continue
-            if content.get('network') != constants.net.NET_NAME:
+            if tags.get('r') != f"net:{constants.net.NET_NAME}":
                 continue
             # check if this is the most recent event for this pubkey
             pubkey = event.pubkey
