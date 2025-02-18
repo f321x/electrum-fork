@@ -341,11 +341,16 @@ class AbstractChannel(Logger, ABC):
     def update_unfunded_state(self) -> None:
         self.delete_funding_height()
         self.delete_closing_height()
-        if self.get_state() in [ChannelState.PREOPENING, ChannelState.OPENING, ChannelState.FORCE_CLOSING] and self.lnworker:
-            if self.is_initiator():
+        chan_age = now() - self.storage.get('init_timestamp', 0)
+        state = self.get_state()
+        if (state in [ChannelState.PREOPENING, ChannelState.OPENING, ChannelState.FORCE_CLOSING]
+            or (state in [ChannelState.OPEN, ChannelState.CLOSING] and self.is_zeroconf())) and self.lnworker:
+            if self.is_initiator() or self.is_zeroconf():
                 # set channel state to REDEEMED so that it can be removed manually
                 # to protect ourselves against a server lying by omission,
                 # we check that funding_inputs have been double spent and deeply mined
+                # zeroconf: Set channel redeemed if peer tries to double spend or if it is closing
+                # but no opening tx has been broadcast by the lsp (e.g. lsp requests close).
                 inputs = self.storage.get('funding_inputs', [])
                 if not inputs:
                     self.logger.info(f'channel funding inputs are not provided')
@@ -360,8 +365,12 @@ class AbstractChannel(Logger, ABC):
                             self.logger.info(f'channel is double spent {inputs}')
                             self.set_state(ChannelState.REDEEMED)
                             break
+                if self.is_zeroconf() and (chan_age > CHANNEL_OPENING_TIMEOUT
+                                           or state in [ChannelState.CLOSING, ChannelState.FORCE_CLOSING]):
+                    # closing will never finish if no funding tx has been published, so we redeem
+                    self.set_state(ChannelState.REDEEMED)
             else:
-                if self.lnworker and (now() - self.storage.get('init_timestamp', 0) > CHANNEL_OPENING_TIMEOUT):
+                if self.lnworker and (chan_age > CHANNEL_OPENING_TIMEOUT):
                     self.lnworker.remove_channel(self.channel_id)
 
     def update_funded_state(self, *, funding_txid: str, funding_height: TxMinedInfo) -> None:
@@ -405,6 +414,10 @@ class AbstractChannel(Logger, ABC):
 
     @abstractmethod
     def is_public(self) -> bool:
+        pass
+
+    @abstractmethod
+    def is_zeroconf(self) -> bool:
         pass
 
     @abstractmethod

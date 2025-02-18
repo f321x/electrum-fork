@@ -2529,6 +2529,9 @@ class Peer(Logger, EventListener):
     async def _shutdown(self, chan: Channel, payload, *, is_local: bool):
         # wait until no HTLCs remain in either commitment transaction
         while chan.has_unsettled_htlcs():
+            if chan.is_zeroconf() and chan.hm.ctn_latest(REMOTE if is_local else LOCAL) <= 1:
+                # is unused zeroconf chan (at most 1 htlc from the jit ceremony)
+                break
             self.logger.info(f'(chan: {chan.short_channel_id}) waiting for htlcs to settle...')
             await asyncio.sleep(1)
         # if no HTLCs remain, we must not send updates

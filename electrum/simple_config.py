@@ -1215,11 +1215,11 @@ Warning: setting this to too low will result in lots of payment failures."""),
     )
 
     # anchor outputs channels
-    ENABLE_ANCHOR_CHANNELS = ConfigVar('enable_anchor_channels', default=False, type_=bool)
+    ENABLE_ANCHOR_CHANNELS = ConfigVar('enable_anchor_channels', default=True, type_=bool)
     # zeroconf channels
-    ACCEPT_ZEROCONF_CHANNELS = ConfigVar('accept_zeroconf_channels', default=False, type_=bool)
-    ZEROCONF_TRUSTED_NODE = ConfigVar('zeroconf_trusted_node', default='', type_=str)
-    ZEROCONF_MIN_OPENING_FEE = ConfigVar('zeroconf_min_opening_fee', default=5000, type_=int)
+    ACCEPT_ZEROCONF_CHANNELS = ConfigVar('accept_zeroconf_channels', default=True, type_=bool)
+    ZEROCONF_TRUSTED_NODE = ConfigVar('zeroconf_trusted_node', default='038550162fa86287884a6a052471934abb5cb261c5a2b15386df8104d3c7bcb85d@5.9.83.108:9735', type_=str)
+    ZEROCONF_MIN_OPENING_FEE = ConfigVar('zeroconf_min_opening_fee', default=1000, type_=int)
 
     # connect to remote WT
     WATCHTOWER_CLIENT_ENABLED = ConfigVar(

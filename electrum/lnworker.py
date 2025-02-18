@@ -1197,7 +1197,7 @@ class LNWallet(LNWorker):
                     await asyncio.sleep(1)
             await util.wait_for2(wait_for_channel(), LN_P2P_NETWORK_TIMEOUT)
             next_chan.save_remote_scid_alias(self._scid_alias_of_node(next_peer.pubkey))
-            self.logger.info(f'JIT channel is open')
+            self.logger.info(f'JIT channel is open (funding not broadcasted yet)')
             next_amount_msat_htlc -= channel_opening_fee
             # fixme: some checks are missing
             htlc = next_peer.send_htlc(
@@ -1209,16 +1209,33 @@ class LNWallet(LNWorker):
             async def wait_for_preimage():
                 while self.get_preimage(payment_hash) is None:
                     await asyncio.sleep(1)
-            await util.wait_for2(wait_for_preimage(), LN_P2P_NETWORK_TIMEOUT)
+            try:
+                await util.wait_for2(wait_for_preimage(), LN_P2P_NETWORK_TIMEOUT)
+            except asyncio.TimeoutError:
+                await self.close_failed_jit_channel(next_chan)
+                raise
         except OnionRoutingFailure:
             raise
         except Exception:
             raise OnionRoutingFailure(code=OnionFailureCode.TEMPORARY_NODE_FAILURE, data=b'')
         # We have been paid and can broadcast
-        # todo: if broadcasting raise an exception, we should try to rebroadcast
-        await self.network.broadcast_transaction(funding_tx)
+        if not await self.network.try_broadcasting(funding_tx, 'jit_channel_open'):
+            await asyncio.sleep(10)  # retry once
+            await self.network.try_broadcasting(funding_tx, 'jit_channel_open')
         htlc_key = serialize_htlc_key(next_chan.get_scid_or_local_alias(), htlc.htlc_id)
         return htlc_key
+
+    async def close_failed_jit_channel(self, chan: Channel):
+        """Closes a channel that has no published funding tx (e.g. in case of a failed jit open)"""
+        self.logger.info(f"jit opening didn't get preimage, removing chan {chan.get_id_for_log()} again")
+        try:
+            # going through the closing flow, to signal the peer that the channel is dead
+            await self.close_channel(chan.channel_id)
+        except Exception:
+            self.logger.debug(f"chan close to failed zeroconf peer failed ", exc_info=True)
+        chan.set_state(ChannelState.REDEEMED, force=True)
+        await self.lnwatcher.unwatch_channel(chan.get_funding_address(), chan.funding_outpoint.to_str())
+        self.remove_channel(chan.channel_id)
 
     @log_exceptions
     async def open_channel_with_peer(
@@ -2117,6 +2134,10 @@ class LNWallet(LNWorker):
         invoice_features = self.features.for_invoice()
         if not self.uses_trampoline():
             invoice_features &= ~ LnFeatures.OPTION_TRAMPOLINE_ROUTING_OPT_ELECTRUM
+        if (self.config.ZEROCONF_TRUSTED_NODE
+                and (not amount_msat or self.num_sats_can_receive() < (amount_msat // 1000) * 1.1)):
+            # jit only works with single htlcs, mpp will cause LSP to open channels for each htlc
+            invoice_features &= ~ LnFeatures.BASIC_MPP_OPT & ~ LnFeatures.BASIC_MPP_REQ
         payment_secret = self.get_payment_secret(payment_hash)
         amount_btc = amount_msat/Decimal(COIN*1000) if amount_msat else None
         if expiry == 0:
@@ -2509,10 +2530,11 @@ class LNWallet(LNWorker):
         """calculate routing hints (BOLT-11 'r' field)"""
         routing_hints = []
         if self.config.ZEROCONF_TRUSTED_NODE:
+            self.logger.debug(f"adding zeroconf routing hint for {self.config.ZEROCONF_TRUSTED_NODE}")
             node_id, rest = extract_nodeid(self.config.ZEROCONF_TRUSTED_NODE)
             alias_or_scid = self.get_scid_alias()
             routing_hints.append(('r', [(node_id, alias_or_scid, 0, 0, 144)]))
-            # no need for more
+            # no need for more  # TODO: why?
             channels = []
         else:
             if channels is None:
