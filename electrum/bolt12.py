@@ -493,6 +493,9 @@ def to_lnaddr(data: BOLT12Invoice) -> BOLT11Addr:
     net = constants.net
     addr = BOLT11Addr()
 
+    # NOTE: CLN puts the real node_id here, which defeats the whole purpose of blinded paths
+    # also, this should not be used as routing destination in payments (introduction point in set of blinded paths
+    # must be used instead
     pubkey = data.invoice_node_id
 
     class WrappedBytesKey:
