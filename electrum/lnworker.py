@@ -1058,7 +1058,7 @@ class LNWallet(LNWorker):
         balance_msat = sum([x.amount_msat for x in out.values()])
         lb = sum(chan.balance(LOCAL) if not chan.is_closed() else 0
                 for chan in self.channels.values())
-        assert balance_msat  == lb
+        assert balance_msat  == lb, f"balance_msat: {balance_msat} != lb: {lb}"
         return out
 
     def get_groups_for_onchain_history(self) -> Dict[str, str]:
@@ -1212,6 +1212,8 @@ class LNWallet(LNWorker):
             try:
                 await util.wait_for2(wait_for_preimage(), LN_P2P_NETWORK_TIMEOUT)
             except asyncio.TimeoutError:
+                self.logger.info(
+                    f"jit opening didn't get preimage, removing chan {next_chan.get_id_for_log()} again")
                 await self.close_failed_jit_channel(next_chan)
                 raise
         except OnionRoutingFailure:
@@ -1220,19 +1222,19 @@ class LNWallet(LNWorker):
             raise OnionRoutingFailure(code=OnionFailureCode.TEMPORARY_NODE_FAILURE, data=b'')
         # We have been paid and can broadcast
         if not await self.network.try_broadcasting(funding_tx, 'jit_channel_open'):
-            await asyncio.sleep(10)  # retry once
-            await self.network.try_broadcasting(funding_tx, 'jit_channel_open')
+            self.logger.debug(f"something went wrong with the jit funding tx, we close again")
+            await self.close_failed_jit_channel(next_chan)
+            raise OnionRoutingFailure(code=OnionFailureCode.TEMPORARY_NODE_FAILURE, data=b'')
         htlc_key = serialize_htlc_key(next_chan.get_scid_or_local_alias(), htlc.htlc_id)
         return htlc_key
 
     async def close_failed_jit_channel(self, chan: Channel):
         """Closes a channel that has no published funding tx (e.g. in case of a failed jit open)"""
-        self.logger.info(f"jit opening didn't get preimage, removing chan {chan.get_id_for_log()} again")
         try:
-            # going through the closing flow, to signal the peer that the channel is dead
-            await self.close_channel(chan.channel_id)
+            # try to send shutdown to signal peer that channel is dead
+            await util.wait_for2(self.close_channel(chan.channel_id), LN_P2P_NETWORK_TIMEOUT)
         except Exception:
-            self.logger.debug(f"chan close to failed zeroconf peer failed ", exc_info=True)
+            self.logger.debug(f"chan shutdown to failed zeroconf peer failed ", exc_info=True)
         chan.set_state(ChannelState.REDEEMED, force=True)
         await self.lnwatcher.unwatch_channel(chan.get_funding_address(), chan.funding_outpoint.to_str())
         self.remove_channel(chan.channel_id)
@@ -2346,6 +2348,7 @@ class LNWallet(LNWorker):
                 self.maybe_cleanup_forwarding(payment_key_hex)
 
     def maybe_cleanup_forwarding(self, payment_key_hex: str) -> None:
+        self.logger.debug(f"maybe_cleanup_forwarding {payment_key_hex}")
         self.active_forwardings.pop(payment_key_hex, None)
         self.forwarding_failures.pop(payment_key_hex, None)
 

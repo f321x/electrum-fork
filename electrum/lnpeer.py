@@ -963,6 +963,7 @@ class Peer(Logger, EventListener):
         )
         chan.storage['funding_inputs'] = [txin.prevout.to_json() for txin in funding_tx.inputs()]
         chan.storage['has_onchain_backup'] = has_onchain_backup
+        chan.storage['init_timestamp'] = int(time.time())
         if isinstance(self.transport, LNTransport):
             chan.add_or_update_peer_addr(self.transport.peer_addr)
         sig_64, _ = chan.sign_next_commitment()
@@ -1023,9 +1024,9 @@ class Peer(Logger, EventListener):
 
         Channel configurations are initialized in this method.
         """
-        if self.lnworker.has_recoverable_channels():
-            # FIXME: we might want to keep the connection open
-            raise Exception('not accepting channels')
+        # if self.lnworker.has_recoverable_channels():
+        #     FIXME: we might want to keep the connection open
+            # raise Exception('not accepting channels')
         # <- open_channel
         if payload['chain_hash'] != constants.net.rev_genesis_bytes():
             raise Exception('wrong chain_hash')
@@ -2529,9 +2530,6 @@ class Peer(Logger, EventListener):
     async def _shutdown(self, chan: Channel, payload, *, is_local: bool):
         # wait until no HTLCs remain in either commitment transaction
         while chan.has_unsettled_htlcs():
-            if chan.is_zeroconf() and chan.hm.ctn_latest(REMOTE if is_local else LOCAL) <= 1:
-                # is unused zeroconf chan (at most 1 htlc from the jit ceremony)
-                break
             self.logger.info(f'(chan: {chan.short_channel_id}) waiting for htlcs to settle...')
             await asyncio.sleep(1)
         # if no HTLCs remain, we must not send updates
@@ -2855,9 +2853,12 @@ class Peer(Logger, EventListener):
                     async def wrapped_callback():
                         forwarding_coro = forwarding_callback()
                         try:
+                            self.logger.debug(f"in wrapper payment key: {payment_key}")
                             next_htlc = await forwarding_coro
+                            self.logger.debug(f"in wrapper payment key after coro: {payment_key}")
                             if next_htlc:
                                 htlc_key = serialize_htlc_key(chan.get_scid_or_local_alias(), htlc.htlc_id)
+                                self.logger.debug(f"htlc key: {htlc_key}")
                                 self.lnworker.active_forwardings[payment_key].append(next_htlc)
                                 self.lnworker.downstream_to_upstream_htlc[next_htlc] = htlc_key
                         except OnionRoutingFailure as e:
@@ -2874,6 +2875,7 @@ class Peer(Logger, EventListener):
                         #        - type2, such as TxBroadcastError, that signals we want to retry the callback
                     # add to list
                     assert len(self.lnworker.active_forwardings.get(payment_key, [])) == 0
+                    self.logger.debug(f"inserting active_forwardings for {payment_key}")
                     self.lnworker.active_forwardings[payment_key] = []
                     fut = asyncio.ensure_future(wrapped_callback())
                 # return payment_key so this branch will not be executed again
