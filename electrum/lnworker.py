@@ -1152,7 +1152,7 @@ class LNWallet(LNWorker):
                 self.logger.info('REBROADCASTING CLOSING TX')
                 await self.network.try_broadcasting(force_close_tx, 'force-close')
 
-    def get_peer_by_scid_alias(self, scid_alias: bytes) -> Optional[Peer]:
+    def get_peer_by_static_jit_scid_alias(self, scid_alias: bytes) -> Optional[Peer]:
         for nodeid, peer in self.peers.items():
             if scid_alias == self._scid_alias_of_node(nodeid):
                 return peer
@@ -1161,7 +1161,7 @@ class LNWallet(LNWorker):
         # scid alias for just-in-time channels
         return sha256(b'Electrum' + nodeid)[0:8]
 
-    def get_scid_alias(self) -> bytes:
+    def get_static_jit_scid_alias(self) -> bytes:
         return self._scid_alias_of_node(self.node_keypair.pubkey)
 
     @log_exceptions
@@ -1196,7 +1196,6 @@ class LNWallet(LNWorker):
                 while not next_chan.is_open():
                     await asyncio.sleep(1)
             await util.wait_for2(wait_for_channel(), LN_P2P_NETWORK_TIMEOUT)
-            next_chan.save_remote_scid_alias(self._scid_alias_of_node(next_peer.pubkey))
             self.logger.info(f'JIT channel is open (funding not broadcasted yet)')
             next_amount_msat_htlc -= channel_opening_fee
             # fixme: some checks are missing
@@ -1214,7 +1213,7 @@ class LNWallet(LNWorker):
             except asyncio.TimeoutError:
                 self.logger.info(
                     f"jit opening didn't get preimage, removing chan {next_chan.get_id_for_log()} again")
-                await self.close_failed_jit_channel(next_chan)
+                await self.cleanup_failed_jit_channel(next_chan)
                 raise
         except OnionRoutingFailure:
             raise
@@ -1223,12 +1222,13 @@ class LNWallet(LNWorker):
         # We have been paid and can broadcast
         if not await self.network.try_broadcasting(funding_tx, 'jit_channel_open'):
             self.logger.debug(f"something went wrong with the jit funding tx, we close again")
-            await self.close_failed_jit_channel(next_chan)
+            # TODO: how to handle broadcast error, could be use who built invalid tx or server lying to us
+            await self.cleanup_failed_jit_channel(next_chan)
             raise OnionRoutingFailure(code=OnionFailureCode.TEMPORARY_NODE_FAILURE, data=b'')
         htlc_key = serialize_htlc_key(next_chan.get_scid_or_local_alias(), htlc.htlc_id)
         return htlc_key
 
-    async def close_failed_jit_channel(self, chan: Channel):
+    async def cleanup_failed_jit_channel(self, chan: Channel):
         """Closes a channel that has no published funding tx (e.g. in case of a failed jit open)"""
         try:
             # try to send shutdown to signal peer that channel is dead
@@ -2131,13 +2131,13 @@ class LNWallet(LNWorker):
 
         assert amount_msat is None or amount_msat > 0
         timestamp = int(time.time())
-        routing_hints = self.calc_routing_hints_for_invoice(amount_msat, channels=channels)
+        needs_jit: bool = self._receive_requires_jit_channel(amount_msat)
+        routing_hints = self.calc_routing_hints_for_invoice(amount_msat, channels=channels, needs_jit=needs_jit)
         self.logger.info(f"creating bolt11 invoice with routing_hints: {routing_hints}")
         invoice_features = self.features.for_invoice()
         if not self.uses_trampoline():
             invoice_features &= ~ LnFeatures.OPTION_TRAMPOLINE_ROUTING_OPT_ELECTRUM
-        if (self.config.ZEROCONF_TRUSTED_NODE
-                and (not amount_msat or self.num_sats_can_receive() < (amount_msat // 1000) * 1.1)):
+        if needs_jit:
             # jit only works with single htlcs, mpp will cause LSP to open channels for each htlc
             invoice_features &= ~ LnFeatures.BASIC_MPP_OPT & ~ LnFeatures.BASIC_MPP_REQ
         payment_secret = self.get_payment_secret(payment_hash)
@@ -2348,7 +2348,6 @@ class LNWallet(LNWorker):
                 self.maybe_cleanup_forwarding(payment_key_hex)
 
     def maybe_cleanup_forwarding(self, payment_key_hex: str) -> None:
-        self.logger.debug(f"maybe_cleanup_forwarding {payment_key_hex}")
         self.active_forwardings.pop(payment_key_hex, None)
         self.forwarding_failures.pop(payment_key_hex, None)
 
@@ -2529,15 +2528,15 @@ class LNWallet(LNWorker):
             else:
                 self.logger.info(f"waiting for other htlcs to fail (phash={payment_hash.hex()})")
 
-    def calc_routing_hints_for_invoice(self, amount_msat: Optional[int], channels=None):
+    def calc_routing_hints_for_invoice(self, amount_msat: Optional[int], channels=None, needs_jit=False):
         """calculate routing hints (BOLT-11 'r' field)"""
         routing_hints = []
-        if self.config.ZEROCONF_TRUSTED_NODE:
+        if needs_jit:
             self.logger.debug(f"adding zeroconf routing hint for {self.config.ZEROCONF_TRUSTED_NODE}")
             node_id, rest = extract_nodeid(self.config.ZEROCONF_TRUSTED_NODE)
-            alias_or_scid = self.get_scid_alias()
+            alias_or_scid = self.get_static_jit_scid_alias()
             routing_hints.append(('r', [(node_id, alias_or_scid, 0, 0, 144)]))
-            # no need for more  # TODO: why?
+            # no need for more because we cannot receive enough through the others and mpp is disabled for jit
             channels = []
         else:
             if channels is None:
@@ -2689,6 +2688,16 @@ class LNWallet(LNWorker):
             return Decimal(0)
         can_receive_msat = max(recv_chan_msats)
         return Decimal(can_receive_msat) / 1000
+
+    def _receive_requires_jit_channel(self, amount_msat: Optional[int]) -> bool:
+        """Returns true if we cannot receive the amount and have set up a trusted LSP node.
+        Cannot work reliably with 0 amount invoices as we don't know if we are able to receive it.
+        """
+        if (self.config.ZEROCONF_TRUSTED_NODE
+            and (amount_msat and self.num_sats_can_receive() < (amount_msat // 1000) * 1.05)
+            or (not amount_msat and self.num_sats_can_receive() < 1)):
+            return True
+        return False
 
     def _suggest_channels_for_rebalance(self, direction, amount_sat) -> Sequence[Tuple[Channel, int]]:
         """

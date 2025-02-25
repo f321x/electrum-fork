@@ -1871,7 +1871,7 @@ class Peer(Logger, EventListener):
         next_chan = self.lnworker.get_channel_by_short_id(next_chan_scid)
 
         if self.lnworker.features.supports(LnFeatures.OPTION_ZEROCONF_OPT):
-            next_peer = self.lnworker.get_peer_by_scid_alias(next_chan_scid)
+            next_peer = self.lnworker.get_peer_by_static_jit_scid_alias(next_chan_scid)
         else:
             next_peer = None
 
@@ -2853,12 +2853,12 @@ class Peer(Logger, EventListener):
                     async def wrapped_callback():
                         forwarding_coro = forwarding_callback()
                         try:
-                            self.logger.debug(f"in wrapper payment key: {payment_key}")
                             next_htlc = await forwarding_coro
                             self.logger.debug(f"in wrapper payment key after coro: {payment_key}")
-                            if next_htlc:
+                            if next_htlc and payment_key in self.lnworker.active_forwardings:
+                                # if forwarding_coro is slow it can happen that the upstream htlc has already
+                                # been resolved too and payment_key has been removed from active_forwardings already
                                 htlc_key = serialize_htlc_key(chan.get_scid_or_local_alias(), htlc.htlc_id)
-                                self.logger.debug(f"htlc key: {htlc_key}")
                                 self.lnworker.active_forwardings[payment_key].append(next_htlc)
                                 self.lnworker.downstream_to_upstream_htlc[next_htlc] = htlc_key
                         except OnionRoutingFailure as e:
@@ -2875,7 +2875,6 @@ class Peer(Logger, EventListener):
                         #        - type2, such as TxBroadcastError, that signals we want to retry the callback
                     # add to list
                     assert len(self.lnworker.active_forwardings.get(payment_key, [])) == 0
-                    self.logger.debug(f"inserting active_forwardings for {payment_key}")
                     self.lnworker.active_forwardings[payment_key] = []
                     fut = asyncio.ensure_future(wrapped_callback())
                 # return payment_key so this branch will not be executed again
