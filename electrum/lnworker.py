@@ -1227,7 +1227,8 @@ class LNWallet(LNWorker):
             public: bool = False,
             zeroconf: bool = False,
             opening_fee: int = None,
-            password=None):
+            password=None,
+            freeze_inputs: bool = False):
         if self.config.ENABLE_ANCHOR_CHANNELS:
             self.wallet.unlock(password)
         coins = self.wallet.get_spendable_coins(None)
@@ -1237,15 +1238,22 @@ class LNWallet(LNWorker):
             funding_sat=funding_sat,
             node_id=node_id,
             fee_est=None)
-        chan, funding_tx = await self._open_channel_coroutine(
-            peer=peer,
-            funding_tx=funding_tx,
-            funding_sat=funding_sat,
-            push_sat=push_sat,
-            public=public,
-            zeroconf=zeroconf,
-            opening_fee=opening_fee,
-            password=password)
+        if freeze_inputs:
+            self.wallet.set_frozen_state_of_tx_inputs(funding_tx, freeze=True)
+        try:
+            chan, funding_tx = await self._open_channel_coroutine(
+                peer=peer,
+                funding_tx=funding_tx,
+                funding_sat=funding_sat,
+                push_sat=push_sat,
+                public=public,
+                zeroconf=zeroconf,
+                opening_fee=opening_fee,
+                password=password)
+        except Exception:
+            if freeze_inputs:
+                self.wallet.set_frozen_state_of_tx_inputs(funding_tx, freeze=False)
+            raise
         return chan, funding_tx
 
     @log_exceptions
