@@ -2674,7 +2674,7 @@ class LNWallet(LNWorker):
         Cannot work reliably with 0 amount invoices as we don't know if we are able to receive it.
         """
         if (self.config.ZEROCONF_TRUSTED_NODE
-                and (amount_msat and self.num_sats_can_receive() < (amount_msat // 1000) * 1.05)
+                and (amount_msat and self.num_sats_can_receive() < (amount_msat // 1000))
                 or (not amount_msat and self.num_sats_can_receive() < 1)):
             return True
         return False
