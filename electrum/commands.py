@@ -868,7 +868,7 @@ class Commands(Logger):
             except transaction.SerializationError as e:
                 raise UserFacingException(f"Failed to deserialize transaction: {e}") from e
         domain_coins = from_coins.split(',') if from_coins else None
-        coins = wallet.get_spendable_coins(None)
+        coins = wallet.get_spendable_coins(None, nonlocal_only=True)
         if domain_coins is not None:
             coins = [coin for coin in coins if (coin.prevout.to_str() in domain_coins)]
         tx.add_info_from_wallet(wallet)

@@ -464,7 +464,7 @@ class QESwapHelper(AuthMixin, QObject, QtEventListener):
             self.valid = False
             return
         outputs = [PartialTxOutput.from_address_and_value(DummyAddress.SWAP, onchain_amount)]
-        coins = self._wallet.wallet.get_spendable_coins(None)
+        coins = self._wallet.wallet.get_spendable_coins(None, nonlocal_only=True)
         try:
             self._tx = self._wallet.wallet.make_unsigned_transaction(
                 coins=coins,
@@ -590,7 +590,7 @@ class QESwapHelper(AuthMixin, QObject, QtEventListener):
         if onchain_amount is None:
             raise InvalidSwapParameters("onchain_amount is None")
         # coins = self.window.get_coins()
-        coins = self._wallet.wallet.get_spendable_coins()
+        coins = self._wallet.wallet.get_spendable_coins(nonlocal_only=True)
         if onchain_amount == '!':
             max_amount = sum(c.value_sats() for c in coins)
             max_swap_amount = self._wallet.wallet.lnworker.swap_manager.max_amount_forward_swap()

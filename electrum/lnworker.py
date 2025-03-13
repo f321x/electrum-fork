@@ -1307,7 +1307,7 @@ class LNWallet(LNWorker):
             password=None):
         if self.config.ENABLE_ANCHOR_CHANNELS:
             self.wallet.unlock(password)
-        coins = self.wallet.get_spendable_coins(None)
+        coins = self.wallet.get_spendable_coins(None, nonlocal_only=True)
         node_id = peer.pubkey
         fee_policy = FeePolicy(self.config.FEE_POLICY)
         funding_tx = self.mktx_for_open_channel(

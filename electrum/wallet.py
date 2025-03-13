@@ -2184,7 +2184,7 @@ class Abstract_Wallet(ABC, Logger, EventListener):
             raise CannotBumpFee(_('Could not figure out which outputs to keep'))
 
         if coins is None:
-            coins = self.get_spendable_coins(None)
+            coins = self.get_spendable_coins(None, nonlocal_only=True)
         # make sure we don't try to spend output from the tx-to-be-replaced:
         coins = [c for c in coins
                  if c.prevout.txid.hex() not in self.adb.get_conflicting_transactions(tx, include_self=True)]
