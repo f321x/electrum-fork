@@ -26,8 +26,8 @@ from .bitcoin import (script_to_p2wsh, opcodes,
 from .transaction import PartialTxInput, PartialTxOutput, PartialTransaction, Transaction, TxInput, TxOutpoint
 from .transaction import script_GetOp, match_script_against_template, OPPushDataGeneric, OPPushDataPubkey
 from .util import (log_exceptions, ignore_exceptions, BelowDustLimit, OldTaskGroup, age, ca_path,
-                   gen_nostr_ann_pow, get_nostr_ann_pow_amount, make_aiohttp_proxy_connector, get_running_loop,
-                   get_asyncio_loop)
+                   gen_nostr_ann_pow, get_nostr_ann_pow_amount, make_aiohttp_proxy_connector,
+                   get_running_loop, get_asyncio_loop, EventListener, event_listener)
 from .lnutil import REDEEM_AFTER_DOUBLE_SPENT_DELAY
 from .bitcoin import dust_threshold, DummyAddress
 from .logging import Logger
@@ -1266,7 +1266,7 @@ class HttpTransport(SwapServerTransport):
         self.sm.update_pairs(pairs)
 
 
-class NostrTransport(SwapServerTransport):
+class NostrTransport(SwapServerTransport, EventListener):
     # uses nostr:
     #  - to advertise servers
     #  - for client-server RPCs (using DMs)
@@ -1333,6 +1333,14 @@ class NostrTransport(SwapServerTransport):
         await self.taskgroup.cancel_remaining()
         await self.relay_manager.close()
         self.logger.info("nostr transport shut down")
+
+    @event_listener
+    def on_event_proxy_set(self, *args):
+        async def restart_transport():
+            # ends the old main_loop and spawns a new one
+            await self.stop()
+            asyncio.run_coroutine_threadsafe(self.main_loop(), self.network.asyncio_loop)
+        asyncio.run_coroutine_threadsafe(restart_transport(), self.network.asyncio_loop)
 
     @property
     def relays(self):
