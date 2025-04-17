@@ -1915,14 +1915,14 @@ class LNWallet(LNWorker):
         else:
             return random.choice(list(hardcoded_trampoline_nodes().values())).pubkey
 
-    def suggest_splits(
+    def suggest_payment_splits(
         self,
         *,
         amount_msat: int,
         final_total_msat: int,
         my_active_channels: Sequence[Channel],
         invoice_features: LnFeatures,
-        r_tags,
+        r_tags: Sequence[Sequence[Sequence[Any]]],
     ) -> List['SplitConfigRating']:
         channels_with_funds = {
             (chan.channel_id, chan.node_id): int(chan.available_to_spend(HTLCOwner.LOCAL))
@@ -1947,19 +1947,14 @@ class LNWallet(LNWorker):
                         and amount_msat > self.MPP_SPLIT_PART_MINAMT_MSAT):
                     exclude_single_part_payments = True
 
-        def get_splits():
-            return suggest_splits(
-                amount_msat,
-                channels_with_funds,
-                exclude_single_part_payments=exclude_single_part_payments,
-                exclude_multinode_payments=exclude_multinode_payments,
-                exclude_single_channel_splits=exclude_single_channel_splits
-            )
+        split_configurations = suggest_splits(
+            amount_msat,
+            channels_with_funds,
+            exclude_single_part_payments=exclude_single_part_payments,
+            exclude_multinode_payments=exclude_multinode_payments,
+            exclude_single_channel_splits=exclude_single_channel_splits
+        )
 
-        split_configurations = get_splits()
-        if not split_configurations and exclude_single_part_payments:
-            exclude_single_part_payments = False
-            split_configurations = get_splits()
         self.logger.info(f'suggest_split {amount_msat} returned {len(split_configurations)} configurations')
         return split_configurations
 
@@ -1989,7 +1984,7 @@ class LNWallet(LNWorker):
                 chan.is_active() and not chan.is_frozen_for_sending()]
         # try random order
         random.shuffle(my_active_channels)
-        split_configurations = self.suggest_splits(
+        split_configurations = self.suggest_payment_splits(
             amount_msat=amount_msat,
             final_total_msat=paysession.amount_to_pay,
             my_active_channels=my_active_channels,
