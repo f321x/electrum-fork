@@ -1,0 +1,77 @@
+{
+    "active_forwardings": {},
+    "addr_history": {
+        "bc1q0avs3yx242pq9p5g5mm7lq9dt3pe8etyphc7ac": [],
+        "bc1q3g5tmkmlvxryhh843v4dz026avatc0zzr6h3af": [],
+        "bc1q6xwxcw6m9ga35687tnu5tstmsvmzjwdnzktemv": [],
+        "bc1q8h4mlc63a95vkjxeukq4xnjlz7m5q2ljfe4fug": [],
+        "bc1q9pzjpjq4nqx5ycnywekcmycqz0wjp2nq604y2n": [],
+        "bc1qdy94n2q5qcp0kg7v9yzwe6wvfkhnvyzje7nx2p": [],
+        "bc1qgl92qp6haea2ktxe93umzsyhv9z8u32xtvk3qk": [],
+        "bc1qjqeeeu8k749977slzpu8h79egn0l66lyt5p5uc": [],
+        "bc1qpxd3ph86x4ae3d4j5hsad5v87t2vgxz7gym54w": [],
+        "bc1qs27wjnwaaddqk6x35huzk5p9z306kcehzd4ajl": [],
+        "bc1qx0ktttafed5skep8jckajq0ttxccnp447h0y42": [],
+        "bc1qy68upw7fdx294c64vyrvkwkv7pvlld8tx6srym": []
+    },
+    "addresses": {
+        "change": [
+            "bc1qdy94n2q5qcp0kg7v9yzwe6wvfkhnvyzje7nx2p",
+            "bc1q6xwxcw6m9ga35687tnu5tstmsvmzjwdnzktemv",
+            "bc1qgl92qp6haea2ktxe93umzsyhv9z8u32xtvk3qk",
+            "bc1q0avs3yx242pq9p5g5mm7lq9dt3pe8etyphc7ac",
+            "bc1qpxd3ph86x4ae3d4j5hsad5v87t2vgxz7gym54w",
+            "bc1qjqeeeu8k749977slzpu8h79egn0l66lyt5p5uc",
+            "bc1q8h4mlc63a95vkjxeukq4xnjlz7m5q2ljfe4fug",
+            "bc1qy68upw7fdx294c64vyrvkwkv7pvlld8tx6srym",
+            "bc1qx0ktttafed5skep8jckajq0ttxccnp447h0y42",
+            "bc1qs27wjnwaaddqk6x35huzk5p9z306kcehzd4ajl"
+        ],
+        "receiving": [
+            "bc1q3g5tmkmlvxryhh843v4dz026avatc0zzr6h3af",
+            "bc1q9pzjpjq4nqx5ycnywekcmycqz0wjp2nq604y2n"
+        ]
+    },
+    "channels": {},
+    "db_metadata": {
+        "creation_timestamp": 1745577562,
+        "first_electrum_version_used": "4.5.8"
+    },
+    "dont_settle_htlcs": {},
+    "fiat_value": {},
+    "forwarding_failures": {},
+    "frozen_coins": {},
+    "gap_limit": 2,
+    "imported_channel_backups": {},
+    "invoices": {},
+    "keystore": {
+        "derivation": "m/0h",
+        "pw_hash_version": 1,
+        "root_fingerprint": "b2e35a7d",
+        "seed": "bitter grass shiver impose acquire brush forget axis eager alone wine silver",
+        "seed_type": "segwit",
+        "type": "bip32",
+        "xprv": "zprvAZswDvNeJeha8qZ8g7efN3FXYVJLaEUsE9TW6qXDEbVe74AZ75c2sZFZXPNFzxnhChDQ89oC8C5AjWwHmH1HeRKE1c4kKBQAmjUDdKDUZw2",
+        "xpub": "zpub6nsHdRuY92FsMKdbn9BfjBCG6X8pyhCibNP6uDvpnw2cyrVhecvHRMa3Ne8kdJZxjxgwnpbHLkcR4bfnhHy6auHPJyDTQ3kianeuVLdkCYQ"
+    },
+    "labels": {},
+    "lightning_payments": {},
+    "lightning_preimages": {},
+    "lightning_xprv": "zprvAabC4ncjU4qVMNbpYZ5G4XqmKJoJN3EA4TVCodaPwyvEatrZpVYmWVHfKwS1fdq2uCdPyCmbjAjQ5FzeqHFSGv9KUmUFptTMAcyKzHiUM6Q",
+    "num_parents": {},
+    "onchain_channel_backups": {},
+    "payment_requests": {},
+    "prevouts_by_scripthash": {},
+    "received_mpp_htlcs": {},
+    "seed_version": 60,
+    "spent_outpoints": {},
+    "submarine_swaps": {},
+    "transactions": {},
+    "tx_batches": {},
+    "tx_fees": {},
+    "txi": {},
+    "txo": {},
+    "use_encryption": false,
+    "verified_tx3": {},
+    "wallet_type": "standard"
+}
