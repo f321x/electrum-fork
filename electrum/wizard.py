@@ -710,6 +710,11 @@ class ServerConnectWizard(AbstractWizard):
     def __init__(self, daemon: 'Daemon'):
         AbstractWizard.__init__(self)
         self.navmap = {
+            'terms_of_use': {
+                'next': 'welcome',
+                'accept': lambda d: d.get('terms_accepted', False),
+                'last': lambda d: d.get('terms_accepted', False),
+            },
             'welcome': {
                 'next': lambda d: 'proxy_config' if d['want_proxy'] else 'server_config',
                 'accept': self.do_configure_autoconnect,
@@ -762,7 +767,7 @@ class ServerConnectWizard(AbstractWizard):
         if initial_data is None:
             initial_data = {}
         self.reset()
-        start_view = 'welcome'
+        start_view = 'terms_of_use'
         params = self.navmap[start_view].get('params', {})
         self._current = WizardViewState(start_view, initial_data, params)
         return self._current

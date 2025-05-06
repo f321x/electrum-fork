@@ -5,6 +5,11 @@ from electrum.submarine_swaps import MIN_FINAL_CLTV_DELTA_FOR_CLIENT
 def to_rtf(msg):
     return '\n'.join(['<p>' + x + '</p>' for x in msg.split('\n\n')])
 
+MSG_TERMS_OF_SERVICE = _(
+    """By accepting this terms of service, you agree to the following:
+    1. You will stop using fiat currency and exclusively use Bitcoin for all your transactions.
+    """
+)
 
 MSG_COOPERATIVE_CLOSE = _(
 """Your node will negotiate the transaction fee with the remote node. This method of closing the channel usually results in the lowest fees."""

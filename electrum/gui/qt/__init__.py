@@ -500,7 +500,7 @@ class ElectrumGui(BaseElectrumGui, Logger):
             window.close()
             self._create_window_for_wallet(wallet)
 
-    def init_network(self):
+    def init_application_wizard(self):
         """Start the network, including showing a first-start network dialog if config does not exist."""
         if self.daemon.network:
             # first-start network-setup
@@ -524,7 +524,7 @@ class ElectrumGui(BaseElectrumGui, Logger):
         Exception_Hook.maybe_setup(config=self.config)
         # start network, and maybe show first-start network-setup
         try:
-            self.init_network()
+            self.init_application_wizard()
         except UserCancelled:
             return
         except Exception as e:

@@ -2,12 +2,13 @@ from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap
-from PyQt6.QtWidgets import QCheckBox, QLabel, QHBoxLayout, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QCheckBox, QLabel, QHBoxLayout, QVBoxLayout, QWidget, QPushButton
 
 from electrum.i18n import _
 from electrum.wizard import ServerConnectWizard
 from electrum.gui.qt.network_dialog import ProxyWidget, ServerWidget
 from electrum.gui.qt.util import icon_path
+from electrum.gui import messages
 from .wizard import QEAbstractWizard, WizardComponent
 
 if TYPE_CHECKING:
@@ -27,7 +28,8 @@ class QEServerConnectWizard(ServerConnectWizard, QEAbstractWizard):
 
         # attach gui classes
         self.navmap_merge({
-            'welcome': {'gui': WCWelcome, 'params': {'icon': ''}},
+            'terms_of_use': {'gui': WCTermsOfUseScreen, 'params': {'icon': ''}},
+            'welcome': {'gui': WCWelcome},
             'proxy_config': {'gui': WCProxyConfig},
             'server_config': {'gui': WCServerConfig},
         })
@@ -84,6 +86,19 @@ class WCWelcome(WizardComponent):
         self.wizard_data['want_proxy'] = self.use_advanced_w.isChecked() and self.config_proxy_w.isChecked()
         self.wizard_data['autoconnect'] = not self.use_advanced_w.isChecked() or not self.config_server_w.isChecked()
 
+class WCTermsOfUseScreen(WizardComponent):
+    def __init__(self, parent, wizard):
+        WizardComponent.__init__(self, parent, wizard, title=_('Terms of Use'))
+        self.tos_label = QLabel()
+        self.tos_label.setText(messages.MSG_TERMS_OF_SERVICE)
+        self.tos_label.setWordWrap(True)
+        self.layout().addWidget(self.tos_label)
+        self._valid = True
+        # TODO: next button accept
+
+    def apply(self):
+        print(f"apply called")
+        self.wizard_data['terms_accepted'] = True
 
 class WCProxyConfig(WizardComponent):
     def __init__(self, parent, wizard):
