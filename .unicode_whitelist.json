@@ -1,0 +1,170 @@
+{
+  "./SECURITY.md": [
+    "2019"
+  ],
+  "./contrib/android/Readme.md": [
+    "2713"
+  ],
+  "./contrib/build-linux/appimage/README.md": [
+    "2713"
+  ],
+  "./contrib/build-linux/sdist/README.md": [
+    "2713"
+  ],
+  "./contrib/build-wine/README.md": [
+    "2713",
+    "2122"
+  ],
+  "./contrib/build_tools_util.sh": [
+    "1f4ac",
+    "1f5ef",
+    "26a0",
+    "fe0f"
+  ],
+  "./contrib/osx/README.md": [
+    "2713"
+  ],
+  "./electrum/gui/fonts/PTMono.LICENSE": [
+    "feff"
+  ],
+  "./electrum/gui/icons/status_waiting.svg": [
+    "e1"
+  ],
+  "./electrum/gui/qml/components/controls/ToggleLabel.qml": [
+    "25b7",
+    "25bd"
+  ],
+  "./electrum/gui/qt/transaction_dialog.py": [
+    "2248",
+    "2026",
+    "2588"
+  ],
+  "./electrum/gui/qt/utxo_dialog.py": [
+    "2514",
+    "2500",
+    "251c",
+    "2502"
+  ],
+  "./electrum/gui/qt/utxo_list.py": [
+    "2026"
+  ],
+  "./electrum/i18n.py": [
+    "e9"
+  ],
+  "./electrum/lnwatcher.py": [
+    "e9"
+  ],
+  "./electrum/plugins/timelock_recovery/qt.py": [
+    "2022"
+  ],
+  "./tests/test_lntransport.py": [
+    "e6"
+  ],
+  "./tests/test_mnemonic.py": [
+    "306a",
+    "306e",
+    "304b",
+    "3072",
+    "308d",
+    "3044",
+    "3057",
+    "3093",
+    "307e",
+    "3075",
+    "3099",
+    "3064",
+    "3059",
+    "3055",
+    "304a",
+    "3083",
+    "308c",
+    "308f",
+    "304f",
+    "3051",
+    "308b",
+    "304d",
+    "3068",
+    "3046",
+    "305f",
+    "773c",
+    "60b2",
+    "53db",
+    "6539",
+    "8282",
+    "8dc3",
+    "8861",
+    "54cd",
+    "7586",
+    "80a1",
+    "9042",
+    "51ac",
+    "7ed9",
+    "6211",
+    "4e00",
+    "4e9b",
+    "6d4b",
+    "8bd5",
+    "5411",
+    "91cf",
+    "8c37",
+    "6b4c",
+    "301",
+    "303",
+    "f1",
+    "e1",
+    "3000",
+    "3061",
+    "305d",
+    "3053",
+    "307b",
+    "3066",
+    "306f",
+    "3088",
+    "3042"
+  ],
+  "./tests/test_util.py": [
+    "ac",
+    "20bf",
+    "1f600",
+    "1f608"
+  ],
+  "./tests/test_wallet_vertical.py": [
+    "20bf",
+    "1f600",
+    "1f608",
+    "3046",
+    "3051",
+    "305f",
+    "307e",
+    "308f",
+    "308b",
+    "362",
+    "35d",
+    "361",
+    "338",
+    "335",
+    "35f",
+    "334",
+    "358",
+    "1eb",
+    "31b",
+    "300",
+    "301",
+    "1e29",
+    "489",
+    "321",
+    "327",
+    "315",
+    "34f",
+    "336",
+    "360",
+    "12f",
+    "337",
+    "35c",
+    "322",
+    "328",
+    "f2",
+    "ed",
+    "35e"
+  ]
+}
