@@ -6,6 +6,7 @@ import platform
 import queue
 import os
 import webbrowser
+import ctypes
 from functools import partial, lru_cache, wraps
 from typing import (NamedTuple, Callable, Optional, TYPE_CHECKING, List, Any, Sequence, Tuple, Union)
 
@@ -27,12 +28,12 @@ from electrum.invoices import (PR_UNPAID, PR_PAID, PR_EXPIRED, PR_INFLIGHT, PR_U
 from electrum.qrreader import MissingQrDetectionLib, QrCodeResult
 
 from electrum.gui.common_qt.util import TaskThread
+from electrum.simple_config import SimpleConfig
 
 if TYPE_CHECKING:
     from .main_window import ElectrumWindow
     from .paytoedit import PayToEdit
 
-    from electrum.simple_config import SimpleConfig
     from electrum.simple_config import ConfigVarWithConfig
 
 
@@ -406,6 +407,10 @@ class WindowModalDialog(QDialog, MessageBoxMixin):
         self.setWindowModality(Qt.WindowModality.WindowModal)
         if title:
             self.setWindowTitle(title)
+
+        if hasattr(parent, 'config') and isinstance(parent.config, SimpleConfig):
+            if parent.config.GUI_QT_SCREENSHOT_PROTECTION:
+                set_windows_os_screenshot_protection_drm_flag(self)
 
 
 class WaitingDialog(WindowModalDialog):
@@ -1530,6 +1535,20 @@ def insert_spaces(text: str, every_chars: int) -> str:
     '''Insert spaces at every Nth character to allow for WordWrap'''
     return ' '.join(text[i:i+every_chars] for i in range(0, len(text), every_chars))
 
+
+def set_windows_os_screenshot_protection_drm_flag(window: QWidget) -> None:
+    """
+    sets the windows WDA_EXCLUDEFROMCAPTURE flag on the window so windows prevents capturing
+    screenshots and microsoft recall will not be able to record the window
+    https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowdisplayaffinity
+    """
+    if sys.platform not in ('win32', 'windows'):
+        return
+    try:
+        window_id = int(window.winId())
+        ctypes.windll.user32.SetWindowDisplayAffinity(window_id, 11)
+    except Exception:
+        _logger.exception(f"failed to set windows screenshot protection flag")
 
 class _ABCQObjectMeta(type(QObject), ABCMeta): pass
 class _ABCQWidgetMeta(type(QWidget), ABCMeta): pass

@@ -29,7 +29,8 @@ from electrum.gui.qt.bip39_recovery_dialog import Bip39RecoveryDialog
 from electrum.gui.qt.password_dialog import PasswordLayout, PW_NEW, MSG_ENTER_PASSWORD, PasswordLayoutForHW
 from electrum.gui.qt.seed_dialog import SeedWidget, MSG_PASSPHRASE_WARN_ISSUE4566, KeysWidget
 from electrum.gui.qt.util import (PasswordLineEdit, char_width_in_lineedit, WWLabel, InfoButton, font_height,
-                                  ChoiceWidget, MessageBoxMixin, icon_path, IconLabel, read_QIcon)
+                                  ChoiceWidget, MessageBoxMixin, icon_path, IconLabel, read_QIcon,
+                                  set_windows_os_screenshot_protection_drm_flag)
 from electrum.gui.qt.plugins_dialog import PluginsDialog
 
 if TYPE_CHECKING:
@@ -162,6 +163,9 @@ class QENewWalletWizard(NewWalletWizard, QEAbstractWizard, MessageBoxMixin):
                 'gui': WCEnterExt
             },
         })
+
+        if self.config.GUI_QT_SCREENSHOT_PROTECTION:
+            set_windows_os_screenshot_protection_drm_flag(self)
 
         run_hook('init_wallet_wizard', self)
 

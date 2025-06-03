@@ -90,7 +90,7 @@ from .util import (read_QIcon, ColorScheme, text_dialog, icon_path, WaitingDialo
                    filename_field, address_field, char_width_in_lineedit, webopen,
                    TRANSACTION_FILE_EXTENSION_FILTER_ANY, MONOSPACE_FONT,
                    getOpenFileName, getSaveFileName, ShowQRLineEdit, QtEventListener, qt_event_listener,
-                   event_listener, scan_qr_from_screenshot)
+                   event_listener, scan_qr_from_screenshot, set_windows_os_screenshot_protection_drm_flag)
 from .wizard.wallet import WIF_HELP_TEXT
 from .history_list import HistoryList, HistoryModel
 from .update_checker import UpdateCheck, UpdateCheckThread
@@ -308,6 +308,10 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, Logger, QtEventListener):
             self._update_check_thread = UpdateCheckThread()
             self._update_check_thread.checked.connect(on_version_received)
             self._update_check_thread.start()
+
+        if config.GUI_QT_SCREENSHOT_PROTECTION:
+            set_windows_os_screenshot_protection_drm_flag(self)
+
 
     def run_coroutine_dialog(self, coro, text):
         """ run coroutine in a waiting dialog, with a Cancel button that cancels the coroutine"""
