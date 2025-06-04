@@ -145,6 +145,7 @@ class ContactList(MyTreeView):
     def create_toolbar(self, config):
         toolbar, menu = self.create_toolbar_with_menu('')
         menu.addAction(_("&New contact"), self.main_window.new_contact_dialog)
-        menu.addAction(_("Import"), lambda: self.main_window.import_contacts())
+        menu.addAction(_("Import from file"), lambda: self.main_window.import_contacts())
+        menu.addAction(_("Import from Nostr"), lambda: self.main_window.import_contacts_from_nostr())
         menu.addAction(_("Export"), lambda: self.main_window.export_contacts())
         return toolbar

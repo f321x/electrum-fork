@@ -2534,6 +2534,26 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, Logger, QtEventListener):
     def export_contacts(self):
         export_meta_gui(self, _('contacts'), self.contacts.export_file)
 
+    def import_contacts_from_nostr(self):
+        d = WindowModalDialog(self, _("Import contacts from Nostr NPUB"))
+        vbox = QVBoxLayout(d)
+        vbox.addWidget(QLabel(_('Enter NPUB') + ':'))
+        npub_input = QLineEdit()
+        npub_input.setFixedWidth(32 * char_width_in_lineedit())
+        vbox.addWidget(npub_input)
+        vbox.addLayout(Buttons(CancelButton(d), OkButton(d)))
+        if d.exec():
+            def on_success(result):
+                pass
+
+            def on_failure(exc_info):
+                self.on_error(exc_info)
+
+            msg = _('Fetching contacts...')
+            task = lambda: self.network.run_from_another_thread(
+                self.contacts.fetch_nostr_contacts(npub_input, self.network)
+            )
+            WaitingDialog(self, msg, task, on_success, on_failure)
 
     def sweep_key_dialog(self):
         if not self.network:

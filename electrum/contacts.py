@@ -23,18 +23,23 @@
 import re
 from typing import Optional, Tuple, Dict, Any, TYPE_CHECKING
 import asyncio
+import ssl
 import dns
 from dns.exception import DNSException
+import electrum_aionostr as aionostr
+from electrum_aionostr.key import PrivateKey as NostrPrivateKey
 
 from . import bitcoin
 from . import dnssec
 from .util import read_json_file, write_json_file, to_string, is_valid_email
 from .logging import Logger, get_logger
-from .util import trigger_callback, get_asyncio_loop
+from .util import trigger_callback, get_asyncio_loop, make_aiohttp_proxy_connector, ca_path
 
 if TYPE_CHECKING:
     from .wallet_db import WalletDB
     from .simple_config import SimpleConfig
+    from .network import Network
+    from aiohttp_socks import ProxyConnector
 
 
 _logger = get_logger(__name__)
@@ -181,3 +186,28 @@ class Contacts(dict, Logger):
                     data.pop(k)
         return data
 
+    async def fetch_nostr_contacts(self, npub: str, network: 'Network') -> None:
+        ssl_context = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH, cafile=ca_path)
+        if network.proxy and network.proxy.enabled:
+            proxy = make_aiohttp_proxy_connector(network.proxy, ssl_context)
+        else:
+            proxy: Optional['ProxyConnector'] = None
+        manager_logger = self.logger.getChild('aionostr')
+        manager_logger.setLevel("INFO")  # set to INFO because DEBUG is very spammy
+        ephemeral_private_key = NostrPrivateKey().hex()
+        async with aionostr.Manager(
+                relays=network.config.NOSTR_RELAYS.split(','),
+                private_key=ephemeral_private_key,
+                ssl_context=ssl_context,
+                proxy=proxy,
+                log=manager_logger
+        ) as manager:
+            await manager.connect()
+            query = {
+                "kinds": [3],  # Follow list
+                # "limit": 100,
+                # "#p": [self.nostr_pubkey],
+                # "since": int(now() - self.KEEP_DELAY),
+            }
+            async for event in manager.get_events(query, single_event=False, only_stored=False):
+                pass
