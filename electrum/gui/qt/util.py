@@ -1538,7 +1538,7 @@ def insert_spaces(text: str, every_chars: int) -> str:
 
 def set_windows_os_screenshot_protection_drm_flag(window: QWidget) -> None:
     """
-    sets the windows WDA_EXCLUDEFROMCAPTURE flag on the window so windows prevents capturing
+    sets the windows WDA_MONITOR flag on the window so windows prevents capturing
     screenshots and microsoft recall will not be able to record the window
     https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowdisplayaffinity
     """
@@ -1546,7 +1546,8 @@ def set_windows_os_screenshot_protection_drm_flag(window: QWidget) -> None:
         return
     try:
         window_id = int(window.winId())
-        ctypes.windll.user32.SetWindowDisplayAffinity(window_id, 11)
+        WDA_MONITOR = 0x01
+        ctypes.windll.user32.SetWindowDisplayAffinity(window_id, WDA_MONITOR)
     except Exception:
         _logger.exception(f"failed to set windows screenshot protection flag")
 
