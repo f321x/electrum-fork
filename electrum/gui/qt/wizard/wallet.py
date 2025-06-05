@@ -164,9 +164,6 @@ class QENewWalletWizard(NewWalletWizard, QEAbstractWizard, MessageBoxMixin):
             },
         })
 
-        if self.config.GUI_QT_SCREENSHOT_PROTECTION:
-            set_windows_os_screenshot_protection_drm_flag(self)
-
         run_hook('init_wallet_wizard', self)
 
     @property

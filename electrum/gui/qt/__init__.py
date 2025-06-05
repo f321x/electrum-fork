@@ -111,7 +111,7 @@ class ScreenshotProtectionEventFilter(QObject):
 
     def eventFilter(self, obj, event):
         if event.type() == QtCore.QEvent.Type.Show:
-            if obj.isWindow():
+            if isinstance(obj, QWidget):
                 set_windows_os_screenshot_protection_drm_flag(obj)
         return False
 

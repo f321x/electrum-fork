@@ -408,9 +408,9 @@ class WindowModalDialog(QDialog, MessageBoxMixin):
         if title:
             self.setWindowTitle(title)
 
-        if hasattr(parent, 'config') and isinstance(parent.config, SimpleConfig):
-            if parent.config.GUI_QT_SCREENSHOT_PROTECTION:
-                set_windows_os_screenshot_protection_drm_flag(self)
+        # if hasattr(parent, 'config') and isinstance(parent.config, SimpleConfig):
+        #     if parent.config.GUI_QT_SCREENSHOT_PROTECTION:
+        #         set_windows_os_screenshot_protection_drm_flag(self)
 
 
 class WaitingDialog(WindowModalDialog):

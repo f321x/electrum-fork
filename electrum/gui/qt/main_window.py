@@ -309,9 +309,6 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, Logger, QtEventListener):
             self._update_check_thread.checked.connect(on_version_received)
             self._update_check_thread.start()
 
-        if config.GUI_QT_SCREENSHOT_PROTECTION:
-            set_windows_os_screenshot_protection_drm_flag(self)
-
 
     def run_coroutine_dialog(self, coro, text):
         """ run coroutine in a waiting dialog, with a Cancel button that cancels the coroutine"""
