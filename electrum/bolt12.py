@@ -38,7 +38,7 @@ from .bitcoin import COIN
 from .lnaddr import LnAddr
 from .lnmsg import OnionWireSerializer, batched
 from .onion_message import Timeout
-from .segwit_addr import bech32_decode, convertbits, INVALID_BECH32, CHARSET as BECH32_CHARSET
+from .segwit_addr import bech32_decode, bech32_encode, Encoding, convertbits, INVALID_BECH32, CHARSET as BECH32_CHARSET
 
 if TYPE_CHECKING:
     from .lnworker import LNWallet
@@ -63,6 +63,11 @@ def matches_our_chain(chains: bytes) -> bool:
     chains = list(batched(chains, 32))
     chain_hash = constants.net.rev_genesis_bytes()
     return tuple(chain_hash) in chains
+
+
+def bolt12_bytes_to_bech32(data: bytes, hrp: str = 'lni') -> str:
+    bech32_data = convertbits(list(data), 8, 5, True)
+    return bech32_encode(Encoding.BECH32, hrp, bech32_data, with_checksum=False)
 
 
 def bolt12_bech32_to_bytes(data: str) -> bytes:
