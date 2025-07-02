@@ -22,6 +22,17 @@ CACHEDIR="$CONTRIB_OSX/.cache"
 export DLL_TARGET_DIR="$CACHEDIR/dlls"
 PIP_CACHE_DIR="$CACHEDIR/pip_cache"
 
+### Install homebrew if not already installed
+if ! command -v brew &> /dev/null; then
+    info "Homebrew not found. Installing homebrew..."
+    NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || fail "Failed to install homebrew"
+    echo "eval \"\$(/opt/homebrew/bin/brew shellenv)\"" >> ~/.bash_profile
+    source ~/.bash_profile 
+    info "Homebrew installed: $(brew --version)"
+else
+    info "Homebrew already installed: $(brew --version)"
+fi
+
 mkdir -p "$CACHEDIR" "$DLL_TARGET_DIR" "$PIP_CACHE_DIR"
 
 cd "$PROJECT_ROOT"
@@ -65,7 +76,7 @@ source $VENV_DIR/bin/activate
 export CFLAGS="-g0"
 
 # Do not build universal binaries. The default on macos 11+ and xcode 12+ is "-arch arm64 -arch x86_64"
-# but with that e.g. "hid.cpython-310-darwin.so" is not reproducible as built by clang.
+# but with that e.g. "hid.cpython-310-darwin.so" is not repbreakroducible as built by clang.
 export ARCHFLAGS="-arch x86_64"
 
 info "Installing build dependencies"
@@ -75,14 +86,14 @@ info "Installing build dependencies"
 #       - PyQt6, as it's harder to build from source
 #       - cryptography, as it's harder to build from source
 #       - the whole of "requirements-build-base.txt", which includes pip and friends, as it also includes "wheel",
-#         and I am not quite sure how to break the circular dependence there (I guess we could introduce
+#         and I am not quite sure how to  the circular dependence there (I guess we could introduce
 #         "requirements-build-base-base.txt" with just wheel in it...)
-python3 -m pip install --no-build-isolation --no-dependencies --no-warn-script-location \
-    --cache-dir "$PIP_CACHE_DIR" -Ir ./contrib/deterministic-build/requirements-build-base.txt \
-    || fail "Could not install build dependencies (base)"
-python3 -m pip install --no-build-isolation --no-dependencies --no-binary :all: --no-warn-script-location \
-    --cache-dir "$PIP_CACHE_DIR" -Ir ./contrib/deterministic-build/requirements-build-mac.txt \
-    || fail "Could not install build dependencies (mac)"
+# python3 -m pip install --no-build-isolation --no-dependencies --no-warn-script-location \
+#     --cache-dir "$PIP_CACHE_DIR" -Ir ./contrib/deterministic-build/requirements-build-base.txt \
+#     || fail "Could not install build dependencies (base)"
+# python3 -m pip install --no-build-isolation --no-dependencies --no-binary :all: --no-warn-script-location \
+#     --cache-dir "$PIP_CACHE_DIR" -Ir ./contrib/deterministic-build/requirements-build-mac.txt \
+#     || fail "Could not install build dependencies (mac)"
 
 info "Installing some build-time deps for compilation..."
 brew install autoconf automake libtool gettext coreutils pkgconfig
