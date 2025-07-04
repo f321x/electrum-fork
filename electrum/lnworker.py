@@ -25,6 +25,7 @@ import aiohttp
 import dns.asyncresolver
 import dns.exception
 from aiorpcx import run_in_thread, NetAddress, ignore_after
+from electrum_lntransport import LNPeerAddr, split_host_port, extract_nodeid, ConnStringFormatError
 
 from .logging import Logger
 from .i18n import _
@@ -54,10 +55,6 @@ from .crypto import (
 )
 
 from .onion_message import OnionMessageManager
-from .lntransport import (
-    LNTransport, LNResponderTransport, LNTransportBase, LNPeerAddr, split_host_port, extract_nodeid,
-    ConnStringFormatError
-)
 from .lnpeer import Peer, LN_P2P_NETWORK_TIMEOUT
 from .lnaddr import lnencode, LnAddr, lndecode
 from .lnchannel import Channel, AbstractChannel, ChannelState, PeerState, HTLCWithStatus, ChannelBackup
@@ -300,29 +297,24 @@ class LNWorker(Logger, EventListener, NetworkRetryManager[LNPeerAddr]):
         self.logger.info(f"adding peer {peer_addr}")
         if node_id == self.node_keypair.pubkey or self.is_our_lnwallet(node_id):
             raise ErrorAddingPeer("cannot connect to self")
-        transport = LNTransport(self.node_keypair.privkey, peer_addr,
-                                e_proxy=ESocksProxy.from_network_settings(self.network))
-        peer = await self._add_peer_from_transport(node_id=node_id, transport=transport)
+        peer = await self._init_peer(peer_addr=peer_addr)
         assert peer
         return peer
 
-    async def _add_peer_from_transport(self, *, node_id: bytes, transport: LNTransportBase) -> Optional[Peer]:
+    async def _init_peer(self, *, peer_addr: LNPeerAddr) -> Optional[Peer]:
+        remote_pubkey = peer_addr.pubkey
         with self.lock:
-            existing_peer = self._peers.get(node_id)
+            existing_peer = self._peers.get(remote_pubkey)
             if existing_peer:
                 # Two instances of the same wallet are attempting to connect simultaneously.
                 # If we let the new connection replace the existing one, the two instances might
                 # both keep trying to reconnect, resulting in neither being usable.
                 if existing_peer.is_initialized():
                     # give priority to the existing connection
-                    return
-                else:
-                    # Use the new connection. (e.g. old peer might be an outgoing connection
-                    # for an outdated host/port that will never connect)
-                    existing_peer.close_and_cleanup()
-            peer = Peer(self, node_id, transport)
-            assert node_id not in self._peers
-            self._peers[node_id] = peer
+                     existing_peer.close_and_cleanup()
+            peer = Peer(self, peer_addr)
+            assert remote_pubkey not in self._peers
+            self._peers[remote_pubkey] = peer
         await self.taskgroup.spawn(peer.main_loop())
         return peer
 

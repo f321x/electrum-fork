@@ -27,7 +27,8 @@ import os
 import json
 from typing import Sequence, Tuple, Mapping, Type, List, Optional
 
-from .lntransport import LNPeerAddr
+from electrum_lntransport import LNPeerAddr
+
 from .util import inv_dict, all_subclasses, classproperty
 from . import bitcoin
 

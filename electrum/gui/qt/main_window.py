@@ -45,6 +45,7 @@ from PyQt6.QtWidgets import (QMessageBox, QTabWidget, QMenuBar, QFileDialog, QCh
                              QMenu, QToolButton, QDialog)
 
 import electrum_ecc as ecc
+from electrum_lntransport import extract_nodeid, ConnStringFormatError
 
 import electrum
 from electrum.gui import messages
@@ -71,7 +72,6 @@ from electrum.network import Network, UntrustedServerReturnedError
 from electrum.exchange_rate import FxThread
 from electrum.simple_config import SimpleConfig
 from electrum.logging import Logger
-from electrum.lntransport import extract_nodeid, ConnStringFormatError
 from electrum.lnaddr import lndecode
 from electrum.submarine_swaps import SwapServerTransport, NostrTransport
 from electrum.fee_policy import FeePolicy

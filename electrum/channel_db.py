@@ -38,11 +38,11 @@ import functools
 
 from aiorpcx import NetAddress
 from electrum_ecc import ECPubkey
+from electrum_lntransport import LNPeerAddr
 
 from .sql_db import SqlDB, sql
 from . import constants, util
 from .util import profiler, get_headers_dir, is_ip_address, json_normalize, UserFacingException, is_private_netaddress
-from .lntransport import LNPeerAddr
 from .lnutil import (ShortChannelID, validate_features, IncompatibleOrInsaneFeatures,
                      InvalidGossipMsg, GossipForwardingMessage, GossipTimestampFilter)
 from .lnverifier import LNChannelVerifier, verify_sig_for_channel_update
