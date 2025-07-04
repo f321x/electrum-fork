@@ -3,13 +3,14 @@ import os
 import random
 from typing import Mapping, Tuple, Optional, List, Iterable, Sequence, Set, Any
 
+from electrum_lntransport import LNPeerAddr
+
 from .lnutil import LnFeatures, PaymentFeeBudget, FeeBudgetExceeded
 from .lnonion import (
     calc_hops_data_for_payment, new_onion_packet, OnionPacket, TRAMPOLINE_HOPS_DATA_SIZE, PER_HOP_HMAC_SIZE
 )
 from .lnrouter import TrampolineEdge, is_route_within_budget, LNPaymentTRoute
 from .lnutil import NoPathFound
-from .lntransport import LNPeerAddr
 from . import constants
 from .logging import get_logger
 from .util import random_shuffled_copy

@@ -14,6 +14,7 @@ from typing import Iterable, NamedTuple, Tuple, List, Dict
 
 from aiorpcx import timeout_after, TaskTimeout
 from electrum_ecc import ECPrivkey
+from electrum_lntransport import LNPeerAddr
 
 import electrum
 import electrum.trampoline
@@ -27,7 +28,6 @@ from electrum.bitcoin import COIN, sha256
 from electrum.transaction import Transaction
 from electrum.util import NetworkRetryManager, bfh, OldTaskGroup, EventListener, InvoiceError
 from electrum.lnpeer import Peer
-from electrum.lntransport import LNPeerAddr
 from electrum.crypto import privkey_to_pubkey
 from electrum.lnutil import Keypair, PaymentFailure, LnFeatures, HTLCOwner, PaymentFeeBudget
 from electrum.lnchannel import ChannelState, PeerState, Channel

@@ -52,7 +52,8 @@ if TYPE_CHECKING:
     from electrum.lnworker import LNWallet
     from electrum.network import Network
     from electrum.lnrouter import NodeInfo
-    from electrum.lntransport import LNPeerAddr
+
+    from electrum_lntransport import LNPeerAddr
     from asyncio import Task
 
 logger = get_logger(__name__)

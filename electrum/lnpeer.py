@@ -15,6 +15,7 @@ import functools
 
 import electrum_ecc as ecc
 from electrum_ecc import ecdsa_sig64_from_r_and_s, ecdsa_der_sig_from_ecdsa_sig64, ECPubkey
+from electrum_lntransport import LightningPeerConnectionClosed, HandshakeFailed
 
 import aiorpcx
 from aiorpcx import ignore_after
@@ -49,7 +50,6 @@ from .lnutil import (Outpoint, LocalConfig, RECEIVED, UpdateAddHtlc, ChannelConf
                      GossipForwardingMessage, GossipTimestampFilter)
 from .lnutil import FeeUpdate, channel_id_from_funding_tx, PaymentFeeBudget
 from .lnutil import serialize_htlc_key, Keypair
-from .lntransport import LNTransport, LNTransportBase, LightningPeerConnectionClosed, HandshakeFailed
 from .lnmsg import encode_msg, decode_msg, UnknownOptionalMsgType, FailedToParseMsg
 from .interface import GracefulDisconnect
 from .lnrouter import fee_for_edge_msat

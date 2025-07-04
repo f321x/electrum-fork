@@ -32,7 +32,8 @@ from aiorpcx import NetAddress
 import attr
 
 import electrum_ecc as ecc
-from electrum_ecc import ECPubkey
+from electrum_ecc import ECPubkey#
+from electrum_lntransport import LNPeerAddr
 
 from . import constants, util
 from .util import bfh, chunks, TxMinedInfo, error_text_bytes_to_safe_str
@@ -40,7 +41,6 @@ from .bitcoin import redeem_script_to_address
 from .crypto import sha256, sha256d
 from .transaction import Transaction, PartialTransaction, TxInput, Sighash
 from .logging import Logger
-from .lntransport import LNPeerAddr
 from .lnonion import OnionRoutingFailure
 from . import lnutil
 from .lnutil import (Outpoint, LocalConfig, RemoteConfig, Keypair, OnlyPubkeyKeypair, ChannelConstraints,

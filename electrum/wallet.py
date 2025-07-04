@@ -43,6 +43,7 @@ import asyncio
 from dataclasses import dataclass
 
 import electrum_ecc as ecc
+from electrum_lntransport import extract_nodeid
 from aiorpcx import ignore_after, run_in_thread
 
 from . import util, keystore, transaction, bitcoin, coinchooser, bip32, descriptor
@@ -77,7 +78,6 @@ from .contacts import Contacts
 from .mnemonic import Mnemonic
 from .lnworker import LNWallet
 from .lnutil import MIN_FUNDING_SAT
-from .lntransport import extract_nodeid
 from .descriptor import Descriptor
 from .txbatcher import TxBatcher
 

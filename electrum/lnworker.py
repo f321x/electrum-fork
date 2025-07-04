@@ -25,6 +25,7 @@ import aiohttp
 import dns.asyncresolver
 import dns.exception
 from aiorpcx import run_in_thread, NetAddress, ignore_after
+from electrum_lntransport import LNPeerAddr, split_host_port, extract_nodeid, ConnStringFormatError
 
 from .logging import Logger
 from .i18n import _
@@ -54,10 +55,6 @@ from .crypto import (
 )
 
 from .onion_message import OnionMessageManager
-from .lntransport import (
-    LNTransport, LNResponderTransport, LNTransportBase, LNPeerAddr, split_host_port, extract_nodeid,
-    ConnStringFormatError
-)
 from .lnpeer import Peer, LN_P2P_NETWORK_TIMEOUT
 from .lnaddr import lnencode, LnAddr, lndecode
 from .lnchannel import Channel, AbstractChannel, ChannelState, PeerState, HTLCWithStatus, ChannelBackup
