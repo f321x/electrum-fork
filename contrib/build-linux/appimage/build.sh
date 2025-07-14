@@ -59,6 +59,7 @@ docker run -it \
     -v "$PROJECT_ROOT_OR_FRESHCLONE_ROOT":/opt/electrum:Z \
     --rm \
     --workdir /opt/electrum/contrib/build-linux/appimage \
+    --security-opt label=disable \
     electrum-appimage-builder-img \
     ./make_appimage.sh
 

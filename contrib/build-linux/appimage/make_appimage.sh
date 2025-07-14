@@ -253,6 +253,13 @@ for f in "$PYDIR"/site-packages/slip10-*.dist-info2; do mv "$f" "$(echo "$f" | s
 
 find -exec touch -h -d '2000-11-11T11:11:11+00:00' {} +
 
+# this is needed to make the build reproducible on systems with SELinux enabled (e.g. Fedora).
+if command -v setfattr >/dev/null 2>&1; then
+    info "stripping SELinux attributes for reproducible builds."
+    find "$APPDIR" -exec setfattr -x security.selinux {} + 2>/dev/null || true
+    find "$APPDIR" -type f -exec setfattr --remove-all {} + 2>/dev/null || true
+    find "$APPDIR" -type d -exec setfattr --remove-all {} + 2>/dev/null || true
+fi
 
 info "creating the AppImage."
 (
