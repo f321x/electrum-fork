@@ -8,7 +8,7 @@ from electrum.lnutil import MIN_FUNDING_SAT
 from electrum.lnworker import hardcoded_trampoline_nodes
 from electrum.util import NotEnoughFunds, NoDynamicFeeEstimates
 from electrum.fee_policy import FeePolicy
-from electrum.lntransport import extract_nodeid, ConnStringFormatError
+from electrum_lntransport import extract_nodeid, ConnStringFormatError
 
 from .util import (WindowModalDialog, Buttons, OkButton, CancelButton,
                    EnterButton, WWLabel, char_width_in_lineedit)

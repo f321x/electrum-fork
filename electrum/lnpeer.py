@@ -15,6 +15,7 @@ from datetime import datetime
 import functools
 
 import electrum_ecc as ecc
+from aiorpcx.rawsocket import ConnectionLostError
 from electrum_ecc import ecdsa_sig64_from_r_and_s, ecdsa_der_sig_from_ecdsa_sig64, ECPubkey
 from electrum_lntransport import LNSession, BOLT8Protocol
 from electrum_lntransport import LightningPeerConnectionClosed, HandshakeFailed, LNClient, \
@@ -70,7 +71,7 @@ if TYPE_CHECKING:
 LN_P2P_NETWORK_TIMEOUT = 20
 
 
-class Peer(Logger, EventListener, LNSession):
+class Peer(Logger, EventListener):
     # note: in general this class is NOT thread-safe. Most methods are assumed to be running on asyncio thread.
 
     ORDERED_MESSAGES = (
@@ -84,7 +85,6 @@ class Peer(Logger, EventListener, LNSession):
 
     def __init__(
         self,
-        protocol_instance: BOLT8Protocol,
         lnworker: Union['LNWallet', 'LNGossip'],
         peer_addr: LNPeerAddr,
         *,
@@ -133,8 +133,7 @@ class Peer(Logger, EventListener, LNSession):
         self.downstream_htlc_resolved_event = asyncio.Event()
         self.register_callbacks()
         self._num_gossip_messages_forwarded = 0
-        LNSession.__init__(self, protocol=protocol_instance)
-        self._outgoing_message_queue = asyncio.Queue()  # type: asyncio.Queue[bytes]
+        self.transport_session = None  # type: Optional[LNSession]
 
     def send_message(self, message_name: str, **kwargs):
         assert util.get_running_loop() == util.get_asyncio_loop(), f"this must be run on the asyncio thread!"
@@ -145,7 +144,7 @@ class Peer(Logger, EventListener, LNSession):
             raise Exception("tried to send message before we are initialized")
         raw_msg = encode_msg(message_name, **kwargs)
         self._store_raw_msg_if_local_update(raw_msg, message_name=message_name, channel_id=kwargs.get("channel_id"))
-        self._outgoing_message_queue.put_nowait(raw_msg)
+        self.transport_session.send_serialized_message(raw_msg)
 
     def _store_raw_msg_if_local_update(self, raw_msg: bytes, *, message_name: str, channel_id: Optional[bytes]):
         is_commitment_signed = message_name == "commitment_signed"
@@ -173,8 +172,6 @@ class Peer(Logger, EventListener, LNSession):
                 and self.initialized.result() is True)
 
     async def initialize(self):
-        assert self.handshake_done
-        self.logger.info(f"handshake done for {self.peer_addr or self.pubkey.hex()}")
         features = self.features.for_init_message()
         flen = features.min_len()
         self.send_message(
@@ -201,7 +198,11 @@ class Peer(Logger, EventListener, LNSession):
         return chan
 
     def diagnostic_name(self):
-        return self.lnworker.__class__.__name__ + ', ' + self.pubkey
+        id_int = id(self)
+        id_bytes = id_int.to_bytes((id_int.bit_length() + 7) // 8, byteorder='big')
+        id_hash = sha256(id_bytes).hex()
+        name = f"{self.pubkey.hex()[:10]}-{id_hash[:8]}"
+        return self.lnworker.__class__.__name__ + ', ' + name
 
     async def ping_if_required(self):
         if time.time() - self.last_message_time > 30:
@@ -498,7 +499,7 @@ class Peer(Logger, EventListener, LNSession):
             except GracefulDisconnect as e:
                 self.logger.log(e.log_level, f"Disconnecting: {repr(e)}")
             except (LightningPeerConnectionClosed, IncompatibleLightningFeatures,
-                    aiorpcx.socks.SOCKSError) as e:
+                    aiorpcx.socks.SOCKSError, ConnectionLostError, TimeoutError) as e:
                 self.logger.info(f"Disconnecting: {repr(e)}")
             finally:
                 self.close_and_cleanup()
@@ -508,18 +509,21 @@ class Peer(Logger, EventListener, LNSession):
     @log_exceptions
     @handle_disconnect
     async def main_loop(self):
-        session_factory = partial(
-            LNSession,
-            process_msg_loop=self._message_loop,
-        )
+        assert self.transport_session is None
+        # LNClient will close the socket automatically on aexit,
+        # so Peer just needs to clean-up itself
         async with LNClient(
             prologue=b'lightning',
             privkey=self.privkey,
             peer_addr=self.peer_addr,
-            session_factory=session_factory,
-        ) as self.client_session:
+            session_factory=LNSession,
+            proxy=None, # todo: add proxy
+            loop=self.asyncio_loop,
+        ) as self.transport_session:
+            await self.initialize()
             async with self.taskgroup as group:
                 await group.spawn(self.htlc_switch())
+                await group.spawn(self._message_loop())
                 await group.spawn(self._query_gossip())
                 await group.spawn(self._process_gossip())
                 await group.spawn(self._send_own_gossip())
@@ -557,6 +561,7 @@ class Peer(Logger, EventListener, LNSession):
     async def _send_own_gossip(self):
         if self.lnworker == self.lnworker.network.lngossip:
             return
+        await util.wait_for2(self.initialized, LN_P2P_NETWORK_TIMEOUT)
         await asyncio.sleep(10)
         while True:
             public_channels = [chan for chan in self.lnworker.channels.values() if chan.is_public()]
@@ -618,18 +623,16 @@ class Peer(Logger, EventListener, LNSession):
         for msg in messages:
             if self.gossip_timestamp_filter.in_range(msg.timestamp) \
                 and self.pubkey != msg.sender_node_id:
-                await self.transport.send_bytes_and_drain(msg.msg)
+                self.transport_session.send_serialized_message(msg.msg)
                 amount_sent += 1
                 if amount_sent % 250 == 0:
+                    # TODO: adapt to aiorpcx cost limiting ?
                     # this can be a lot of messages, completely blocking the event loop
                     await asyncio.sleep(self.DELAY_INC_MSG_PROCESSING_SLEEP)
         return amount_sent
 
     async def _query_gossip(self):
-        try:
-            await util.wait_for2(self.initialized, LN_P2P_NETWORK_TIMEOUT)
-        except Exception as e:
-            raise GracefulDisconnect(f"Failed to initialize: {e!r}") from e
+        await util.wait_for2(self.initialized, LN_P2P_NETWORK_TIMEOUT)
         if self.lnworker == self.lnworker.network.lngossip:
             if not self.their_features.supports(LnFeatures.GOSSIP_QUERIES_OPT):
                 raise GracefulDisconnect("remote does not support gossip_queries, which we need")
@@ -803,9 +806,9 @@ class Peer(Logger, EventListener, LNSession):
                 response.update(requested_msgs)
             self.logger.debug(f"found {len(response)} gossip messages to serve scid request")
             for index, msg in enumerate(response):
-                await self.transport.send_bytes_and_drain(msg)
-                if index % 250 == 0:
-                    await asyncio.sleep(self.DELAY_INC_MSG_PROCESSING_SLEEP)
+                self.transport_session.send_serialized_message(msg)
+                # if index % 250 == 0:
+                #     await asyncio.sleep(self.DELAY_INC_MSG_PROCESSING_SLEEP)
             self.send_message(
                 'reply_short_channel_ids_end',
                 chain_hash=constants.net.rev_genesis_bytes(),
@@ -832,15 +835,13 @@ class Peer(Logger, EventListener, LNSession):
             len=1+len(s),
             encoded_short_ids=prefix+s)
 
-    async def _process_messages_loop(self, recv_msg_cb: Callable[[], Awaitable[bytes]]):
-        try:
-            await util.wait_for2(self.initialize(), LN_P2P_NETWORK_TIMEOUT)
-        except (OSError, asyncio.TimeoutError, HandshakeFailed) as e:
-            raise GracefulDisconnect(f'initialize failed: {repr(e)}') from e
-        while True:
-            msg = await recv_msg_cb()
+    @log_exceptions
+    @handle_disconnect
+    async def _message_loop(self):
+        async for msg in self.transport_session.get_received_message():
             await self._process_message(msg)
             if self.DELAY_INC_MSG_PROCESSING_SLEEP:
+                # TODO: the cost calculation of aiorpcx.SessionBase may could be used to rate-limit
                 # rate-limit message-processing a bit, to make it harder
                 # for a single peer to bog down the event loop / cpu:
                 await asyncio.sleep(self.DELAY_INC_MSG_PROCESSING_SLEEP)
@@ -853,13 +854,14 @@ class Peer(Logger, EventListener, LNSession):
         #       E.g. if you call close_and_cleanup() to cause a disconnection from the peer,
         #       it will get called a second time in handle_disconnect().
         self.unregister_callbacks()
-        try:
-            if self.transport:
-                self.transport.close()
-        except Exception:
-            pass
         self.lnworker.peer_closed(self)
         self.got_disconnected.set()
+        if self.transport_session is not None and not self.transport_session.is_closing():
+            asyncio.run_coroutine_threadsafe(
+                self.transport_session.close(),
+                self.transport_session.loop
+            )
+        self.transport_session = None
 
     def is_shutdown_anysegwit(self):
         return self.features.supports(LnFeatures.OPTION_SHUTDOWN_ANYSEGWIT_OPT)
@@ -1186,8 +1188,8 @@ class Peer(Logger, EventListener, LNSession):
         chan.storage['funding_inputs'] = [txin.prevout.to_json() for txin in funding_tx.inputs()]
         chan.storage['has_onchain_backup'] = has_onchain_backup
         chan.storage['init_timestamp'] = int(time.time())
-        if isinstance(self.transport, LNTransport):
-            chan.add_or_update_peer_addr(self.transport.peer_addr)
+        if not self.transport_session.is_listener:
+            chan.add_or_update_peer_addr(self.peer_addr)
         sig_64, _ = chan.sign_next_commitment()
         self.temp_id_to_id[temp_channel_id] = channel_id
 
@@ -1237,6 +1239,7 @@ class Peer(Logger, EventListener, LNSession):
 
     @non_blocking_msg_handler
     async def on_open_channel(self, payload):
+        raise NotImplementedError("implement check below")
         """Implements the channel acceptance flow.
 
         <- open_channel message
@@ -1406,8 +1409,8 @@ class Peer(Logger, EventListener, LNSession):
             opening_fee = channel_opening_fee,
         )
         chan.storage['init_timestamp'] = int(time.time())
-        if isinstance(self.transport, LNTransport):
-            chan.add_or_update_peer_addr(self.transport.peer_addr)
+        # if isinstance(self.transport, LNTransport):
+        #     chan.add_or_update_peer_addr(self.transport.peer_addr)
         remote_sig = funding_created['signature']
         try:
             chan.receive_new_commitment(remote_sig, [])
@@ -1667,7 +1670,7 @@ class Peer(Logger, EventListener, LNSession):
                     # commitment_signed, hence we must not replay them.
                     continue
                 for raw_upd_msg in messages:
-                    self.transport.send_bytes(raw_upd_msg)
+                    self.transport_session.send_serialized_message(raw_upd_msg)
                     replayed_msgs.append(raw_upd_msg)
             self.logger.info(f'channel_reestablish ({chan.get_id_for_log()}): replayed {len(replayed_msgs)} unacked messages. '
                              f'{[decode_msg(raw_upd_msg)[0] for raw_upd_msg in replayed_msgs]}')
@@ -1789,7 +1792,7 @@ class Peer(Logger, EventListener, LNSession):
         message_type, payload = decode_msg(raw_msg)
         payload['signature'] = signature
         raw_msg = encode_msg(message_type, **payload)
-        self.transport.send_bytes(raw_msg)
+        self.transport_session.send_serialized_message(raw_msg)
 
     def maybe_send_channel_announcement(self, chan: Channel):
         node_sigs = [chan.config[REMOTE].announcement_node_sig, chan.config[LOCAL].announcement_node_sig]
@@ -1806,7 +1809,7 @@ class Peer(Logger, EventListener, LNSession):
         payload['bitcoin_signature_1'] = bitcoin_sigs[0]
         payload['bitcoin_signature_2'] = bitcoin_sigs[1]
         raw_msg = encode_msg(message_type, **payload)
-        self.transport.send_bytes(raw_msg)
+        self.transport_session.send_serialized_message(raw_msg)
 
     def maybe_mark_open(self, chan: Channel):
         if not chan.sent_channel_ready:
@@ -1838,7 +1841,7 @@ class Peer(Logger, EventListener, LNSession):
             # so that channel can be used to receive payments
             self.logger.info(f"sending channel update for outgoing edge ({chan.get_id_for_log()})")
             chan_upd = chan.get_outgoing_gossip_channel_update()
-            self.transport.send_bytes(chan_upd)
+            self.transport_session.send_serialized_message(chan_upd)
 
     def maybe_send_announcement_signatures(self, chan: Channel, is_reply=False):
         if not chan.is_public():
@@ -3017,7 +3020,7 @@ class Peer(Logger, EventListener, LNSession):
         # - 3. processed: (forwarding_key, None), not irrevocably removed yet
         # - 4. done: (forwarding_key, None), irrevocably removed
 
-        await self.initialized
+        await util.wait_for2(self.initialized, LN_P2P_NETWORK_TIMEOUT)
         while True:
             await self.ping_if_required()
             self._htlc_switch_iterdone_event.set()

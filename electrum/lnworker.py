@@ -241,6 +241,7 @@ class LNWorker(Logger, EventListener, NetworkRetryManager[LNPeerAddr]):
         # FIXME: only one LNWorker can listen at a time (single port)
         listen_addr = self.config.LIGHTNING_LISTEN
         if listen_addr:
+            raise NotImplementedError()
             self.logger.info(f'lightning_listen enabled. will try to bind: {listen_addr!r}')
             try:
                 netaddr = NetAddress.from_string(listen_addr)
@@ -311,7 +312,9 @@ class LNWorker(Logger, EventListener, NetworkRetryManager[LNPeerAddr]):
                 # both keep trying to reconnect, resulting in neither being usable.
                 if existing_peer.is_initialized():
                     # give priority to the existing connection
-                     existing_peer.close_and_cleanup()
+                    return None
+                else:
+                    existing_peer.close_and_cleanup()
             peer = Peer(self, peer_addr)
             assert remote_pubkey not in self._peers
             self._peers[remote_pubkey] = peer
@@ -371,8 +374,8 @@ class LNWorker(Logger, EventListener, NetworkRetryManager[LNPeerAddr]):
         return True
 
     def on_peer_successfully_established(self, peer: Peer) -> None:
-        if isinstance(peer.transport, LNTransport):
-            peer_addr = peer.transport.peer_addr
+        if not peer.transport_session.is_listener:  # peer initiated the connection
+            peer_addr = peer.peer_addr
             # reset connection attempt count
             self._on_connection_successfully_established(peer_addr)
             if not self.uses_trampoline():
