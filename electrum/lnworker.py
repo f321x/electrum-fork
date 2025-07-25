@@ -4,6 +4,7 @@
 
 import asyncio
 import os
+from asyncio import CancelledError
 from decimal import Decimal
 import random
 import time
@@ -24,8 +25,9 @@ import itertools
 import aiohttp
 import dns.asyncresolver
 import dns.exception
-from aiorpcx import run_in_thread, NetAddress, ignore_after
-from electrum_lntransport import LNPeerAddr, split_host_port, extract_nodeid, ConnStringFormatError
+from aiorpcx import run_in_thread, NetAddress, ignore_after, rawsocket
+from electrum_lntransport import LNPeerAddr, split_host_port, extract_nodeid, ConnStringFormatError, \
+    LNClient, create_bolt8_server, BOLT8Protocol, LNSession
 
 from .logging import Logger
 from .i18n import _
@@ -34,10 +36,12 @@ from .channel_db import UpdateStatus, ChannelDBNotLoaded, get_mychannel_info, ge
 
 from . import constants, util
 from .util import (
-    profiler, OldTaskGroup, ESocksProxy, NetworkRetryManager, JsonRPCClient, NotEnoughFunds, EventListener,
-    event_listener, bfh, InvoiceError, resolve_dns_srv, is_ip_address, log_exceptions, ignore_exceptions,
+    profiler, OldTaskGroup, ESocksProxy, NetworkRetryManager, JsonRPCClient, NotEnoughFunds,
+    EventListener,
+    event_listener, bfh, InvoiceError, resolve_dns_srv, is_ip_address, log_exceptions,
+    ignore_exceptions,
     make_aiohttp_session, random_shuffled_copy, is_private_netaddress,
-    UnrelatedTransactionException, LightningHistoryItem
+    UnrelatedTransactionException, LightningHistoryItem, get_asyncio_loop
 )
 from .fee_policy import (
     FeePolicy, FEERATE_FALLBACK_STATIC_FEE, FEE_LN_ETA_TARGET, FEE_LN_LOW_ETA_TARGET,
@@ -150,6 +154,19 @@ class SentHtlcInfo(NamedTuple):
 class ErrorAddingPeer(Exception): pass
 
 
+class OngoingPeerConnectionSet(set):
+    """Intended to detect races in which a connection is attempted multiple times"""
+    def __init__(self, existing_peers: dict[bytes, Peer]):
+        super().__init__()
+        self.peers = existing_peers
+
+    def add(self, node_id: bytes):
+        assert isinstance(node_id, bytes) and len(node_id) == 33, f"{node_id} is not a proper node id"
+        assert node_id not in self, f"Connection attempt for {node_id.hex()} is already ongoing"
+        assert node_id not in self.peers, f"Existing peer connection: {self.peers[node_id].diagnostic_name()}"
+        super().add(node_id)
+
+
 # set some feature flags as baseline for both LNWallet and LNGossip
 # note that e.g. DATA_LOSS_PROTECT is needed for LNGossip as many peers require it
 BASE_FEATURES = (
@@ -199,6 +216,7 @@ class LNWorker(Logger, EventListener, NetworkRetryManager[LNPeerAddr]):
         self.lock = threading.RLock()
         self.node_keypair = node_keypair
         self._peers = {}  # type: Dict[bytes, Peer]  # pubkey -> Peer  # needs self.lock
+        self._connecting_peers = OngoingPeerConnectionSet(self._peers) # peers with ongoing connection attempts
         self.taskgroup = OldTaskGroup()
         self.listen_server = None  # type: Optional[asyncio.AbstractServer]
         self.features = features
@@ -247,18 +265,47 @@ class LNWorker(Logger, EventListener, NetworkRetryManager[LNPeerAddr]):
             except Exception as e:
                 self.logger.error(f"failed to parse config key '{self.config.cv.LIGHTNING_LISTEN.key()}'. got: {e!r}")
                 return
-            addr = str(netaddr.host)
 
-            async def cb(reader, writer):
-                transport = LNResponderTransport(self.node_keypair.privkey, reader, writer)
-                try:
-                    node_id = await transport.handshake()
-                except Exception as e:
-                    self.logger.info(f'handshake failure from incoming connection: {e!r}')
-                    return
-                await self._add_peer_from_transport(node_id=node_id, transport=transport)
+            def session_factory(transport: BOLT8Protocol):
+                """Gets called in aiorpcx.RSTransport.connection_made once the bolt8 handshake is done. If we don't
+                want to accept the peer (e.g. due to an existing connection), return LNSession()
+                to allow graceful closing of the connection"""
+                assert transport.handshake_done.is_set(), "Session factory should be called after bolt8 handshake"
+                assert transport.remote_pubkey, "remote pubkey is required to instantiate Peer session"
+                node_id = transport.remote_pubkey
+                # abort connection attempt if we already have a Peer or an ongoing attempt
+                if not self._should_allow_incoming_peer_connection(node_id):
+                    asyncio.run_coroutine_threadsafe(transport.close(force_after=15), self.network.asyncio_loop)
+                    return LNSession(transport)
+                # store connection attempt to prevent another simultaneous attempt
+                self._connecting_peers.add(node_id)
+                peer = Peer(self, node_id, transport)
+                async def coro():
+                    try:
+                        # wait for lightning handshake
+                        await peer.initialize()
+                        self._peers[node_id] = peer
+                    except TimeoutError:
+                        self.logger.debug(f"incoming peer [{peer.diagnostic_name()}]: initialization timed out")
+                        peer.close_and_cleanup()
+                        return
+                    finally:
+                        # at this point the peer is either in _peers or the connection failed
+                        self._connecting_peers.remove(node_id)
+                    await self.taskgroup.spawn(peer.main_loop())
+                asyncio.run_coroutine_threadsafe(coro(), self.network.asyncio_loop)
+                return peer
+
             try:
-                self.listen_server = await asyncio.start_server(cb, addr, netaddr.port)
+                self.listen_server = await create_bolt8_server(
+                    prologue=b'lightning',
+                    privkey=self.node_keypair.privkey,
+                    session_factory=session_factory,
+                    whitelist=None,
+                    host=str(netaddr.host),
+                    port=netaddr.port,
+                    loop=self.network.asyncio_loop,
+                )
             except OSError as e:
                 self.logger.error(f"cannot listen for lightning p2p. error: {e!r}")
 
@@ -289,34 +336,87 @@ class LNWorker(Logger, EventListener, NetworkRetryManager[LNPeerAddr]):
                         self.logger.info(f"failed to add peer: {peer}. exc: {e!r}")
 
     async def _add_peer(self, host: str, port: int, node_id: bytes) -> Peer:
-        if node_id in self._peers:
-            return self._peers[node_id]
+        """Either returns a fully initialized peer or raises ErrorAddingPeer"""
         port = int(port)
         peer_addr = LNPeerAddr(host, port, node_id)
-        self._trying_addr_now(peer_addr)
-        self.logger.info(f"adding peer {peer_addr}")
         if node_id == self.node_keypair.pubkey or self.is_our_lnwallet(node_id):
             raise ErrorAddingPeer("cannot connect to self")
-        peer = await self._init_peer(peer_addr=peer_addr)
-        assert peer
+
+        future = asyncio.Future()
+        async def run_peer():
+            try:
+                session_factory = partial(Peer, self, node_id)
+                proxy = None
+                if not util.is_localhost(peer_addr.host):
+                    proxy = ESocksProxy.from_network_settings(self.network)
+                async with LNClient(
+                    prologue=b'lightning',
+                    privkey=self.node_keypair.privkey,
+                    session_factory=session_factory,
+                    peer_addr=peer_addr,
+                    proxy=proxy,
+                    loop=self.network.asyncio_loop,
+                ) as peer_session:
+                    assert isinstance(peer_session, Peer)
+                    # do lightning handshake here to guarantee that the future yields a fully
+                    # initialized peer to be stored in self._peers.
+                    try:
+                        await peer_session.initialize()
+                    except TimeoutError:
+                        self.logger.debug(f"connection timeout for: [{peer_session.diagnostic_name()}]")
+                        return
+                    future.set_result(peer_session)
+                    await peer_session.main_loop()
+            except Exception as e:
+                self.logger.debug(f"failed to connect to ln peer {node_id.hex()[:8]}...: {repr(e)}")
+            finally:
+                # cancel the future if it is still being awaited, to signal the connection failed
+                if not future.done():
+                    future.cancel()
+
+        with self.lock:
+            if node_id in self._peers:
+                return self._peers[node_id]
+            # peers are only stored in _peers once fully initialized
+            # the ongoing connection attempt is stored in _connecting_peers
+            if node_id not in self._connecting_peers:
+                self.logger.info(f"adding peer {peer_addr}")
+                self._connecting_peers.add(node_id)
+                self._trying_addr_now(peer_addr)
+                await self.taskgroup.spawn(run_peer())
+            else:
+                raise ErrorAddingPeer("already trying to connect to this peer")
+
+        try:
+            peer = await future
+            with self.lock:
+                assert node_id not in self._peers, "simultaneous connection attempts shouldn't happen"
+                self._peers[node_id] = peer
+        except CancelledError:
+            raise ErrorAddingPeer("connection attempt to peer cancelled")
+        finally:
+            self._connecting_peers.remove(node_id)
+
         return peer
 
-    async def _init_peer(self, *, peer_addr: LNPeerAddr) -> Optional[Peer]:
-        remote_pubkey = peer_addr.pubkey
+    def _should_allow_incoming_peer_connection(self, node_id: bytes) -> bool:
+        assert isinstance(node_id, bytes) and len(node_id) == 33, f"invalid node id: {node_id}"
         with self.lock:
-            existing_peer = self._peers.get(remote_pubkey)
+            if node_id in self._connecting_peers:
+                # there is already an ongoing connection attempt with the node
+                return False
+            existing_peer = self._peers.get(node_id)
             if existing_peer:
                 # Two instances of the same wallet are attempting to connect simultaneously.
                 # If we let the new connection replace the existing one, the two instances might
                 # both keep trying to reconnect, resulting in neither being usable.
-                if existing_peer.is_initialized():
-                    # give priority to the existing connection
-                     existing_peer.close_and_cleanup()
-            peer = Peer(self, peer_addr)
-            assert remote_pubkey not in self._peers
-            self._peers[remote_pubkey] = peer
-        await self.taskgroup.spawn(peer.main_loop())
-        return peer
+                assert existing_peer.is_initialized(), "we should not have non initialized peers ever?"
+                # give priority to the existing connection
+                self.logger.debug(
+                    f"keeping existing peer connection: {existing_peer.diagnostic_name()}")
+                return False
+            else:
+                return True
 
     def peer_closed(self, peer: Peer) -> None:
         with self.lock:
@@ -371,8 +471,9 @@ class LNWorker(Logger, EventListener, NetworkRetryManager[LNPeerAddr]):
         return True
 
     def on_peer_successfully_established(self, peer: Peer) -> None:
-        if isinstance(peer.transport, LNTransport):
-            peer_addr = peer.transport.peer_addr
+        self.logger.debug(f"peer [{peer.diagnostic_name()}] successfully established")
+        if not peer.is_listener:
+            peer_addr = peer.peer_addr
             # reset connection attempt count
             self._on_connection_successfully_established(peer_addr)
             if not self.uses_trampoline():
@@ -390,7 +491,7 @@ class LNWorker(Logger, EventListener, NetworkRetryManager[LNPeerAddr]):
         for peer in recent_peers:
             if not peer:
                 continue
-            if peer.pubkey in self._peers:
+            if peer.pubkey in self._peers or peer.pubkey in self._connecting_peers:
                 continue
             if not self._can_retry_addr(peer, now=now):
                 continue
@@ -3042,7 +3143,10 @@ class LNWallet(LNWorker):
         # Now select first one that has not failed recently.
         for peer in peer_addresses:
             if self._can_retry_addr(peer, urgent=True, now=now):
-                await self._add_peer(peer.host, peer.port, peer.pubkey)
+                try:
+                    await self._add_peer(peer.host, peer.port, peer.pubkey)
+                except ErrorAddingPeer:
+                    pass
                 return
 
     async def reestablish_peers_and_channels(self):
@@ -3053,7 +3157,10 @@ class LNWallet(LNWorker):
             if self.config.ZEROCONF_TRUSTED_NODE:
                 peer = LNPeerAddr.from_str(self.config.ZEROCONF_TRUSTED_NODE)
                 if self._can_retry_addr(peer, urgent=True):
-                    await self._add_peer(peer.host, peer.port, peer.pubkey)
+                    try:
+                        await self._add_peer(peer.host, peer.port, peer.pubkey)
+                    except ErrorAddingPeer:
+                        pass
             for chan in self.channels.values():
                 # reestablish
                 # note: we delegate filtering out uninteresting chans to this:
@@ -3062,7 +3169,7 @@ class LNWallet(LNWorker):
                 peer = self._peers.get(chan.node_id, None)
                 if peer:
                     await peer.taskgroup.spawn(peer.reestablish_channel(chan))
-                else:
+                elif peer not in self._connecting_peers:
                     await self.taskgroup.spawn(self.reestablish_peer_for_given_channel(chan))
 
     def current_target_feerate_per_kw(self, *, has_anchors: bool) -> Optional[int]:
@@ -3190,6 +3297,7 @@ class LNWallet(LNWorker):
             raise Exception(f'channel backup not found {self.channel_backups}')
         cb = cb.cb # storage
         self.logger.info(f'requesting channel force close: {channel_id.hex()}')
+        node_id = None
         if isinstance(cb, ImportedChannelBackupStorage):
             node_id = cb.node_id
             privkey = cb.privkey
@@ -3206,23 +3314,51 @@ class LNWallet(LNWorker):
                 # we will try with gossip (see below)
                 addresses = []
 
-        async def _request_fclose(addresses):
-            for host, port, timestamp in addresses:
-                peer_addr = LNPeerAddr(host, port, node_id)
-                transport = LNTransport(privkey, peer_addr, e_proxy=ESocksProxy.from_network_settings(self.network))
-                peer = Peer(self, node_id, transport, is_channel_backup=True)
-                try:
-                    async with OldTaskGroup(wait=any) as group:
-                        await group.spawn(peer._message_loop())
-                        await group.spawn(peer.request_force_close(channel_id))
-                    return True
-                except Exception as e:
-                    self.logger.info(f'failed to connect {host} {e}')
-                    continue
-            else:
+        async def _request_fclose(_addresses, _node_id):
+            if not node_id:
                 return False
+            if peer := self.peers.get(_node_id):
+                # two wallet instances, with a channel to node_id each. One of them requests fclose
+                # for the other wallet through a channel backup, but is already connected as it needs
+                # this peer for its own channel too. Closing this peer to prevent interference with the other
+                # channel while requesting fclose for this one.
+                self.logger.debug(f"closing existing peer [{peer.diagnostic_name()}] for fclose request")
+                peer.close_and_cleanup()
+                self._connecting_peers.add(_node_id)  # block other tasks from reconnecting
+                await peer.got_disconnected.wait()
+            else:
+                self._connecting_peers.add(_node_id)
+            session_factory = partial(Peer, self, _node_id, is_channel_backup=True)
+            try:
+                for host, port, timestamp in _addresses:
+                    _peer_addr = LNPeerAddr(host, port, _node_id)
+                    self.logger.debug(f"trying fclose request connecting to {_peer_addr}")
+                    proxy = None
+                    if not util.is_localhost(_peer_addr.host):
+                        proxy = ESocksProxy.from_network_settings(self.network)
+                    try:
+                        async with LNClient(
+                            prologue=b'lightning',
+                            privkey=self.node_keypair.privkey,
+                            session_factory=session_factory,
+                            peer_addr=_peer_addr,
+                            proxy=proxy,
+                            loop=self.network.asyncio_loop,
+                        ) as peer_session:
+                            assert isinstance(peer_session, Peer) and peer_session.is_channel_backup
+                            await peer_session.initialize()
+                            request = await peer_session.request_force_close(channel_id)
+                            await util.wait_for2(request.wait(), LN_P2P_NETWORK_TIMEOUT)
+                        return True
+                    except (TimeoutError, rawsocket.ConnectionLostError):
+                        self.logger.debug(f"requesting remote fclose from {node_id.hex()[:8]}... timed out")
+                        continue
+                return False
+            finally:
+                self._connecting_peers.remove(_node_id)
+
         # try first without gossip db
-        success = await _request_fclose(addresses)
+        success = await _request_fclose(addresses, node_id)
         if success:
             return
         # try with gossip db
@@ -3232,7 +3368,7 @@ class LNWallet(LNWorker):
         addresses_from_gossip = self.network.channel_db.get_node_addresses(node_id)
         if not addresses_from_gossip:
             raise Exception('Peer not found in gossip database')
-        success = await _request_fclose(addresses_from_gossip)
+        success = await _request_fclose(addresses_from_gossip, node_id)
         if not success:
             raise Exception('failed to connect')
 
