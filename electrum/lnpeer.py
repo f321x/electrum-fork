@@ -86,7 +86,7 @@ class Peer(Logger, EventListener):
     def __init__(
         self,
         lnworker: Union['LNWallet', 'LNGossip'],
-        peer_addr: LNPeerAddr,
+        remote_pubkey: bytes,
         *,
         is_channel_backup = False
     ):
@@ -99,8 +99,8 @@ class Peer(Logger, EventListener):
         self.initialized = self.asyncio_loop.create_future()
         self.got_disconnected = asyncio.Event()
         self.querying = asyncio.Event()
-        self.peer_addr = peer_addr
-        self.pubkey = peer_addr.pubkey  # remote pubkey
+        self.peer_addr = None
+        self.pubkey = remote_pubkey # remote pubkey
         self.privkey = self.lnworker.node_keypair.privkey  # local privkey
         self.features = self.lnworker.features  # type: LnFeatures
         self.their_features = LnFeatures(0)  # type: LnFeatures
@@ -508,19 +508,13 @@ class Peer(Logger, EventListener):
     @ignore_exceptions  # do not kill outer taskgroup
     @log_exceptions
     @handle_disconnect
-    async def main_loop(self):
-        assert self.transport_session is None
-        # LNClient will close the socket automatically on aexit,
-        # so Peer just needs to clean-up itself
-        async with LNClient(
-            prologue=b'lightning',
-            privkey=self.privkey,
-            peer_addr=self.peer_addr,
-            session_factory=LNSession,
-            proxy=None, # todo: add proxy
-            loop=self.asyncio_loop,
-        ) as self.transport_session:
-            await self.initialize()
+    async def main_loop(
+        self,
+        *,
+        transport_session: Optional[LNSession] = None,
+        peer_addr: Optional[LNPeerAddr] = None
+    ):
+        async def _main_loop():
             async with self.taskgroup as group:
                 await group.spawn(self.htlc_switch())
                 await group.spawn(self._message_loop())
@@ -528,6 +522,27 @@ class Peer(Logger, EventListener):
                 await group.spawn(self._process_gossip())
                 await group.spawn(self._send_own_gossip())
                 await group.spawn(self._forward_gossip())
+
+        assert self.transport_session is None
+        if not transport_session:
+            assert peer_addr is not None
+            # client opens outgoing connection
+            async with LNClient(
+                prologue=b'lightning',
+                privkey=self.privkey,
+                peer_addr=self.peer_addr,
+                session_factory=LNSession,
+                proxy=None, # todo: add proxy
+                loop=self.asyncio_loop,
+            ) as self.transport_session:
+                await self.initialize()
+                await _main_loop()
+        else:
+            assert transport_session is not None
+            # server accepted incoming connection
+            self.transport_session = transport_session
+            self.pubkey = transport_session.remote_pubkey
+            await _main_loop()
 
     async def _process_gossip(self):
         while True:
@@ -1239,7 +1254,6 @@ class Peer(Logger, EventListener):
 
     @non_blocking_msg_handler
     async def on_open_channel(self, payload):
-        raise NotImplementedError("implement check below")
         """Implements the channel acceptance flow.
 
         <- open_channel message
@@ -1409,8 +1423,8 @@ class Peer(Logger, EventListener):
             opening_fee = channel_opening_fee,
         )
         chan.storage['init_timestamp'] = int(time.time())
-        # if isinstance(self.transport, LNTransport):
-        #     chan.add_or_update_peer_addr(self.transport.peer_addr)
+        if not self.transport_session.is_listener:
+            chan.add_or_update_peer_addr(self.peer_addr)
         remote_sig = funding_created['signature']
         try:
             chan.receive_new_commitment(remote_sig, [])

@@ -25,8 +25,10 @@ import aiohttp
 import dns.asyncresolver
 import dns.exception
 from aiorpcx import run_in_thread, NetAddress, ignore_after
-from electrum_lntransport import LNPeerAddr, split_host_port, extract_nodeid, ConnStringFormatError
+from electrum_lntransport import LNPeerAddr, split_host_port, extract_nodeid, ConnStringFormatError, \
+    LNSession, BOLT8Protocol, create_bolt8_server
 
+from contrib.secp256k1.tools.tests_wycheproof_generate import new_pk
 from .logging import Logger
 from .i18n import _
 from .json_db import stored_in
@@ -241,7 +243,6 @@ class LNWorker(Logger, EventListener, NetworkRetryManager[LNPeerAddr]):
         # FIXME: only one LNWorker can listen at a time (single port)
         listen_addr = self.config.LIGHTNING_LISTEN
         if listen_addr:
-            raise NotImplementedError()
             self.logger.info(f'lightning_listen enabled. will try to bind: {listen_addr!r}')
             try:
                 netaddr = NetAddress.from_string(listen_addr)
@@ -250,16 +251,25 @@ class LNWorker(Logger, EventListener, NetworkRetryManager[LNPeerAddr]):
                 return
             addr = str(netaddr.host)
 
-            async def cb(reader, writer):
-                transport = LNResponderTransport(self.node_keypair.privkey, reader, writer)
-                try:
-                    node_id = await transport.handshake()
-                except Exception as e:
-                    self.logger.info(f'handshake failure from incoming connection: {e!r}')
-                    return
-                await self._add_peer_from_transport(node_id=node_id, transport=transport)
+            def session_factory(protocol: BOLT8Protocol) -> LNSession:
+                session = LNSession(protocol)
+                peer = self._construct_peer(session.remote_pubkey)
+                asyncio.run_coroutine_threadsafe(
+                    self.taskgroup.spawn(peer.main_loop(transport_session=session)),
+                    self.network.asyncio_loop,
+                )
+                return session
+
             try:
-                self.listen_server = await asyncio.start_server(cb, addr, netaddr.port)
+                self.listen_server = await create_bolt8_server(
+                    prologue=b'lightning',
+                    privkey=self.node_keypair.privkey,
+                    whitelist=None,
+                    session_factory=session_factory,
+                    host=addr,
+                    port=netaddr.port,
+                    loop=self.network.asyncio_loop,
+                )
             except OSError as e:
                 self.logger.error(f"cannot listen for lightning p2p. error: {e!r}")
 
@@ -298,12 +308,12 @@ class LNWorker(Logger, EventListener, NetworkRetryManager[LNPeerAddr]):
         self.logger.info(f"adding peer {peer_addr}")
         if node_id == self.node_keypair.pubkey or self.is_our_lnwallet(node_id):
             raise ErrorAddingPeer("cannot connect to self")
-        peer = await self._init_peer(peer_addr=peer_addr)
+        peer = self._construct_peer(node_id)
         assert peer
+        await self.taskgroup.spawn(peer.main_loop(peer_addr=peer_addr))
         return peer
 
-    async def _init_peer(self, *, peer_addr: LNPeerAddr) -> Optional[Peer]:
-        remote_pubkey = peer_addr.pubkey
+    def _construct_peer(self, remote_pubkey: bytes):
         with self.lock:
             existing_peer = self._peers.get(remote_pubkey)
             if existing_peer:
@@ -315,10 +325,9 @@ class LNWorker(Logger, EventListener, NetworkRetryManager[LNPeerAddr]):
                     return None
                 else:
                     existing_peer.close_and_cleanup()
-            peer = Peer(self, peer_addr)
+            peer = Peer(self, remote_pubkey)
             assert remote_pubkey not in self._peers
             self._peers[remote_pubkey] = peer
-        await self.taskgroup.spawn(peer.main_loop())
         return peer
 
     def peer_closed(self, peer: Peer) -> None:
