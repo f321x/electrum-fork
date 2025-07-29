@@ -1,0 +1,8 @@
+{
+    "name": "swap_adapt",
+    "fullname": "SwapAdapt",
+    "description": "Super secret competitive advantage (ignore this code if you accidentally found it).",
+    "available_for": ["cmdline"],
+    "author": "f321x",
+    "version": "0.0.1"
+}
