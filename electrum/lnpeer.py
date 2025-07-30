@@ -29,7 +29,8 @@ from . import bitcoin, util
 from . import constants
 from .util import (log_exceptions, ignore_exceptions, chunks, OldTaskGroup,
                    UnrelatedTransactionException, error_text_bytes_to_safe_str, AsyncHangDetector,
-                   NoDynamicFeeEstimates, event_listener, EventListener)
+                   NoDynamicFeeEstimates, event_listener, EventListener, ESocksProxy,
+                   get_asyncio_loop)
 from . import transaction
 from .bitcoin import make_op_return, DummyAddress
 from .transaction import PartialTxOutput, match_script_against_template, Sighash
@@ -515,31 +516,37 @@ class Peer(Logger, EventListener):
         peer_addr: Optional[LNPeerAddr] = None
     ):
         async def _main_loop():
+            await self.initialize()
             async with self.taskgroup as group:
-                await group.spawn(self.htlc_switch())
                 await group.spawn(self._message_loop())
-                await group.spawn(self._query_gossip())
-                await group.spawn(self._process_gossip())
-                await group.spawn(self._send_own_gossip())
-                await group.spawn(self._forward_gossip())
+                if not self.is_channel_backup:
+                    await group.spawn(self.htlc_switch())
+                    await group.spawn(self._query_gossip())
+                    await group.spawn(self._process_gossip())
+                    await group.spawn(self._send_own_gossip())
+                    await group.spawn(self._forward_gossip())
 
         assert self.transport_session is None
         if not transport_session:
-            assert peer_addr is not None
             # client opens outgoing connection
+            assert peer_addr is not None
+            self.peer_addr = peer_addr
+            proxy = None
+            if not util.is_localhost(peer_addr.host):
+                proxy = ESocksProxy.from_network_settings(self.lnworker.network)
             async with LNClient(
                 prologue=b'lightning',
                 privkey=self.privkey,
                 peer_addr=self.peer_addr,
                 session_factory=LNSession,
-                proxy=None, # todo: add proxy
+                proxy=proxy,
                 loop=self.asyncio_loop,
             ) as self.transport_session:
-                await self.initialize()
                 await _main_loop()
         else:
-            assert transport_session is not None
             # server accepted incoming connection
+            assert transport_session is not None
+            assert transport_session.transport.handshake_done.is_set()
             self.transport_session = transport_session
             self.pubkey = transport_session.remote_pubkey
             await _main_loop()
@@ -871,12 +878,12 @@ class Peer(Logger, EventListener):
         self.unregister_callbacks()
         self.lnworker.peer_closed(self)
         self.got_disconnected.set()
-        if self.transport_session is not None and not self.transport_session.is_closing():
+        if self.taskgroup is not None:
             asyncio.run_coroutine_threadsafe(
-                self.transport_session.close(),
-                self.transport_session.loop
+                self.taskgroup.cancel_remaining(),
+                get_asyncio_loop(),
             )
-        self.transport_session = None
+            self.taskgroup = None
 
     def is_shutdown_anysegwit(self):
         return self.features.supports(LnFeatures.OPTION_SHUTDOWN_ANYSEGWIT_OPT)

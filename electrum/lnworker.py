@@ -3,6 +3,7 @@
 # file LICENCE or http://www.opensource.org/licenses/mit-license.php
 
 import asyncio
+from operator import ne
 import os
 from decimal import Decimal
 import random
@@ -26,9 +27,8 @@ import dns.asyncresolver
 import dns.exception
 from aiorpcx import run_in_thread, NetAddress, ignore_after
 from electrum_lntransport import LNPeerAddr, split_host_port, extract_nodeid, ConnStringFormatError, \
-    LNSession, BOLT8Protocol, create_bolt8_server
+    LNSession, BOLT8Protocol, LNServer
 
-from contrib.secp256k1.tools.tests_wycheproof_generate import new_pk
 from .logging import Logger
 from .i18n import _
 from .json_db import stored_in
@@ -253,15 +253,17 @@ class LNWorker(Logger, EventListener, NetworkRetryManager[LNPeerAddr]):
 
             def session_factory(protocol: BOLT8Protocol) -> LNSession:
                 session = LNSession(protocol)
-                peer = self._construct_peer(session.remote_pubkey)
-                asyncio.run_coroutine_threadsafe(
-                    self.taskgroup.spawn(peer.main_loop(transport_session=session)),
-                    self.network.asyncio_loop,
-                )
+                async def coro():
+                    # wait until remote pubkey is available
+                    await session.transport.handshake_done.wait()
+                    peer = self._construct_peer(session.remote_pubkey)
+                    assert peer
+                    await self.taskgroup.spawn(peer.main_loop(transport_session=session))
+                asyncio.run_coroutine_threadsafe(coro(), self.network.asyncio_loop)
                 return session
 
             try:
-                self.listen_server = await create_bolt8_server(
+                async with LNServer(
                     prologue=b'lightning',
                     privkey=self.node_keypair.privkey,
                     whitelist=None,
@@ -269,7 +271,8 @@ class LNWorker(Logger, EventListener, NetworkRetryManager[LNPeerAddr]):
                     host=addr,
                     port=netaddr.port,
                     loop=self.network.asyncio_loop,
-                )
+                ) as self.listen_server:
+                    await self.listen_server.serve_forever()
             except OSError as e:
                 self.logger.error(f"cannot listen for lightning p2p. error: {e!r}")
 
@@ -314,6 +317,8 @@ class LNWorker(Logger, EventListener, NetworkRetryManager[LNPeerAddr]):
         return peer
 
     def _construct_peer(self, remote_pubkey: bytes):
+        assert isinstance(self, (LNWallet, LNGossip))
+        assert isinstance(remote_pubkey, bytes)
         with self.lock:
             existing_peer = self._peers.get(remote_pubkey)
             if existing_peer:
@@ -355,8 +360,6 @@ class LNWorker(Logger, EventListener, NetworkRetryManager[LNPeerAddr]):
         asyncio.run_coroutine_threadsafe(self.main_loop(), self.network.asyncio_loop)
 
     async def stop(self):
-        if self.listen_server:
-            self.listen_server.close()
         self.unregister_callbacks()
         await self.taskgroup.cancel_remaining()
 
@@ -3221,11 +3224,10 @@ class LNWallet(LNWorker):
         async def _request_fclose(addresses):
             for host, port, timestamp in addresses:
                 peer_addr = LNPeerAddr(host, port, node_id)
-                transport = LNTransport(privkey, peer_addr, e_proxy=ESocksProxy.from_network_settings(self.network))
-                peer = Peer(self, node_id, transport, is_channel_backup=True)
+                peer = Peer(self, node_id, is_channel_backup=True)
                 try:
                     async with OldTaskGroup(wait=any) as group:
-                        await group.spawn(peer._message_loop())
+                        await group.spawn(peer.main_loop(peer_addr=peer_addr))
                         await group.spawn(peer.request_force_close(channel_id))
                     return True
                 except Exception as e:
