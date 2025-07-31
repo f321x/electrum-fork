@@ -12,7 +12,7 @@ from electrum.bitcoin import DummyAddress
 from electrum.logging import get_logger
 from electrum.transaction import PartialTxOutput, PartialTransaction
 from electrum.util import (NotEnoughFunds, NoDynamicFeeEstimates, profiler, get_asyncio_loop, age,
-                           wait_for2)
+                           wait_for2, send_exception_to_crash_reporter)
 from electrum.submarine_swaps import (
     NostrTransport, SwapServerTransport, pubkey_to_rgb_color, LOCKTIME_DELTA_REFUND, LOCKTIME_DELTA_REFUND_BUFFER
 )
@@ -25,6 +25,7 @@ from .util import QtEventListener, qt_event_listener
 from .qetxfinalizer import QETxFinalizer
 
 if TYPE_CHECKING:
+    import concurrent.futures
     from electrum.submarine_swaps import SwapOffer, SwapData
 
 
@@ -203,7 +204,6 @@ class QESwapHelper(AuthMixin, QObject, QtEventListener):
     def on_destroy(self):
         if self.transport_task is not None:
             self.transport_task.cancel()
-            self.transport_task = None
         self.unregister_callbacks()
 
     walletChanged = pyqtSignal()
@@ -465,17 +465,19 @@ class QESwapHelper(AuthMixin, QObject, QtEventListener):
                             self.offersUpdated.emit()
                     await asyncio.sleep(1)
 
-        async def handle_swap_transport(transport: SwapServerTransport):
-            # ensures that swap_transport is always set None if transport closes
-            try:
-                await swap_transport_task(transport)
-            finally:
-                self.swap_transport = None
+        def transport_closed_cb(fut: 'concurrent.futures.Future'):
+            self.transport_task = None
+            if fut.cancelled():
+                return
+            exc = fut.exception()
+            if exc:
+                send_exception_to_crash_reporter(exc)
 
         self.transport_task = asyncio.run_coroutine_threadsafe(
-            handle_swap_transport(swap_transport),
+            swap_transport_task(swap_transport),
             get_asyncio_loop()
         )
+        self.transport_task.add_done_callback(transport_closed_cb)
 
     @pyqtSlot()
     def npubSelectionCancelled(self):
