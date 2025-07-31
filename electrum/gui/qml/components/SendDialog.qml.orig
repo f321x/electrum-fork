@@ -58,12 +58,18 @@ ElDialog {
             Layout.fillHeight: true
 
             hint: Daemon.currentWallet.isLightning
+<<<<<<< HEAD
                 ? qsTr('Scan an Invoice, an Address, an LNURL, a PSBT or a Channel Backup')
                 : qsTr('Scan an Invoice, an Address, an LNURL or a PSBT')
+            onFound: dialog.dispatch(scanData)
+=======
+                ? qsTr('Scan an Invoice, an Address, an LNURL-pay, a PSBT or a Channel Backup')
+                : qsTr('Scan an Invoice, an Address, an LNURL-pay or a PSBT')
 
             onFoundText: (data) => {
                 dialog.dispatch(data)
             }
+>>>>>>> accumulator/android_qml_qrscan_signals
         }
 
         ButtonContainer {

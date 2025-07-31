@@ -47,8 +47,7 @@ Item {
                 ? qsTr('Scan an Invoice, an Address, an LNURL, a PSBT or a Channel Backup')
                 : qsTr('Scan an Invoice, an Address, an LNURL or a PSBT')
         })
-        scanner.onFound.connect(function() {
-            var data = scanner.scanData
+        scanner.onFoundText.connect(function(data) {
             data = data.trim()
             if (bitcoin.isRawTx(data)) {
                 app.stack.push(Qt.resolvedUrl('TxDetails.qml'), { rawtx: data })
