@@ -45,6 +45,7 @@ from aiorpcx import RPCSession, Notification, NetAddress, NewlineFramer
 from aiorpcx.curio import timeout_after, TaskTimeout
 from aiorpcx.jsonrpc import JSONRPC, CodeMessageError
 from aiorpcx.rawsocket import RSClient, RSTransport
+from electrum_lntransport import LNClient, LNPeerAddr
 import certifi
 
 from .util import (ignore_exceptions, log_exceptions, bfh, ESocksProxy,
@@ -72,7 +73,7 @@ ca_path = certifi.where()
 
 BUCKET_NAME_OF_ONION_SERVERS = 'onion'
 
-_KNOWN_NETWORK_PROTOCOLS = {'t', 's'}
+_KNOWN_NETWORK_PROTOCOLS = {'t', 's', 'b'}
 PREFERRED_NETWORK_PROTOCOL = 's'
 assert PREFERRED_NETWORK_PROTOCOL in _KNOWN_NETWORK_PROTOCOLS
 
