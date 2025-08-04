@@ -44,7 +44,8 @@ import aiorpcx
 from aiorpcx import RPCSession, Notification, NetAddress, NewlineFramer
 from aiorpcx.curio import timeout_after, TaskTimeout
 from aiorpcx.jsonrpc import JSONRPC, CodeMessageError
-from aiorpcx.rawsocket import RSClient, RSTransport
+from aiorpcx.rawsocket import RSClient, RSTransport, ConnectionLostError
+from electrum_lntransport import LNClient, LNPeerAddr
 import certifi
 
 from .util import (ignore_exceptions, log_exceptions, bfh, ESocksProxy,
@@ -75,7 +76,7 @@ ca_path = certifi.where()
 
 BUCKET_NAME_OF_ONION_SERVERS = 'onion'
 
-_KNOWN_NETWORK_PROTOCOLS = {'t', 's'}
+_KNOWN_NETWORK_PROTOCOLS = {'t', 's', 'b'}
 PREFERRED_NETWORK_PROTOCOL = 's'
 assert PREFERRED_NETWORK_PROTOCOL in _KNOWN_NETWORK_PROTOCOLS
 
@@ -427,7 +428,7 @@ class PaddedRSTransport(RSTransport):
 
 class ServerAddr:
 
-    def __init__(self, host: str, port: Union[int, str], *, protocol: str = None):
+    def __init__(self, host: str, port: Union[int, str], *, protocol: str = None, pubkey: str = None):
         assert isinstance(host, str), repr(host)
         if protocol is None:
             protocol = 's'
@@ -444,14 +445,23 @@ class ServerAddr:
         self.host = str(net_addr.host)  # canonical form (if e.g. IPv6 address)
         self.port = int(net_addr.port)
         self.protocol = protocol
+        self.pubkey = pubkey
         self._net_addr_str = str(net_addr)
 
     @classmethod
     def from_str(cls, s: str) -> 'ServerAddr':
         """Constructs a ServerAddr or raises ValueError."""
         # host might be IPv6 address, hence do rsplit:
-        host, port, protocol = str(s).rsplit(':', 2)
-        return ServerAddr(host=host, port=port, protocol=protocol)
+        s = str(s).rsplit(':', 3)
+        if len(s) == 4:
+            host, port, protocol, pubkey = s
+            assert protocol == 'b'
+        elif len(s) == 3:
+            host, port, protocol = s
+            pubkey = None
+        else:
+            raise ValueError(f"cannot construct ServerAddr from invalid str: {s=}")
+        return ServerAddr(host=host, port=port, protocol=protocol, pubkey=pubkey)
 
     @classmethod
     def from_str_with_inference(cls, s: str) -> Optional['ServerAddr']:
@@ -466,7 +476,7 @@ class ServerAddr:
             host_end = s.index("]")
             host = s[1:host_end]
             s = s[host_end+1:]
-        items = str(s).rsplit(':', 2)
+        items = str(s).rsplit(':', 3)
         if len(items) < 2:
             return None  # although maybe we could guess the port too?
         host = host or items[0]
@@ -475,8 +485,12 @@ class ServerAddr:
             protocol = items[2]
         else:
             protocol = PREFERRED_NETWORK_PROTOCOL
+        if len(items) == 4:
+            pubkey = items[3]
+        else:
+            pubkey = None
         try:
-            return ServerAddr(host=host, port=port, protocol=protocol)
+            return ServerAddr(host=host, port=port, protocol=protocol, pubkey=pubkey)
         except ValueError:
             return None
 
@@ -484,16 +498,21 @@ class ServerAddr:
         # note: this method is closely linked to from_str_with_inference
         if self.protocol == 's':  # hide trailing ":s"
             return self.net_addr_str()
+        elif self.protocol == 'b':  # slice pubkey
+            return f'{self._net_addr_str}:{self.protocol}:{self.pubkey[:5]}...{self.pubkey[-5:]}'
         return str(self)
 
     def __str__(self):
-        return '{}:{}'.format(self.net_addr_str(), self.protocol)
+        result = f'{self.net_addr_str()}:{self.protocol}'
+        if self.pubkey:
+            result += f':{self.pubkey}'
+        return result
 
     def to_json(self) -> str:
         return str(self)
 
     def __repr__(self):
-        return f'<ServerAddr host={self.host} port={self.port} protocol={self.protocol}>'
+        return f'<ServerAddr host={self.host} port={self.port} protocol={self.protocol} pubkey={self.pubkey}>'
 
     def net_addr_str(self) -> str:
         return self._net_addr_str
@@ -503,13 +522,14 @@ class ServerAddr:
             return False
         return (self.host == other.host
                 and self.port == other.port
-                and self.protocol == other.protocol)
+                and self.protocol == other.protocol
+                and self.pubkey == other.pubkey)
 
     def __ne__(self, other):
         return not (self == other)
 
     def __hash__(self):
-        return hash((self.host, self.port, self.protocol))
+        return hash((self.host, self.port, self.protocol, self.pubkey))
 
 
 def _get_cert_path_for_host(*, config: 'SimpleConfig', host: str) -> str:
@@ -943,47 +963,65 @@ class Interface(Logger):
         exit_early: bool = False,
     ):
         session_factory = lambda *args, iface=self, **kwargs: NotificationSession(*args, **kwargs, interface=iface)
-        async with _RSClient(
-            session_factory=session_factory,
-            host=self.host, port=self.port,
-            ssl=ssl_context,
-            proxy=self.proxy,
-            transport=PaddedRSTransport,
-        ) as session:
-            self.session = session  # type: NotificationSession
-            self.session.set_default_timeout(self.network.get_network_timeout_seconds(NetworkTimeout.Generic))
-            try:
-                ver = await session.send_request('server.version', [self.client_name(), version.PROTOCOL_VERSION])
-            except aiorpcx.jsonrpc.RPCError as e:
-                raise GracefulDisconnect(e)  # probably 'unsupported protocol version'
-            if exit_early:
-                return
-            if ver[1] != version.PROTOCOL_VERSION:
-                raise GracefulDisconnect(f'server violated protocol-version-negotiation. '
-                                         f'we asked for {version.PROTOCOL_VERSION!r}, they sent {ver[1]!r}')
-            if not self.network.check_interface_against_healthy_spread_of_connected_servers(self):
-                raise GracefulDisconnect(f'too many connected servers already '
-                                         f'in bucket {self.bucket_based_on_ipaddress()}')
-            self.logger.info(f"connection established. version: {ver}")
 
-            try:
-                async with self.taskgroup as group:
-                    await group.spawn(self.ping)
-                    await group.spawn(self.request_fee_estimates)
-                    await group.spawn(self.run_fetch_blocks)
-                    await group.spawn(self.monitor_connection)
-            except aiorpcx.jsonrpc.RPCError as e:
-                if e.code in (
-                    JSONRPC.EXCESSIVE_RESOURCE_USAGE,
-                    JSONRPC.SERVER_BUSY,
-                    JSONRPC.METHOD_NOT_FOUND,
-                    JSONRPC.INTERNAL_ERROR,
-                ):
-                    log_level = logging.WARNING if self.is_main_server() else logging.INFO
-                    raise GracefulDisconnect(e, log_level=log_level) from e
-                raise
-            finally:
-                self.got_disconnected.set()  # set this ASAP, ideally before any awaits
+        def create_client():
+            if self.protocol == 'b':
+                peer_addr = LNPeerAddr(self.host, self.port, bytes.fromhex(self.server.pubkey))
+                bolt8_privkey = os.urandom(32)
+                return LNClient(  # todo: use PaddedRSTransport
+                    privkey=bolt8_privkey,
+                    session_factory=session_factory,
+                    peer_addr=peer_addr,
+                    proxy=self.proxy,
+                    prologue=b'electrum',
+                )
+            else:
+                return _RSClient(
+                    session_factory=session_factory,
+                    host=self.host,
+                    port=self.port,
+                    ssl=ssl_context,
+                    proxy=self.proxy,
+                    transport=PaddedRSTransport,
+                )
+        try:
+            async with create_client() as session:
+                self.session = session  # type: NotificationSession
+                self.session.set_default_timeout(self.network.get_network_timeout_seconds(NetworkTimeout.Generic))
+                try:
+                    ver = await session.send_request('server.version', [self.client_name(), version.PROTOCOL_VERSION])
+                except aiorpcx.jsonrpc.RPCError as e:
+                    raise GracefulDisconnect(e)  # probably 'unsupported protocol version'
+                if exit_early:
+                    return
+                if ver[1] != version.PROTOCOL_VERSION:
+                    raise GracefulDisconnect(f'server violated protocol-version-negotiation. '
+                                             f'we asked for {version.PROTOCOL_VERSION!r}, they sent {ver[1]!r}')
+                if not self.network.check_interface_against_healthy_spread_of_connected_servers(self):
+                    raise GracefulDisconnect(f'too many connected servers already '
+                                             f'in bucket {self.bucket_based_on_ipaddress()}')
+                self.logger.info(f"connection established. version: {ver}")
+
+                try:
+                    async with self.taskgroup as group:
+                        await group.spawn(self.ping)
+                        await group.spawn(self.request_fee_estimates)
+                        await group.spawn(self.run_fetch_blocks)
+                        await group.spawn(self.monitor_connection)
+                except aiorpcx.jsonrpc.RPCError as e:
+                    if e.code in (
+                        JSONRPC.EXCESSIVE_RESOURCE_USAGE,
+                        JSONRPC.SERVER_BUSY,
+                        JSONRPC.METHOD_NOT_FOUND,
+                        JSONRPC.INTERNAL_ERROR,
+                    ):
+                        log_level = logging.WARNING if self.is_main_server() else logging.INFO
+                        raise GracefulDisconnect(e, log_level=log_level) from e
+                    raise
+                finally:
+                    self.got_disconnected.set()  # set this ASAP, ideally before any awaits
+        except ConnectionLostError:
+            raise GracefulDisconnect()
 
     async def monitor_connection(self):
         while True:
