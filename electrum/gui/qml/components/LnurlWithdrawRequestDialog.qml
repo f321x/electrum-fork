@@ -18,7 +18,7 @@ ElDialog {
 
     padding: 0
 
-    property int walletCanReceive: 0
+    property int walletCanReceive: wallet.lightningCanReceive.satsInt
     property int providerMinWithdrawable: parseInt(requestDetails.lnurlData['min_withdrawable_sat'])
     property int providerMaxWithdrawable: parseInt(requestDetails.lnurlData['max_withdrawable_sat'])
     property int effectiveMinWithdrawable: Math.max(providerMinWithdrawable, 1)
@@ -39,7 +39,11 @@ ElDialog {
         // assign walletCanReceive directly to prevent a binding loop
         target: wallet
         function onLightningCanReceiveChanged() {
-            dialog.walletCanReceive = wallet.lightningCanReceive.satsInt
+            if (!requestDetails.busy) {
+                // don't assign while busy to prevent the view from changing while receiving
+                // the incoming payment
+                dialog.walletCanReceive = wallet.lightningCanReceive.satsInt
+            }
         }
     }
 
