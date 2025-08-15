@@ -138,6 +138,7 @@ class Peer(Logger, EventListener, LNSession):
         self.got_disconnected.set()
         self.close_and_cleanup()
         await LNSession.connection_lost(self)
+        await self.taskgroup.cancel_remaining()
 
     def send_message(self, message_name: str, **kwargs) -> asyncio.Event:
         assert util.get_running_loop() == util.get_asyncio_loop(), f"this must be run on the asyncio thread!"
