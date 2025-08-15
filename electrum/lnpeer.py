@@ -82,8 +82,6 @@ class Peer(Logger, EventListener, LNSession):
         'gossip_timestamp_filter', 'reply_channel_range', 'query_channel_range',
         'query_short_channel_ids', 'reply_short_channel_ids', 'reply_short_channel_ids_end')
 
-    DELAY_INC_MSG_PROCESSING_SLEEP = 0.01
-
     def __init__(
         self,
         lnworker: Union['LNWallet', 'LNGossip'],
@@ -626,14 +624,15 @@ class Peer(Logger, EventListener, LNSession):
 
     async def _send_gossip_messages(self, messages: List[GossipForwardingMessage]) -> int:
         amount_sent = 0
+        msg_sent = None
         for msg in messages:
             if self.gossip_timestamp_filter.in_range(msg.timestamp) \
                 and self.pubkey != msg.sender_node_id:
-                self.send_serialized_message(msg.msg)
+                msg_sent = self.send_serialized_message(msg.msg)
                 amount_sent += 1
-                if amount_sent % 250 == 0:
-                    # this can be a lot of messages, completely blocking the event loop
-                    await asyncio.sleep(self.DELAY_INC_MSG_PROCESSING_SLEEP)
+        if msg_sent:
+            # wait for the last message to be flushed
+            await msg_sent.wait()
         return amount_sent
 
     async def _query_gossip(self):
@@ -705,7 +704,7 @@ class Peer(Logger, EventListener, LNSession):
                 else:
                     # we cover the range until the height of the first scid in the next chunk
                     number_of_blocks = sorted_scids[0].block_height - first_blockheight
-                self.send_message('reply_channel_range',
+                msg_sent = self.send_message('reply_channel_range',
                     chain_hash=constants.net.rev_genesis_bytes(),
                     first_blocknum=first_blockheight,
                     number_of_blocks=number_of_blocks,
@@ -713,8 +712,8 @@ class Peer(Logger, EventListener, LNSession):
                     len=1+len(encoded_scids),
                     encoded_short_ids=b'\x00' + encoded_scids)
                 if not complete:
+                    await msg_sent.wait()
                     first_blockheight = sorted_scids[0].block_height
-                    await asyncio.sleep(self.DELAY_INC_MSG_PROCESSING_SLEEP)
             self.outgoing_gossip_reply = False
 
     async def get_channel_range(self):
@@ -810,15 +809,15 @@ class Peer(Logger, EventListener, LNSession):
                 requested_msgs = chan_db.get_gossip_for_scid_request(scid)
                 response.update(requested_msgs)
             self.logger.debug(f"found {len(response)} gossip messages to serve scid request")
-            for index, msg in enumerate(response):
+            for msg in response:
                 self.send_serialized_message(msg)
-                # if index % 250 == 0:
-                #     await asyncio.sleep(self.DELAY_INC_MSG_PROCESSING_SLEEP)
-            self.send_message(
+            msg_sent = self.send_message(
                 'reply_short_channel_ids_end',
                 chain_hash=constants.net.rev_genesis_bytes(),
                 full_information=self.network.lngossip.is_synced()
             )
+            # wait for the last msg to be written before releasing semaphore
+            await msg_sent.wait()
             self.outgoing_gossip_reply = False
 
     async def get_short_channel_ids(self, ids):
