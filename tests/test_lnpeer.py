@@ -12,9 +12,10 @@ from concurrent import futures
 from unittest import mock
 from typing import Iterable, NamedTuple, Tuple, List, Dict
 
-from aiorpcx import timeout_after, TaskTimeout
+import aiorpcx
+from aiorpcx import SessionKind
 from electrum_ecc import ECPrivkey
-from electrum_lntransport import LNPeerAddr
+from electrum_lntransport import LNPeerAddr, LNSession
 
 import electrum
 import electrum.trampoline
@@ -349,21 +350,35 @@ class MockLNWallet(Logger, EventListener, NetworkRetryManager[LNPeerAddr]):
 
 
 class MockTransport:
+    # mocks electrum_lntransport.BOLT8Protocol(RSTransport)
     def __init__(self, name):
         self.queue = asyncio.Queue()  # incoming messages
         self._name = name
         self.peer_addr = None
+        self._closed_event = asyncio.Event()
 
     def name(self):
         return self._name
 
     async def read_messages(self):
         while True:
-            data = await self.queue.get()
-            if isinstance(data, asyncio.Event):  # to artificially delay messages
-                await data.wait()
-                continue
-            yield data
+            yield await self.receive_message()
+
+    async def receive_message(self):
+        data = await self.queue.get()
+        if isinstance(data, asyncio.Event):  # to artificially delay messages
+            await data.wait()
+        return data
+
+    def is_closing(self):
+        return self._closed_event.is_set()
+
+    async def close(self):
+        self._closed_event.set()
+
+    @staticmethod
+    def remote_address():
+        return aiorpcx.NetAddress("127.0.0.1", 9735)
 
 class NoFeaturesTransport(MockTransport):
     """
@@ -381,9 +396,18 @@ class PutIntoOthersQueueTransport(MockTransport):
         super().__init__(name)
         self.other_mock_transport = None
         self.privkey = keypair.privkey
+        self.pubkey = keypair.pubkey
+        self.kind = SessionKind.CLIENT
+        self.handshake_done = asyncio.Event()
+        self.handshake_done.set()
+        self.is_listener = False
 
-    def send_bytes(self, data):
-        self.other_mock_transport.queue.put_nowait(data)
+    async def write(self, msg):
+        self.other_mock_transport.queue.put_nowait(msg)
+
+    @property
+    def remote_pubkey(self):
+        return self.other_mock_transport.pubkey
 
 def transport_pair(k1, k2, name1, name2):
     t1 = PutIntoOthersQueueTransport(k1, name1)
@@ -394,7 +418,23 @@ def transport_pair(k1, k2, name1, name2):
 
 
 class PeerInTests(Peer):
-    DELAY_INC_MSG_PROCESSING_SLEEP = 0  # disable rate-limiting
+    bw_cost_per_byte = 0  # disable rate-limiting
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # this is usually spawned in RSTransport in connection_made
+        asyncio.run_coroutine_threadsafe(
+            self.process_messages(self.transport.receive_message),
+            util.get_asyncio_loop()
+        )
+
+    async def connection_lost(self):
+        self.got_disconnected.set()
+        await LNSession.connection_lost(self)
+
+    async def close(self, *, force_after=30):
+        await LNSession.close(self, force_after=force_after)
+        await self.got_disconnected()
 
 
 high_fee_channel = {
@@ -652,7 +692,8 @@ class TestPeerDirect(TestPeer):
             self.assertEqual(alice_channel.peer_state, PeerState.GOOD)
             self.assertEqual(bob_channel.peer_state, PeerState.GOOD)
             gath.cancel()
-        gath = asyncio.gather(reestablish(), p1._message_loop(), p2._message_loop(), p1.htlc_switch(), p1.htlc_switch())
+        await asyncio.gather(p1.initialize(), p2.initialize())
+        gath = asyncio.gather(reestablish(), p1.htlc_switch(), p1.htlc_switch())
         with self.assertRaises(asyncio.CancelledError):
             await gath
 
@@ -667,7 +708,9 @@ class TestPeerDirect(TestPeer):
                 result, log = await w1.pay_invoice(pay_req)
                 self.assertEqual(result, True)
                 gath.cancel()
-            gath = asyncio.gather(pay(), p1._message_loop(), p2._message_loop(), p1.htlc_switch(), p2.htlc_switch())
+
+            await asyncio.gather(p1.initialize(), p2.initialize())
+            gath = asyncio.gather(pay(), p1.htlc_switch(), p2.htlc_switch())
             with self.assertRaises(asyncio.CancelledError):
                 await gath
             p1, p2, w1, w2, _q1, _q2 = self.prepare_peers(alice_channel_0, bob_channel)
@@ -682,10 +725,9 @@ class TestPeerDirect(TestPeer):
                 await p2.reestablish_channel(bob_channel)
 
             with self.assertRaises(GracefulDisconnect):
+                await asyncio.gather(p1.initialize(), p2.initialize())
                 async with OldTaskGroup() as group:
-                    await group.spawn(p1._message_loop())
                     await group.spawn(p1.htlc_switch())
-                    await group.spawn(p2._message_loop())
                     await group.spawn(p2.htlc_switch())
                     await group.spawn(alice_sends_reest)
                     await group.spawn(bob_sends_reest)
@@ -740,10 +782,10 @@ class TestPeerDirect(TestPeer):
         async def f():
             p1, p2, w1, w2, _q1, _q2 = self.prepare_peers(chan_AB, chan_BA, k1=k1, k2=k2)
             async with OldTaskGroup() as group:
-                await group.spawn(p1._message_loop())
-                await group.spawn(p2._message_loop())
-                await p1.initialized
-                await p2.initialized
+                await group.spawn(p1.initialize())
+                await group.spawn(p2.initialize())
+                for peer in [p1, p2]:
+                    await util.wait_for2(peer.initialized, 1)
                 self._send_fake_htlc(p2, chan_BA)
                 self._send_fake_htlc(p1, chan_AB)
                 p2.transport.queue.put_nowait(asyncio.Event())  # break Bob's incoming pipe
@@ -756,8 +798,10 @@ class TestPeerDirect(TestPeer):
             for chan in (chan_AB, chan_BA):
                 chan.peer_state = PeerState.DISCONNECTED
             async with OldTaskGroup() as group:
-                await group.spawn(p1._message_loop())
-                await group.spawn(p2._message_loop())
+                await group.spawn(p1.initialize())
+                await group.spawn(p2.initialize())
+                for peer in [p1, p2]:
+                    await util.wait_for2(peer.initialized, 1)
                 with self.assertLogs('electrum', level='INFO') as logs:
                     async with OldTaskGroup() as group2:
                         await group2.spawn(p1.reestablish_channel(chan_AB))
@@ -796,10 +840,10 @@ class TestPeerDirect(TestPeer):
         async def f():
             p1, p2, w1, w2, _q1, _q2 = self.prepare_peers(chan_AB, chan_BA, k1=k1, k2=k2)
             async with OldTaskGroup() as group:
-                await group.spawn(p1._message_loop())
-                await group.spawn(p2._message_loop())
-                await p1.initialized
-                await p2.initialized
+                await group.spawn(p1.initialize())
+                await group.spawn(p2.initialize())
+                for peer in [p1, p2]:
+                    await util.wait_for2(peer.initialized, 1)
                 self._send_fake_htlc(p2, chan_BA)
                 self._send_fake_htlc(p1, chan_AB)
                 p2.transport.queue.put_nowait(asyncio.Event())  # break Bob's incoming pipe
@@ -813,8 +857,10 @@ class TestPeerDirect(TestPeer):
             for chan in (chan_AB, chan_BA):
                 chan.peer_state = PeerState.DISCONNECTED
             async with OldTaskGroup() as group:
-                await group.spawn(p1._message_loop())
-                await group.spawn(p2._message_loop())
+                await group.spawn(p1.initialize())
+                await group.spawn(p2.initialize())
+                for peer in [p1, p2]:
+                    await util.wait_for2(peer.initialized, 1)
                 with self.assertLogs('electrum', level='INFO') as logs:
                     async with OldTaskGroup() as group2:
                         await group2.spawn(p1.reestablish_channel(chan_AB))
@@ -864,10 +910,9 @@ class TestPeerDirect(TestPeer):
             }
 
         async def f():
+            await asyncio.gather(p1.initialize(), p2.initialize())
             async with OldTaskGroup() as group:
-                await group.spawn(p1._message_loop())
                 await group.spawn(p1.htlc_switch())
-                await group.spawn(p2._message_loop())
                 await group.spawn(p2.htlc_switch())
                 await asyncio.sleep(0.01)
                 invoice_features = lnaddr.get_features()
@@ -929,10 +974,9 @@ class TestPeerDirect(TestPeer):
             raise SuccessfulTest()
 
         async def f():
+            await asyncio.gather(p1.initialize(), p2.initialize())
             async with OldTaskGroup() as group:
-                await group.spawn(p1._message_loop())
                 await group.spawn(p1.htlc_switch())
-                await group.spawn(p2._message_loop())
                 await group.spawn(p2.htlc_switch())
                 await asyncio.sleep(0.01)
                 await group.spawn(try_paying_some_invoices())
@@ -1009,10 +1053,9 @@ class TestPeerDirect(TestPeer):
             raise PaymentDone()
 
         async def f():
+            await asyncio.gather(p1.initialize(), p2.initialize())
             async with OldTaskGroup() as group:
-                await group.spawn(p1._message_loop())
                 await group.spawn(p1.htlc_switch())
-                await group.spawn(p2._message_loop())
                 await group.spawn(p2.htlc_switch())
                 await asyncio.sleep(0.01)
                 await group.spawn(pay())
@@ -1037,7 +1080,8 @@ class TestPeerDirect(TestPeer):
                     lnaddr, pay_req = self.prepare_invoice(w2, amount_msat=payment_value_msat)
                     await group.spawn(single_payment(pay_req))
             gath.cancel()
-        gath = asyncio.gather(many_payments(), p1._message_loop(), p2._message_loop(), p1.htlc_switch(), p2.htlc_switch())
+        await asyncio.gather(p1.initialize(), p2.initialize())
+        gath = asyncio.gather(many_payments(), p1.htlc_switch(), p2.htlc_switch())
         with self.assertRaises(asyncio.CancelledError):
             await gath
         self.assertEqual(alice_init_balance_msat - num_payments * payment_value_msat, alice_channel.balance(HTLCOwner.LOCAL))
@@ -1092,10 +1136,9 @@ class TestPeerDirect(TestPeer):
         self.assertTrue(lnaddr2.get_features().supports(LnFeatures.BASIC_MPP_OPT))
 
         async def f():
+            await asyncio.gather(p1.initialize(), p2.initialize())
             async with OldTaskGroup() as group:
-                await group.spawn(p1._message_loop())
                 await group.spawn(p1.htlc_switch())
-                await group.spawn(p2._message_loop())
                 await group.spawn(p2.htlc_switch())
                 await asyncio.sleep(0.01)
                 await group.spawn(pay())
@@ -1166,10 +1209,9 @@ class TestPeerDirect(TestPeer):
         self.assertTrue(lnaddr1.get_features().supports(LnFeatures.BASIC_MPP_OPT))
 
         async def f():
+            await asyncio.gather(p1.initialize(), p2.initialize())
             async with OldTaskGroup() as group:
-                await group.spawn(p1._message_loop())
                 await group.spawn(p1.htlc_switch())
-                await group.spawn(p2._message_loop())
                 await group.spawn(p2.htlc_switch())
                 await asyncio.sleep(0.01)
                 await group.spawn(pay())
@@ -1254,7 +1296,8 @@ class TestPeerDirect(TestPeer):
         async def set_settle():
             await asyncio.sleep(0.1)
             w2.enable_htlc_settle = True
-        gath = asyncio.gather(pay(), set_settle(), p1._message_loop(), p2._message_loop(), p1.htlc_switch(), p2.htlc_switch())
+        await asyncio.gather(p1.initialize(), p2.initialize())
+        gath = asyncio.gather(pay(), set_settle(), p1.htlc_switch(), p2.htlc_switch())
         with self.assertRaises(asyncio.CancelledError):
             await gath
 
@@ -1266,7 +1309,9 @@ class TestPeerDirect(TestPeer):
             await util.wait_for2(p1.initialized, 1)
             await util.wait_for2(p2.initialized, 1)
             p1.send_warning(alice_channel.channel_id, 'be warned!', close_connection=True)
-        gath = asyncio.gather(action(), p1._message_loop(), p2._message_loop(), p1.htlc_switch(), p2.htlc_switch())
+
+        await asyncio.gather(p1.initialize(), p2.initialize())
+        gath = asyncio.gather(action(), p1.htlc_switch(), p2.htlc_switch())
         with self.assertRaises(GracefulDisconnect):
             await gath
 
@@ -1280,7 +1325,9 @@ class TestPeerDirect(TestPeer):
             p1.send_error(alice_channel.channel_id, 'some error happened!', force_close_channel=True)
             assert alice_channel.is_closed()
             gath.cancel()
-        gath = asyncio.gather(action(), p1._message_loop(), p2._message_loop(), p1.htlc_switch(), p2.htlc_switch())
+
+        await asyncio.gather(p1.initialize(), p2.initialize())
+        gath = asyncio.gather(action(), p1.htlc_switch(), p2.htlc_switch())
         with self.assertRaises(GracefulDisconnect):
             await gath
 
@@ -1312,9 +1359,9 @@ class TestPeerDirect(TestPeer):
                 self.fail("p1.close_channel should have raised above!")
 
             async def main_loop(peer):
-                    async with peer.taskgroup as group:
-                        await group.spawn(peer._message_loop())
-                        await group.spawn(peer.htlc_switch())
+                await peer.initialize()
+                async with peer.taskgroup as group:
+                    await group.spawn(peer.htlc_switch())
 
             coros = [close(), main_loop(p1), main_loop(p2)]
             gath = asyncio.gather(*coros)
@@ -1343,9 +1390,8 @@ class TestPeerDirect(TestPeer):
                 gath.cancel()
 
             async def main_loop(peer):
-                async with peer.taskgroup as group:
-                    await group.spawn(peer._message_loop())
-                    await group.spawn(peer.htlc_switch())
+                await peer.initialize()
+                await peer.htlc_switch()
 
             coros = [close(), main_loop(p1), main_loop(p2)]
             gath = asyncio.gather(*coros)
@@ -1397,7 +1443,8 @@ class TestPeerDirect(TestPeer):
                 paysession=paysession,
                 min_final_cltv_delta=lnaddr.get_min_final_cltv_delta(),
             )
-            await asyncio.gather(pay, p1._message_loop(), p2._message_loop(), p1.htlc_switch(), p2.htlc_switch())
+            await asyncio.gather(p1.initialize(), p2.initialize())
+            await asyncio.gather(pay, p1.htlc_switch(), p2.htlc_switch())
         with self.assertRaises(PaymentFailure):
             await f()
 
@@ -1411,22 +1458,23 @@ class TestPeerDirect(TestPeer):
             # peer1 sends known message with trailing garbage
             # BOLT-01 says peer2 should ignore trailing garbage
             raw_msg1 = encode_msg('ping', num_pong_bytes=4, byteslen=4) + bytes(range(55))
-            p1.transport.send_bytes(raw_msg1)
+            p1.send_serialized_message(raw_msg1)
             await asyncio.sleep(0.05)
             # peer1 sends unknown 'odd-type' message
             # BOLT-01 says peer2 should ignore whole message
             raw_msg2 = (43333).to_bytes(length=2, byteorder="big") + bytes(range(55))
-            p1.transport.send_bytes(raw_msg2)
+            p1.send_serialized_message(raw_msg2)
             await asyncio.sleep(0.05)
             raise SuccessfulTest()
 
         async def f():
             async with OldTaskGroup() as group:
                 for peer in [p1, p2]:
-                    await group.spawn(peer._message_loop())
-                    await group.spawn(peer.htlc_switch())
+                    await group.spawn(peer.initialize())
                 for peer in [p1, p2]:
-                    await peer.initialized
+                    await util.wait_for2(peer.initialized, 1)
+                for peer in [p1, p2]:
+                    await group.spawn(peer.htlc_switch())
                 await group.spawn(send_weird_messages())
 
         with self.assertRaises(SuccessfulTest):
@@ -1442,7 +1490,7 @@ class TestPeerDirect(TestPeer):
             # peer1 sends unknown 'even-type' message
             # BOLT-01 says peer2 should close the connection
             raw_msg2 = (43334).to_bytes(length=2, byteorder="big") + bytes(range(55))
-            p1.transport.send_bytes(raw_msg2)
+            p1.send_serialized_message(raw_msg2)
             await asyncio.sleep(0.05)
 
         failing_task = None
@@ -1454,7 +1502,7 @@ class TestPeerDirect(TestPeer):
                 failing_task = await group.spawn(p2._message_loop())
                 await group.spawn(p2.htlc_switch())
                 for peer in [p1, p2]:
-                    await peer.initialized
+                    await util.wait_for2(peer.initialized, 1)
                 await group.spawn(send_weird_messages())
 
         with self.assertRaises(GracefulDisconnect):
@@ -1466,30 +1514,30 @@ class TestPeerDirect(TestPeer):
         p1, p2, w1, w2, _q1, _q2 = self.prepare_peers(alice_channel, bob_channel)
 
         async def send_weird_messages():
-            await util.wait_for2(p1.initialized, 1)
-            await util.wait_for2(p2.initialized, 1)
             # peer1 sends known message with insufficient length for the contents
             # BOLT-01 says peer2 should fail the connection
             raw_msg1 = encode_msg('ping', num_pong_bytes=4, byteslen=4)[:-1]
-            p1.transport.send_bytes(raw_msg1)
+            msg_sent = p1.send_serialized_message(raw_msg1)
+            await msg_sent.wait()
             await asyncio.sleep(0.05)
 
         failing_task = None
         async def f():
             nonlocal failing_task
             async with OldTaskGroup() as group:
-                await group.spawn(p1._message_loop())
-                await group.spawn(p1.htlc_switch())
-                failing_task = await group.spawn(p2._message_loop())
-                await group.spawn(p2.htlc_switch())
+                await group.spawn(p1.initialize())
+                await group.spawn(p2.initialize())
                 for peer in [p1, p2]:
-                    await peer.initialized
+                    await util.wait_for2(peer.initialized, 1)
+                await group.spawn(p1.htlc_switch())
+                # failing_task = await group.spawn(p2._message_loop())
+                await group.spawn(p2.htlc_switch())
                 await group.spawn(send_weird_messages())
 
         with self.assertRaises(GracefulDisconnect):
             await f()
-        self.assertTrue(isinstance(failing_task.exception().__cause__, lnmsg.UnexpectedEndOfStream))
-
+        # self.assertTrue(isinstance(failing_task.exception().__cause__, lnmsg.UnexpectedEndOfStream))
+        raise NotImplementedError("write new assert")
 
 class TestPeerForwarding(TestPeer):
 
@@ -1592,10 +1640,10 @@ class TestPeerForwarding(TestPeer):
         async def f():
             async with OldTaskGroup() as group:
                 for peer in peers:
-                    await group.spawn(peer._message_loop())
-                    await group.spawn(peer.htlc_switch())
+                    await group.spawn(peer.initialize())
                 for peer in peers:
-                    await peer.initialized
+                    await util.wait_for2(peer.initialized, 1)
+                    await group.spawn(peer.htlc_switch())
                 for test in [21_000_000, 21_000_001]:
                     lnaddr, pay_req = self.prepare_invoice(
                         graph.workers['alice'],
@@ -1622,10 +1670,10 @@ class TestPeerForwarding(TestPeer):
         async def f():
             async with OldTaskGroup() as group:
                 for peer in peers:
-                    await group.spawn(peer._message_loop())
-                    await group.spawn(peer.htlc_switch())
+                    await group.spawn(peer.initialize())
                 for peer in peers:
-                    await peer.initialized
+                    await util.wait_for2(peer.initialized, 1)
+                    await group.spawn(peer.htlc_switch())
                 lnaddr, pay_req = self.prepare_invoice(graph.workers['dave'], include_routing_hints=True)
                 await group.spawn(pay(lnaddr, pay_req))
         with self.assertRaises(PaymentDone):
@@ -1666,10 +1714,10 @@ class TestPeerForwarding(TestPeer):
         async def f():
             async with OldTaskGroup() as group:
                 for peer in peers:
-                    await group.spawn(peer._message_loop())
-                    await group.spawn(peer.htlc_switch())
+                    await group.spawn(peer.initialize())
                 for peer in peers:
-                    await peer.initialized
+                    await util.wait_for2(peer.initialized, 1)
+                    await group.spawn(peer.htlc_switch())
                 lnaddr, pay_req = self.prepare_invoice(graph.workers['dave'], include_routing_hints=True)
                 await group.spawn(pay(pay_req))
         with self.assertRaises(PaymentDone):
@@ -1690,10 +1738,10 @@ class TestPeerForwarding(TestPeer):
         async def f():
             async with OldTaskGroup() as group:
                 for peer in peers:
-                    await group.spawn(peer._message_loop())
-                    await group.spawn(peer.htlc_switch())
+                    await group.spawn(peer.initialize())
                 for peer in peers:
-                    await peer.initialized
+                    await util.wait_for2(peer.initialized, 1)
+                    await group.spawn(peer.htlc_switch())
                 lnaddr, pay_req = self.prepare_invoice(graph.workers['dave'], include_routing_hints=True)
                 await group.spawn(pay(lnaddr, pay_req))
         with self.assertRaises(PaymentDone):
@@ -1725,10 +1773,10 @@ class TestPeerForwarding(TestPeer):
         async def f():
             async with OldTaskGroup() as group:
                 for peer in peers:
-                    await group.spawn(peer._message_loop())
-                    await group.spawn(peer.htlc_switch())
+                    await group.spawn(peer.initialize())
                 for peer in peers:
-                    await peer.initialized
+                    await util.wait_for2(peer.initialized, 1)
+                    await group.spawn(peer.htlc_switch())
                 lnaddr, pay_req = self.prepare_invoice(graph.workers['dave'], include_routing_hints=True)
                 invoice_features = lnaddr.get_features()
                 self.assertFalse(invoice_features.supports(LnFeatures.BASIC_MPP_OPT))
@@ -1778,10 +1826,10 @@ class TestPeerForwarding(TestPeer):
         async def f():
             async with OldTaskGroup() as group:
                 for peer in peers:
-                    await group.spawn(peer._message_loop())
-                    await group.spawn(peer.htlc_switch())
+                    await group.spawn(peer.initialize())
                 for peer in peers:
-                    await peer.initialized
+                    await util.wait_for2(peer.initialized, 1)
+                    await group.spawn(peer.htlc_switch())
                 await group.spawn(pay())
 
         with self.assertRaises(SuccessfulTest):
@@ -1839,10 +1887,10 @@ class TestPeerForwarding(TestPeer):
         async def f():
             async with OldTaskGroup() as group:
                 for peer in peers:
-                    await group.spawn(peer._message_loop())
-                    await group.spawn(peer.htlc_switch())
+                    await group.spawn(peer.initialize())
                 for peer in peers:
-                    await peer.initialized
+                    await util.wait_for2(peer.initialized, 1)
+                    await group.spawn(peer.htlc_switch())
                 lnaddr, pay_req = self.prepare_invoice(graph.workers['dave'], amount_msat=amount_to_pay, include_routing_hints=True)
                 await group.spawn(pay(lnaddr, pay_req))
         with self.assertRaises(PaymentDone):
@@ -1905,10 +1953,10 @@ class TestPeerForwarding(TestPeer):
 
         async with OldTaskGroup() as group:
             for peer in peers:
-                await group.spawn(peer._message_loop())
-                await group.spawn(peer.htlc_switch())
+                await group.spawn(peer.initialize())
             for peer in peers:
-                await peer.initialized
+                await util.wait_for2(peer.initialized, 1)
+                await group.spawn(peer.htlc_switch())
             await group.spawn(pay(**kwargs))
 
     async def test_payment_multipart(self):
@@ -1989,10 +2037,10 @@ class TestPeerForwarding(TestPeer):
         async def f():
             async with OldTaskGroup() as group:
                 for peer in peers:
-                    await group.spawn(peer._message_loop())
-                    await group.spawn(peer.htlc_switch())
+                    await group.spawn(peer.initialize())
                 for peer in peers:
-                    await peer.initialized
+                    await util.wait_for2(peer.initialized, 1)
+                    await group.spawn(peer.htlc_switch())
                 await group.spawn(pay())
                 await group.spawn(stop())
 
@@ -2031,10 +2079,10 @@ class TestPeerForwarding(TestPeer):
             await self._activate_trampoline(sender_w)
             async with OldTaskGroup() as group:
                 for peer in peers:
-                    await group.spawn(peer._message_loop())
-                    await group.spawn(peer.htlc_switch())
+                    await group.spawn(peer.initialize())
                 for peer in peers:
-                    await peer.initialized
+                    await util.wait_for2(peer.initialized, 1)
+                    await group.spawn(peer.htlc_switch())
                 lnaddr, pay_req = self.prepare_invoice(dest_w, include_routing_hints=include_routing_hints)
                 self.prepare_recipient(dest_w, lnaddr.paymenthash, test_hold_invoice, test_failure)
                 await group.spawn(pay(lnaddr, pay_req))
