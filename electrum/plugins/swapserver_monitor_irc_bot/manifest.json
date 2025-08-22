@@ -1,0 +1,6 @@
+{
+  "name": "swapserver_monitor_irc_bot",
+  "fullname": "SwapServer monitor irc bot",
+  "description": "IRC bot to monitor public nostr SwapServer stats",
+  "available_for": ["cmdline"]
+}
