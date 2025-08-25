@@ -240,7 +240,7 @@ android.debug_artifact = apk
 #
 
 # (str) python-for-android git clone directory (if empty, it will be automatically cloned from github)
-p4a.source_dir = /opt/python-for-android
+p4a.source_dir = /opt/spesmilo-python-for-android-fork-fork
 
 # (str) The directory in which python-for-android should look for your own build recipes (if any)
 p4a.local_recipes = %(source.dir)s/contrib/android/p4a_recipes/
