@@ -53,7 +53,7 @@ if TYPE_CHECKING:
 
 if 'ANDROID_DATA' in os.environ:
     from jnius import autoclass, cast
-    from android import activity, permissions
+    from android import activity, permissions, display_cutout
 
     jpythonActivity = autoclass('org.kivy.android.PythonActivity').mActivity
     jHfc = autoclass('android.view.HapticFeedbackConstants')
@@ -136,9 +136,10 @@ class QEAppController(BaseCrashReporter, QObject):
             self.on_notification_timer()
 
     def on_notification_timer(self):
+        self.logger.debug(f"{self.getNavigationBarHeight()=}")
         if self.user_notification_queue.qsize() == 0:
-            self.logger.debug('queue empty, stopping app notification timer')
-            self.notification_timer.stop()
+            # self.logger.debug('queue empty, stopping app notification timer')
+            # self.notification_timer.stop()
             return
         now = time.time()
         rate_limit = 20  # seconds
@@ -413,6 +414,18 @@ class QEAppController(BaseCrashReporter, QObject):
             jpythonActivity.setSecureWindow(secure)
             self._secureWindow = secure
             self.secureWindowChanged.emit()
+
+    @pyqtSlot(result=int)
+    def getStatusBarHeight(self) -> int:
+        if not self.isAndroid():
+            return 0
+        return android.get_height_of_bar('status')
+
+    @pyqtSlot(result=int)
+    def getNavigationBarHeight(self) -> int:
+        if not self.isAndroid():
+            return 0
+        return android.get_height_of_bar('navigation')
 
 
 class ElectrumQmlApplication(QGuiApplication):
