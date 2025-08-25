@@ -6,9 +6,9 @@ from pythonforandroid.util import load_source
 util = load_source('util', os.path.join(os.path.dirname(os.path.dirname(__file__)), 'util.py'))
 
 
-assert PyjniusRecipe._version == "1.5.0"
-assert PyjniusRecipe.depends == [('genericndkbuild', 'sdl2', 'qt6'), 'six', 'python3']
-assert PyjniusRecipe.python_depends == []
+assert PyjniusRecipe._version == "1.6.1", PyjniusRecipe._version
+assert PyjniusRecipe.depends == [('genericndkbuild', 'sdl2', 'sdl3', 'qt6'), 'six', 'python3'], PyjniusRecipe.depends
+assert PyjniusRecipe.python_depends == [], PyjniusRecipe.python_depends
 
 
 class PyjniusRecipePinned(util.InheritedRecipeMixin, PyjniusRecipe):

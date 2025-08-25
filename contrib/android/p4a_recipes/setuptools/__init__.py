@@ -1,13 +1,13 @@
 from pythonforandroid.recipes.setuptools import SetuptoolsRecipe
 
 
-assert SetuptoolsRecipe._version == "51.3.3"
+assert SetuptoolsRecipe._version == "69.2.0"
 assert SetuptoolsRecipe.depends == ['python3']
 assert SetuptoolsRecipe.python_depends == []
 
 
 class SetuptoolsRecipePinned(SetuptoolsRecipe):
-    sha512sum = "5a3572466a68c6f650111448ce3343f64c62044650bb8635edbff97e2bc7b216b8bbe3b4e3bccf34e6887f3bedc911b27ca5f9a515201cae49cf44fbacf03345"
+    sha512sum = "e69abe573304b1c2c074144c9df663fec0d6ce617359f070ca8d57710e4beb99435d0d2124d45a7d8b24889693597e1e03875bc6ff960fa31f6250e1c253b906"
 
 
 recipe = SetuptoolsRecipePinned()
