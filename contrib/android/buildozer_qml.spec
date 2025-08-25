@@ -108,7 +108,7 @@ android.permissions = INTERNET, CAMERA, WRITE_EXTERNAL_STORAGE, POST_NOTIFICATIO
 android.api = 31
 
 # (int) Android targetSdkVersion
-android.target_sdk_version = 34
+android.target_sdk_version = 35
 
 # (int) Minimum API required. You will need to set the android.ndk_api to be as low as this value.
 android.minapi = 23
@@ -240,7 +240,7 @@ android.debug_artifact = apk
 #
 
 # (str) python-for-android git clone directory (if empty, it will be automatically cloned from github)
-p4a.source_dir = /opt/python-for-android
+p4a.source_dir = /opt/spesmilo-python-for-android-fork-fork
 
 # (str) The directory in which python-for-android should look for your own build recipes (if any)
 p4a.local_recipes = %(source.dir)s/contrib/android/p4a_recipes/
