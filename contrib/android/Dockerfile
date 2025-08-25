@@ -101,8 +101,8 @@ RUN apt -y update -qq \
 RUN yes | ${ANDROID_SDK_MANAGER} --licenses > /dev/null
 
 
-ENV ANDROID_SDK_BUILD_TOOLS_MAJOR_V="31"
-ENV ANDROID_SDK_BUILD_TOOLS_VERSION="31.0.0"
+ENV ANDROID_SDK_BUILD_TOOLS_MAJOR_V="35"
+ENV ANDROID_SDK_BUILD_TOOLS_VERSION="35.0.0"
 
 # download platforms, API, build tools
 RUN ${ANDROID_SDK_MANAGER} "platforms;android-${ANDROID_SDK_BUILD_TOOLS_MAJOR_V}" > /dev/null && \
