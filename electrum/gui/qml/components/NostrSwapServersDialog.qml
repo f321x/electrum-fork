@@ -12,8 +12,9 @@ ElDialog {
     title: qsTr("Select Swap Provider")
 
     property QtObject swaphelper
-
     property string selectedPubkey
+
+    needsSystemBarPadding: false
 
     anchors.centerIn: parent
 

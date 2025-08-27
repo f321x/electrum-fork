@@ -129,9 +129,6 @@ class QEAppController(BaseCrashReporter, QObject):
             pass
         qewallet.userNotify.connect(self.on_wallet_usernotify)
 
-        if self.isAndroid():
-            self.logger.debug(f"{self.getNavigationBarHeight()=}, {self.getStatusBarHeight()=}")
-
     def on_wallet_usernotify(self, wallet, message):
         self.logger.debug(message)
         self.user_notification_queue.put((wallet, message))
@@ -426,7 +423,7 @@ class QEAppController(BaseCrashReporter, QObject):
             return False
         return bool(systemSdkVersion >= 35)
 
-    @profiler(min_threshold=0.05)
+    @profiler(min_threshold=0.02)
     def _getSystemBarHeight(self, bar_type: str) -> int:
         if not self.enforcesEdgeToEdge():
             return 0
