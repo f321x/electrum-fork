@@ -76,7 +76,7 @@ from .invoices import BaseInvoice, Invoice, Request, PR_PAID, PR_UNPAID, PR_EXPI
 from .contacts import Contacts
 from .mnemonic import Mnemonic
 from .lnworker import LNWallet
-from .lnutil import MIN_FUNDING_SAT
+from .lnutil import MIN_FUNDING_SAT, MIN_FINAL_CLTV_DELTA_FOR_INVOICE
 from .lntransport import extract_nodeid
 from .descriptor import Descriptor
 from .txbatcher import TxBatcher
@@ -3015,7 +3015,11 @@ class Abstract_Wallet(ABC, Logger, EventListener):
         timestamp = int(Request._get_cur_time())
         if address is None:
             assert self.has_lightning()
-            payment_hash = self.lnworker.create_payment_info(amount_msat=amount_msat, write_to_disk=False)
+            payment_hash = self.lnworker.create_payment_info(
+                amount_msat=amount_msat,
+                exp_delay=exp_delay,
+                write_to_disk=False,
+            )
         else:
             payment_hash = None
         outputs = [PartialTxOutput.from_address_and_value(address, amount_sat)] if address else []

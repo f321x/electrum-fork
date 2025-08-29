@@ -22,13 +22,14 @@ import urllib.parse
 import itertools
 
 import aiohttp
+import attrs
 import dns.asyncresolver
 import dns.exception
 from aiorpcx import run_in_thread, NetAddress, ignore_after
 
 from .logging import Logger
 from .i18n import _
-from .json_db import stored_in
+from .json_db import stored_in, StoredObject
 from .channel_db import UpdateStatus, ChannelDBNotLoaded, get_mychannel_info, get_mychannel_policy
 
 from . import constants, util
@@ -67,7 +68,7 @@ from .lnutil import (
     LnKeyFamily, LOCAL, REMOTE, MIN_FINAL_CLTV_DELTA_FOR_INVOICE, SENT, RECEIVED, HTLCOwner, UpdateAddHtlc, LnFeatures,
     ShortChannelID, HtlcLog, NoPathFound, InvalidGossipMsg, FeeBudgetExceeded, ImportedChannelBackupStorage,
     OnchainChannelBackupStorage, ln_compare_features, IncompatibleLightningFeatures, PaymentFeeBudget,
-    NBLOCK_CLTV_DELTA_TOO_FAR_INTO_FUTURE, GossipForwardingMessage, MIN_FUNDING_SAT
+    NBLOCK_CLTV_DELTA_TOO_FAR_INTO_FUTURE, GossipForwardingMessage, MIN_FUNDING_SAT, hex_to_bytes,
 )
 from .lnonion import decode_onion_error, OnionFailureCode, OnionRoutingFailure, OnionPacket
 from .lnmsg import decode_msg
@@ -106,11 +107,47 @@ class PaymentDirection(IntEnum):
     FORWARDING = 3
 
 
-class PaymentInfo(NamedTuple):
-    payment_hash: bytes
-    amount_msat: Optional[int]
-    direction: int
-    status: int
+@stored_in('lightning_payment_infos')
+@attrs.define(slots=False)  # using slots breaks StoredObject
+class PaymentInfo(StoredObject):
+    """Information required to handle incoming htlcs for a payment request"""
+    # set on_setattr manually (instead of @attrs.frozen) so that StoredObject stays mutable
+    payment_hash: bytes = attrs.field(converter=hex_to_bytes, on_setattr=attrs.setters.frozen)
+    amount_msat: Optional[int] = attrs.field(on_setattr=attrs.setters.frozen)
+    # direction is being used with PaymentDirection and lnutil.Direction?
+    direction: int = attrs.field(
+        on_setattr=attrs.setters.frozen,
+        validator=attrs.validators.instance_of(int),
+    )
+    status: int = attrs.field(
+        on_setattr=attrs.setters.frozen,
+        validator=attrs.validators.instance_of(int),
+    )
+    min_final_cltv_delta: int = attrs.field(
+        on_setattr=attrs.setters.frozen,
+        validator=attrs.validators.instance_of(int),
+    )
+    # expiration can be used to clean-up PaymentInfo and fail htlcs coming in too late
+    expiry_delay: int = attrs.field(
+        on_setattr=attrs.setters.frozen,
+        converter=lambda x: x if x and x >= 1 else LN_EXPIRY_NEVER,
+    )
+    creation_ts: int = attrs.field(
+        on_setattr=attrs.setters.frozen,
+        factory=lambda: int(time.time()),
+    )
+
+    @property
+    def rhash(self) -> str:
+        return self.payment_hash.hex()
+
+    @property
+    def is_expired(self) -> bool:
+        return int(time.time()) > self.expiration_ts
+
+    @property
+    def expiration_ts(self):
+        return self.creation_ts + self.expiry_delay
 
 
 # Note: these states are persisted in the wallet file.
@@ -869,7 +906,8 @@ class LNWallet(LNWorker):
         LNWorker.__init__(self, self.node_keypair, features, config=self.config)
         self.lnwatcher = LNWatcher(self)
         self.lnrater: LNRater = None
-        self.payment_info = self.db.get_dict('lightning_payments')  # RHASH -> amount, direction, is_paid
+        self.payment_info = self.db.get_dict('lightning_payment_infos')  # type: dict[str, PaymentInfo]
+        self._migrate_payment_info_type(self.db.get_dict('lightning_payments'))  # migration from namedtuple to class
         self._preimages = self.db.get_dict('lightning_preimages')   # RHASH -> preimage
         self._bolt11_cache = {}
         # note: this sweep_address is only used as fallback; as it might result in address-reuse
@@ -1567,7 +1605,7 @@ class LNWallet(LNWorker):
             raise PaymentFailure(_("A payment was already initiated for this invoice"))
         if payment_hash in self.get_payments(status='inflight'):
             raise PaymentFailure(_("A previous attempt to pay this invoice did not clear"))
-        info = PaymentInfo(payment_hash, amount_to_pay, SENT, PR_UNPAID)
+        info = PaymentInfo(payment_hash, amount_to_pay, SENT, PR_UNPAID, min_final_cltv_delta, LN_EXPIRY_NEVER)
         self.save_payment_info(info)
         self.wallet.set_label(key, lnaddr.get_description())
         self.set_invoice_status(key, PR_INFLIGHT)
@@ -2244,7 +2282,6 @@ class LNWallet(LNWorker):
             expiry: int,  # expiration of invoice (in seconds, relative)
             fallback_address: Optional[str],
             channels: Optional[Sequence[Channel]] = None,
-            min_final_cltv_expiry_delta: Optional[int] = None,
     ) -> Tuple[LnAddr, str]:
         assert isinstance(payment_hash, bytes), f"expected bytes, but got {type(payment_hash)}"
 
@@ -2255,6 +2292,8 @@ class LNWallet(LNWorker):
             return pair
 
         assert amount_msat is None or amount_msat > 0
+        payment_info = self.get_payment_info(payment_hash)
+        assert payment_info is not None, "Create payment info before creating b11 invoice"
         timestamp = int(time.time())
         needs_jit: bool = self.receive_requires_jit_channel(amount_msat)
         routing_hints = self.calc_routing_hints_for_invoice(amount_msat, channels=channels, needs_jit=needs_jit)
@@ -2269,14 +2308,12 @@ class LNWallet(LNWorker):
         amount_btc = amount_msat/Decimal(COIN*1000) if amount_msat else None
         if expiry == 0:
             expiry = LN_EXPIRY_NEVER
-        if min_final_cltv_expiry_delta is None:
-            min_final_cltv_expiry_delta = MIN_FINAL_CLTV_DELTA_FOR_INVOICE
         lnaddr = LnAddr(
             paymenthash=payment_hash,
             amount=amount_btc,
             tags=[
                 ('d', message),
-                ('c', min_final_cltv_expiry_delta),
+                ('c', payment_info.min_final_cltv_delta),
                 ('x', expiry),
                 ('9', invoice_features),
                 ('f', fallback_address),
@@ -2299,10 +2336,17 @@ class LNWallet(LNWorker):
         payment_secret = self.get_payment_secret(payment_hash)
         return payment_hash + payment_secret
 
-    def create_payment_info(self, *, amount_msat: Optional[int], write_to_disk=True) -> bytes:
+    def create_payment_info(
+        self, *,
+        amount_msat: Optional[int],
+        min_final_cltv_delta: Optional[int] = None,
+        exp_delay: int = LN_EXPIRY_NEVER,
+        write_to_disk=True
+    ) -> bytes:
         payment_preimage = os.urandom(32)
         payment_hash = sha256(payment_preimage)
-        info = PaymentInfo(payment_hash, amount_msat, RECEIVED, PR_UNPAID)
+        min_final_cltv_delta = min_final_cltv_delta if min_final_cltv_delta else MIN_FINAL_CLTV_DELTA_FOR_INVOICE
+        info = PaymentInfo(payment_hash, amount_msat, RECEIVED, PR_UNPAID, min_final_cltv_delta, exp_delay)
         self.save_preimage(payment_hash, payment_preimage, write_to_disk=False)
         self.save_payment_info(info, write_to_disk=False)
         if write_to_disk:
@@ -2374,14 +2418,17 @@ class LNWallet(LNWorker):
         """returns None if payment_hash is a payment we are forwarding"""
         key = payment_hash.hex()
         with self.lock:
-            if key in self.payment_info:
-                amount_msat, direction, status = self.payment_info[key]
-                return PaymentInfo(payment_hash, amount_msat, direction, status)
-            return None
+            return self.payment_info.get(key, None)
 
-    def add_payment_info_for_hold_invoice(self, payment_hash: bytes, lightning_amount_sat: Optional[int]):
+    def add_payment_info_for_hold_invoice(
+        self,
+        payment_hash: bytes, *,
+        lightning_amount_sat: Optional[int],
+        min_final_cltv_delta: int,
+        exp_delay: int,
+    ):
         amount = lightning_amount_sat * 1000 if lightning_amount_sat else None
-        info = PaymentInfo(payment_hash, amount, RECEIVED, PR_UNPAID)
+        info = PaymentInfo(payment_hash, amount, RECEIVED, PR_UNPAID, min_final_cltv_delta, exp_delay)
         self.save_payment_info(info, write_to_disk=False)
 
     def register_hold_invoice(self, payment_hash: bytes, cb: Callable[[bytes], Awaitable[None]]):
@@ -2396,11 +2443,10 @@ class LNWallet(LNWorker):
             if old_info := self.get_payment_info(payment_hash=info.payment_hash):
                 if info == old_info:
                     return  # already saved
-                if info != old_info._replace(status=info.status):
+                if info != attrs.evolve(old_info, status=info.status):
                     # differs more than in status. let's fail
                     raise Exception("payment_hash already in use")
-            key = info.payment_hash.hex()
-            self.payment_info[key] = info.amount_msat, info.direction, info.status
+            self.payment_info[info.rhash] = info
         if write_to_disk:
             self.wallet.save_db()
 
@@ -2577,7 +2623,7 @@ class LNWallet(LNWorker):
         if info is None:
             # if we are forwarding
             return
-        info = info._replace(status=status)
+        info = attrs.evolve(info, status=status)
         self.save_payment_info(info)
 
     def is_forwarded_htlc(self, htlc_key) -> Optional[str]:
@@ -3016,7 +3062,10 @@ class LNWallet(LNWorker):
             raise Exception('Rebalance requires two different channels')
         if self.uses_trampoline() and chan1.node_id == chan2.node_id:
             raise Exception('Rebalance requires channels from different trampolines')
-        payment_hash = self.create_payment_info(amount_msat=amount_msat)
+        payment_hash = self.create_payment_info(
+            amount_msat=amount_msat,
+            exp_delay=3600,
+        )
         lnaddr, invoice = self.get_bolt11_invoice(
             payment_hash=payment_hash,
             amount_msat=amount_msat,
@@ -3354,3 +3403,17 @@ class LNWallet(LNWorker):
         error_bytes = bytes.fromhex(error_hex) if error_hex else None
         failure_message = OnionRoutingFailure.from_bytes(bytes.fromhex(failure_hex)) if failure_hex else None
         return error_bytes, failure_message
+
+    def _migrate_payment_info_type(self, old_payment_info: dict):
+        self.logger.info(f"Migrating {len(old_payment_info)} PaymentInfo entries in DB to class type")
+        for rhash, (amount, direction, is_paid) in list(old_payment_info.items()):
+            # Convert tuple to new PaymentInfo attr class
+            self.payment_info[rhash] = PaymentInfo(
+                payment_hash=rhash,
+                amount_msat=amount,
+                direction=direction,
+                status=is_paid,
+                min_final_cltv_delta=MIN_FINAL_CLTV_DELTA_FOR_INVOICE,
+                expiry_delay=LN_EXPIRY_NEVER,
+            )
+            del old_payment_info[rhash]
