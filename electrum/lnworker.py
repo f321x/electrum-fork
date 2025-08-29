@@ -2276,24 +2276,19 @@ class LNWallet(LNWorker):
 
     def get_bolt11_invoice(
             self, *,
-            payment_hash: bytes,
-            amount_msat: Optional[int],
+            payment_info: PaymentInfo,
             message: str,
-            expiry: int,  # expiration of invoice (in seconds, relative)
             fallback_address: Optional[str],
             channels: Optional[Sequence[Channel]] = None,
     ) -> Tuple[LnAddr, str]:
-        assert isinstance(payment_hash, bytes), f"expected bytes, but got {type(payment_hash)}"
-
-        pair = self._bolt11_cache.get(payment_hash)
+        amount_msat = payment_info.amount_msat
+        pair = self._bolt11_cache.get(payment_info.payment_hash)
         if pair:
             lnaddr, invoice = pair
             assert lnaddr.get_amount_msat() == amount_msat
             return pair
 
         assert amount_msat is None or amount_msat > 0
-        payment_info = self.get_payment_info(payment_hash)
-        assert payment_info is not None, "Create payment info before creating b11 invoice"
         timestamp = int(time.time())
         needs_jit: bool = self.receive_requires_jit_channel(amount_msat)
         routing_hints = self.calc_routing_hints_for_invoice(amount_msat, channels=channels, needs_jit=needs_jit)
@@ -2304,17 +2299,15 @@ class LNWallet(LNWorker):
         if needs_jit:
             # jit only works with single htlcs, mpp will cause LSP to open channels for each htlc
             invoice_features &= ~ LnFeatures.BASIC_MPP_OPT & ~ LnFeatures.BASIC_MPP_REQ
-        payment_secret = self.get_payment_secret(payment_hash)
+        payment_secret = self.get_payment_secret(payment_info.payment_hash)
         amount_btc = amount_msat/Decimal(COIN*1000) if amount_msat else None
-        if expiry == 0:
-            expiry = LN_EXPIRY_NEVER
         lnaddr = LnAddr(
-            paymenthash=payment_hash,
+            paymenthash=payment_info.payment_hash,
             amount=amount_btc,
             tags=[
                 ('d', message),
                 ('c', payment_info.min_final_cltv_delta),
-                ('x', expiry),
+                ('x', payment_info.expiry_delay),
                 ('9', invoice_features),
                 ('f', fallback_address),
             ] + routing_hints,
@@ -2322,7 +2315,7 @@ class LNWallet(LNWorker):
             payment_secret=payment_secret)
         invoice = lnencode(lnaddr, self.node_keypair.privkey)
         pair = lnaddr, invoice
-        self._bolt11_cache[payment_hash] = pair
+        self._bolt11_cache[payment_info.payment_hash] = pair
         return pair
 
     def get_payment_secret(self, payment_hash):
@@ -3066,11 +3059,10 @@ class LNWallet(LNWorker):
             amount_msat=amount_msat,
             exp_delay=3600,
         )
+        info = self.get_payment_info(payment_hash)
         lnaddr, invoice = self.get_bolt11_invoice(
-            payment_hash=payment_hash,
-            amount_msat=amount_msat,
+            payment_info=info,
             message='rebalance',
-            expiry=3600,
             fallback_address=None,
             channels=[chan2],
         )

@@ -648,15 +648,14 @@ class SwapManager(Logger):
         # add payment info to lnworker
         self.lnworker.add_payment_info_for_hold_invoice(
             payment_hash,
-            lightning_amount_sat=lightning_amount_sat,
+            lightning_amount_sat=invoice_amount_sat,
             min_final_cltv_delta=min_final_cltv_expiry_delta or MIN_FINAL_CLTV_DELTA_FOR_INVOICE,
             exp_delay=300,
         )
+        info = self.lnworker.get_payment_info(payment_hash)
         _, invoice = self.lnworker.get_bolt11_invoice(
-            payment_hash=payment_hash,
-            amount_msat=invoice_amount_sat * 1000,
+            payment_info=info,
             message='Submarine swap',
-            expiry=300,
             fallback_address=None,
             channels=channels,
         )
@@ -667,11 +666,10 @@ class SwapManager(Logger):
                 min_final_cltv_delta=min_final_cltv_expiry_delta or MIN_FINAL_CLTV_DELTA_FOR_INVOICE,
                 exp_delay=300,
             )
+            info = self.lnworker.get_payment_info(prepay_hash)
             _, prepay_invoice = self.lnworker.get_bolt11_invoice(
-                payment_hash=prepay_hash,
-                amount_msat=prepay_amount_sat * 1000,
+                payment_info=info,
                 message='Submarine swap prepayment',
-                expiry=300,
                 fallback_address=None,
                 channels=channels,
             )
