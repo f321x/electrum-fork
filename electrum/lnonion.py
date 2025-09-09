@@ -148,6 +148,10 @@ class OnionPacket:
             version=b[0],
         )
 
+    @property
+    def onion_hash(self) -> bytes:
+        return sha256(self.to_bytes())
+
 
 def get_bolt04_onion_key(key_type: bytes, secret: bytes) -> bytes:
     if key_type not in (b'rho', b'mu', b'um', b'ammag', b'pad', b'blinded_node_id'):
@@ -351,6 +355,36 @@ class ProcessedOnionPacket(NamedTuple):
     next_packet: OnionPacket
     trampoline_onion_packet: OnionPacket
 
+    @property
+    def amt_to_forward(self) -> Optional[int]:
+        k1 = k2 = 'amt_to_forward'
+        return self._get_from_payload(k1, k2, int)
+
+    @property
+    def outgoing_cltv_value(self) -> Optional[int]:
+        k1 = k2 = 'outgoing_cltv_value'
+        return self._get_from_payload(k1, k2, int)
+
+    @property
+    def next_chan_scid(self) -> Optional[ShortChannelID]:
+        k1 = k2 = 'short_channel_id'
+        return self._get_from_payload(k1, k2, ShortChannelID)
+
+    @property
+    def total_msat(self) -> Optional[int]:
+        return self._get_from_payload('payment_data', 'total_msat', int)
+
+    @property
+    def payment_secret(self) -> Optional[bytes]:
+        return self._get_from_payload('payment_data', 'payment_secret', bytes)
+
+    def _get_from_payload(self, k1: str, k2: str, res_type: type):
+        try:
+            result = self.hop_data.payload[k1][k2]
+            return res_type(result)
+        except Exception:
+            return None
+
 
 # TODO replay protection
 def process_onion_packet(
@@ -411,6 +445,33 @@ def process_onion_packet(
     return ProcessedOnionPacket(are_we_final, hop_data, next_onion_packet, trampoline_onion_packet)
 
 
+def compare_trampoline_onions(trampoline_onions: List[Optional[ProcessedOnionPacket]]) -> bool:
+    """
+    compare values of trampoline onions except for the amount_to_forward as it is expected
+    to differ between onions
+    """
+    assert trampoline_onions, f"nothing to compare: {trampoline_onions=}"
+    first_onion = trampoline_onions[0]
+    if not all(isinstance(onion, type(first_onion)) for onion in trampoline_onions):
+        return False
+    if first_onion is None:
+        return True  # all onions are None
+    are_we_final = first_onion.are_we_final
+    total_msat = first_onion.total_msat
+    outgoing_cltv_value = first_onion.outgoing_cltv_value
+    payment_secret = first_onion.payment_secret
+    for onion in trampoline_onions:
+        if onion.are_we_final != are_we_final:
+            return False
+        if onion.total_msat != total_msat:
+            return False
+        if onion.outgoing_cltv_value != outgoing_cltv_value:
+            return False
+        if onion.payment_secret != payment_secret:
+            return False
+    return True
+
+
 class FailedToDecodeOnionError(Exception): pass
 
 
@@ -449,6 +510,14 @@ class OnionRoutingFailure(Exception):
         except lnmsg.FailedToParseMsg:
             payload = None
         return payload
+
+    def to_wire_msg(self, onion_packet: OnionPacket, privkey: bytes, local_height: int) -> bytes:
+        onion_error = construct_onion_error(self, onion_packet.public_key, privkey, local_height)
+        error_bytes = obfuscate_onion_error(onion_error, onion_packet.public_key, privkey)
+        return error_bytes
+
+
+class OnionParsingError(OnionRoutingFailure): pass
 
 
 def construct_onion_error(
