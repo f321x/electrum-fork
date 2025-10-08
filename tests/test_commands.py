@@ -21,7 +21,9 @@ from electrum.transaction import Transaction, TxOutput, tx_from_any
 from electrum.util import UserFacingException, NotEnoughFunds
 from electrum.crypto import sha256
 from electrum.bolt11 import decode_bolt11_invoice
+from electrum.bolt12 import BOLT12Offer
 from electrum.daemon import Daemon
+from electrum.bitcoin import COIN
 from electrum import json_db
 
 from . import ElectrumTestCase
@@ -784,3 +786,28 @@ class TestCommandsTestnet(ElectrumTestCase):
         result = await cmds.add_peer(connection_string=connection_string, wallet=w)
         assert called == 2
         self.assertTrue(result)
+
+    @mock.patch.object(wallet.Abstract_Wallet, 'save_db')
+    async def test_add_offer(self, *mock_args):
+        wallet: Abstract_Wallet = restore_wallet_from_text__for_unittest(
+            'disagree rug lemon bean unaware square alone beach tennis exhibit fix mimic',
+            path='if_this_exists_mocking_failed_648151893',
+            config=self.config)['wallet']
+        cmds = Commands(config=self.config)
+
+        bolt12_offer = (await cmds.add_offer(
+            amount=Decimal(0.001),
+            memo="test cli",
+            expiry=None,
+            issuer="me",
+            allow_unblined=True,
+            wallet=wallet,
+        ))['offer']
+        self.assertEqual(bolt12_offer, "lno1qgsyxjtl6luzd9t3pr62xr7eemp6awnejusgf6gw45q75vcfqqqqqqqyypdrler6cnxmm6tqe3ny7ea7wczh3pve6723k5e9tkt327mce3ja2zqyqh67zqq2pp6x2um5yp3kc6gjqfkk293pqt56qdkmgjkajt9vdhg2u68h03r22a84d3slzxhd2cpggnfwkf6gz")
+        decoded_offer = BOLT12Offer.decode(bolt12_offer)
+        self.assertEqual(decoded_offer.offer_amount, 100000000)
+        self.assertEqual(decoded_offer.offer_description, "test cli")
+        self.assertEqual(decoded_offer.offer_absolute_expiry, None)
+        self.assertEqual(decoded_offer.offer_issuer, "me")
+        self.assertEqual(decoded_offer.offer_issuer_id, wallet.lnworker.node_keypair.pubkey)
+        self.assertEqual(decoded_offer.offer_paths, None)

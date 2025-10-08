@@ -7,6 +7,7 @@ import os
 from decimal import Decimal
 import random
 import time
+import hmac
 from enum import IntEnum
 from typing import (
     Optional, Sequence, Tuple, List, Set, Dict, TYPE_CHECKING, NamedTuple, Mapping, Any, Iterable, AsyncGenerator,
@@ -27,11 +28,12 @@ from math import ceil
 import aiohttp
 import dns.asyncresolver
 import dns.exception
+from electrum_ecc import ECPrivkey
 from aiorpcx import run_in_thread, NetAddress, ignore_after
 
+from .bolt12 import BOLT12Offer
 from .logging import Logger
 from .i18n import _
-from .json_db import stored_in
 from .channel_db import UpdateStatus, ChannelDBNotLoaded, get_mychannel_info, get_mychannel_policy
 
 from . import constants, util, lnutil, bitcoin, bolt12
@@ -57,7 +59,7 @@ from .crypto import (
     sha256, chacha20_encrypt, chacha20_decrypt, pw_encode_with_version_and_mac, pw_decode_with_version_and_mac
 )
 
-from .onion_message import OnionMessageManager
+from .onion_message import OnionMessageManager, get_blinded_reply_paths, NoOnionMessagePeers
 from .lntransport import (
     LNTransport, LNResponderTransport, LNTransportBase, LNPeerAddr, split_host_port, extract_nodeid,
     ConnStringFormatError
@@ -1007,6 +1009,7 @@ class LNWallet(Logger):
         self.backup_key = generate_keypair(BIP32Node.from_xkey(xprv), LnKeyFamily.BACKUP_CIPHER).privkey
         self.static_payment_key = generate_keypair(BIP32Node.from_xkey(xprv), LnKeyFamily.PAYMENT_BASE)
         self.payment_secret_key = generate_keypair(BIP32Node.from_xkey(xprv), LnKeyFamily.PAYMENT_SECRET_KEY).privkey
+        self.bolt12_secret_key = generate_keypair(BIP32Node.from_xkey(xprv), LnKeyFamily.PAYMENT_SECRET_KEY).privkey
         self.funding_root_keypair = generate_keypair(BIP32Node.from_xkey(xprv), LnKeyFamily.FUNDING_ROOT_KEY)
         Logger.__init__(self)
         if features is None:
@@ -4227,3 +4230,53 @@ class LNWallet(Logger):
         error_bytes = bytes.fromhex(error_hex) if error_hex else None
         failure_message = OnionRoutingFailure.from_bytes(bytes.fromhex(failure_hex)) if failure_hex else None
         return error_bytes, failure_message
+
+    def create_offer(
+        self,
+        *,
+        amount_msat: Optional[int] = None,
+        memo: Optional[str] = None,
+        expiry: Optional[int] = None,
+        issuer: Optional[str] = None,
+        allow_unblinded: bool = False,
+    ) -> 'BOLT12Offer':
+        """
+        Create n bolt12 offer.
+        - allow_unblinded only makes sense if node_id is public, or for testing with direct electrum peer.
+        """
+        # We always set an offer_issuer_id which we then can use as invoice_node_id for the invoice creation,
+        # otherwise we would need to use the blinded node id (and its secret) on which the invoice_request arrived to
+        # sign the corresponding invoice. This approach is simpler to reason about and implement.
+        # If we include blinded paths in this offer the path_id is the random private key for offer_issuer_id.
+        # If we don't include blinded paths (and allow_unblinded is True) we simply use the node keypair.
+        random_offer_issuer_id_key = ECPrivkey.generate_random_key()
+        path_id = random_offer_issuer_id_key.get_secret_bytes()
+        reply_path_infos = None
+        try:
+            reply_path_infos = get_blinded_reply_paths(self, path_id)
+        except NoOnionMessagePeers as e:
+            self.logger.debug(f"create_offer: no onion message peers: {str(e)}")
+            if not allow_unblinded:
+                raise
+
+        reply_paths = tuple(p.path for p in reply_path_infos) if reply_path_infos else None
+        chains = [constants.net.rev_genesis_bytes()] if constants.net != constants.BitcoinMainnet else None
+
+        # To be able to verify the offer fields inside a received invoice_request we first serialize an offer
+        # without metadata, then create a hmac on it which will be included as metadata of the final offer.
+        offer = BOLT12Offer(
+            offer_metadata=None,
+            offer_description=memo,
+            offer_chains=chains,
+            offer_amount=amount_msat,
+            offer_absolute_expiry=int(time.time()) + expiry if expiry else None,
+            offer_issuer_id=self.node_keypair.pubkey if not reply_paths else random_offer_issuer_id_key.get_public_key_bytes(),
+            offer_issuer=issuer,
+            offer_paths=reply_paths,
+        )
+        encoded_offer = offer.encode(as_bech32=False)
+        mac = hmac.new(key=self.bolt12_secret_key, msg=encoded_offer, digestmod='sha256').digest()
+        offer = dataclasses.replace(offer, offer_metadata=mac)
+
+        assert allow_unblinded if offer.offer_issuer_id else offer.offer_paths, offer
+        return offer

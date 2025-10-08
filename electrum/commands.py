@@ -1386,6 +1386,37 @@ class Commands(Logger):
         return wallet.export_request(req)
 
     @command('wnl')
+    async def add_offer(
+            self,
+            amount: Optional[Decimal] = None,
+            memo: Optional[str] = None,
+            expiry: Optional[int] = None,
+            issuer: Optional[str] = None,
+            allow_unblined: bool = False,
+            wallet: Abstract_Wallet = None
+    ):
+        """Create a bolt12 offer.
+
+        arg:decimal:amount:Requested amount (in btc)
+        arg:str:memo:Description of the request
+        arg:int:expiry:Time in seconds.
+        arg:str:issuer:Issuer string
+        arg:bool:allow_unblinded:Allow revealing node id for unblinded offers
+        """
+        amount_msat = satoshis(amount) * 1000 if amount else None
+        offer = wallet.lnworker.create_offer(
+            amount_msat=amount_msat,
+            memo=memo,
+            expiry=expiry,
+            issuer=issuer,
+            allow_unblinded=allow_unblined,
+        )
+
+        return {
+            'offer': offer.encode(as_bech32=True)
+        }
+
+    @command('wnl')
     async def add_hold_invoice(
             self,
             payment_hash: str,
