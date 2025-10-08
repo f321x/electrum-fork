@@ -40,7 +40,7 @@ from .bitcoin import COIN
 from .bolt11 import BOLT11Addr
 from .lnmsg import OnionWireSerializer, batched
 from .lnutil import LnFeatures, validate_features
-from .onion_message import Timeout, BlindedPath, BlindedPayInfo
+from .onion_message import Timeout, BlindedPath, BlindedPayInfo, get_blinded_paths_to_me, NoRouteBlindingChannelPeers
 from .segwit_addr import (
     bech32_decode, convertbits, bech32_encode, Encoding, INVALID_BECH32,
     CHARSET as BECH32_CHARSET,
@@ -603,6 +603,99 @@ async def request_invoice(
         pass
 
     return invoice, invoice_tlv
+
+
+def verify_request_and_create_invoice(
+        lnwallet: 'LNWallet',
+        bolt12_offer: BOLT12Offer,
+        bolt12_invreq: BOLT12InvoiceRequest,
+        invoice_expiry: int = DEFAULT_INVOICE_EXPIRY,
+) -> BOLT12Invoice:
+    """
+    If Bolt12InvoiceError is raised we will send back an error to the sender, otherwise we don't and
+    let them time out.
+    """
+    now = int(time.time())
+
+    # - MUST reject the invoice request if the offer fields do not exactly match a valid, unexpired offer.
+    if not bolt12_invreq.compare(against=bolt12_offer, ranges=((0, 159), (1_000_000_000, 2_999_999_999))):
+        raise Bolt12InvoiceError(f'invalid bolt12 invoice_request, non-matching offer {bolt12_offer=}')
+
+    if bolt12_offer.offer_absolute_expiry and now > bolt12_offer.offer_absolute_expiry:
+        raise Bolt12InvoiceError('offer expired')
+
+    # TODO: store invreq_metadata in lnwallet (no need for persistence)
+    # spec: if offer_issuer_id is present, and invreq_metadata is identical to a previous invoice_request:
+    #     MAY simply reply with the previous invoice.
+    # otherwise:
+    #     MUST NOT reply with a previous invoice.
+
+    # spec: if invreq_amount is present: MUST set invoice_amount to invreq_amount
+    # otherwise: 'expected' amount (or amount == 0 invoice? or min_htlc_msat from channel set?)
+    # TODO: raise if neither offer nor invreq specify amount?
+    invoice_amount = bolt12_invreq.invreq_amount or bolt12_offer.offer_amount or 0
+
+    # TODO cltv, expiry
+    invoice_payment_hash = lnwallet.create_payment_info(amount_msat=invoice_amount)
+
+    # determine invoice features
+    # TODO: not yet supporting jit channels. see lnwallet.get_bolt11_invoice()
+    invoice_features = lnwallet.features.for_invoice()
+    if not lnwallet.uses_trampoline():
+        invoice_features &= ~ LnFeatures.OPTION_TRAMPOLINE_ROUTING_OPT_ELECTRUM
+
+    # spec: if offer_issuer_id is present: MUST set invoice_node_id to the offer_issuer_id
+    # spec: otherwise, if offer_paths is present: MUST set invoice_node_id to the final blinded_node_id
+    # on the path it received the invoice request
+    if bolt12_offer.offer_issuer_id:
+        invoice_node_id = bolt12_offer.offer_issuer_id
+        # TODO for non-blinded path, where to store payment secret?
+    else:
+        # NOTE: requires knowledge of invreq incoming path and its final blinded_node_id
+        # and corresponding secret for signing invoice
+
+        # if offer_paths := bolt12_offer.get('offer_paths', {}).get('paths'):
+        #     # TODO match path, assuming path[0] for now
+        #     path_last_blinded_node_id = offer_paths[0].get('path')[-1].get('blinded_node_id')
+        #     invoice.update({
+        #         'invoice_node_id': {'node_id': path_last_blinded_node_id}
+        #     })
+
+        # we don't have invreq used path available here atm. see also request_invoice()
+        raise NotImplementedError('branch not implemented, electrum should set offer_issuer_id')
+
+    recipient_data = {}
+
+    # collect suitable channels for payment
+    invoice_channels = [
+        chan for chan in lnwallet.channels.values()
+        if chan.is_active() and chan.can_receive(amount_msat=invoice_amount, check_frozen=True)
+    ]
+    if not invoice_channels:
+        raise Bolt12InvoiceError('no active channels with sufficient receive capacity, cannot receive this payment.')
+
+    try:
+        invoice_paths, payinfo = get_blinded_paths_to_me(
+            lnwallet, final_recipient_data=recipient_data, my_channels=invoice_channels)
+    except NoRouteBlindingChannelPeers as e:
+        raise Bolt12InvoiceError("no peers with route blinding support") from e
+
+    try:
+        invoice = BOLT12Invoice(
+            **bolt12_invreq.__dict__,
+            invoice_amount=invoice_amount,
+            invoice_created_at=now,
+            invoice_relative_expiry=invoice_expiry,
+            invoice_payment_hash=invoice_payment_hash,
+            invoice_features=invoice_features,
+            invoice_node_id=invoice_node_id,
+            invoice_paths=tuple(invoice_paths),
+            invoice_blindedpay=tuple(payinfo),
+        )
+    except Exception as e:
+        raise Bolt12InvoiceError(str(e)) from e
+
+    return invoice
 
 
 # offer/request/invoice uses different chain than we do
