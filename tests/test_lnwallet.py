@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 
 import electrum.trampoline
 from . import ElectrumTestCase
@@ -9,6 +10,9 @@ from electrum.lnutil import RECEIVED, MIN_FINAL_CLTV_DELTA_ACCEPTED, LnFeatures
 from electrum.lntransport import LNPeerAddr
 from electrum.logging import console_stderr_handler
 from electrum.invoices import LN_EXPIRY_NEVER, PR_UNPAID
+from electrum.bolt12 import BOLT12InvoicePathIDPayload
+from electrum.lnworker import LNWALLET_FEATURES
+from electrum.crypto import sha256
 
 
 class TestLNWallet(ElectrumTestCase):
@@ -55,6 +59,37 @@ class TestLNWallet(ElectrumTestCase):
                 min_final_cltv_delta=min_final_cltv_delta,
                 exp_delay=exp_delay,
             )
+
+    def test_save_blinded_payment_info(self):
+        amount_msat = 1000
+        created_at = int(time.time())
+        relative_expiry = created_at + 100
+        payment_preimage = os.urandom(32)
+        min_final_cltv_expiry_delta = 322
+        invoice_features = LNWALLET_FEATURES.for_invoice()
+        invreq_payer_id = os.urandom(33)
+        path_id_payload = BOLT12InvoicePathIDPayload(
+            amount_msat=amount_msat,
+            created_at=created_at,
+            relative_expiry=relative_expiry,
+            payment_preimage=payment_preimage,
+            min_final_cltv_expiry_delta=min_final_cltv_expiry_delta,
+            invoice_features=invoice_features,
+            payer_id=invreq_payer_id,
+        )
+        wallet = self.lnwallet_anchors
+        wallet.save_blinded_payment_info(path_id_payload)
+        payment_hash = sha256(payment_preimage)
+        payment_info = wallet.get_payment_info(payment_hash, direction=RECEIVED)
+        self.assertIsNotNone(payment_info)
+        self.assertEqual(wallet.get_preimage(payment_hash), payment_preimage)
+        self.assertEqual(payment_info.payment_hash, payment_hash)
+        self.assertEqual(payment_info.amount_msat, amount_msat)
+        self.assertEqual(payment_info.status, PR_UNPAID)
+        self.assertEqual(payment_info.min_final_cltv_delta, min_final_cltv_expiry_delta)
+        self.assertEqual(payment_info.expiry_delay, relative_expiry)
+        self.assertEqual(payment_info.creation_ts, created_at)
+        self.assertEqual(payment_info.invoice_features, invoice_features)
 
     async def test_trampoline_invoice_features_and_routing_hints(self):
         """

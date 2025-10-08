@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import time
 from dataclasses import fields
 from pathlib import Path
@@ -8,7 +9,7 @@ from electrum_ecc import ECPrivkey
 
 from electrum import segwit_addr, lnutil
 from electrum.bolt12 import (
-    is_offer, bolt12_bech32_to_bytes, BOLT12Offer, BOLT12InvoiceRequest, BOLT12Invoice,
+    is_offer, bolt12_bech32_to_bytes, BOLT12Offer, BOLT12InvoiceRequest, BOLT12Invoice, BOLT12InvoicePathIDPayload
 )
 from electrum.crypto import privkey_to_pubkey
 from electrum.lnmsg import UnknownMandatoryTLVRecordType, _tlv_merkle_root, OnionWireSerializer, MsgInvalidSignature
@@ -16,6 +17,7 @@ from electrum.lnonion import OnionHopsDataSingle
 from electrum.lnutil import LnFeatures
 from electrum.segwit_addr import INVALID_BECH32, bech32_encode, Encoding, convertbits
 from electrum.util import bfh
+from electrum.lnworker import LNWALLET_FEATURES
 
 from . import ElectrumTestCase
 
@@ -360,3 +362,42 @@ class TestBolt12(ElectrumTestCase):
         invoice = BOLT12Invoice.decode('lni1qqzdatd7auzqwqgzqvzq2ps8pqqszzsnw3jhxazlv4hxxmmyv40kjmnkda5kxegkyypwa3eyt44h6txtxquqh7lz5djge4afgfjn7k4rgrkuag0jsd5xvx2cyypwa3eyt44h6txtxquqh7lz5djge4afgfjn7k4rgrkuag0jsd5xvxdqdvpwa3eyt44h6txtxquqh7lz5djge4afgfjn7k4rgrkuag0jsd5xvxgzamrjghtt05kvkvpcp0a79gmy3nt6jsn98ad2xs8de6sl9qmgvcvszqhwcuj966ma9n9nqwqtl032xeyv6755yeflt235pmww58egx6rxryqq2vfjxv6rtgsaqqqqqeqqqqp7sqxgqqqqqqqqqqqqzqqqqqqqqr6zgqqqzq9yq35cmzpm5cppcg9gyr9tzrp2zpr86lwy2y4fzpfsau6azq5xv2m9ez3sv4sndlu403jcn2sz2gytqggzamrjghtt05kvkvpcp0a79gmy3nt6jsn98ad2xs8de6sl9qmgvcvlqsq2smesfhwpr27j0kpgk7prlvewkk639e2c080wyc43epy04hegwgv8kwm04v8ey9t6lxkp5rv65dz9w0xly26mu8rl42hheq0h98y0z')
         encoded = invoice.encode(signing_key=signing_key, as_bech32=False)
         BOLT12Invoice.decode(encoded)
+
+    def test_bolt12_invoice_path_id_payload(self):
+        amount_msat = 1000
+        created_at = int(time.time())
+        relative_expiry = created_at + 100
+        payment_preimage = os.urandom(32)
+        min_final_cltv_expiry_delta = 322
+        invoice_features = LNWALLET_FEATURES.for_invoice()
+        invreq_payer_id = os.urandom(33)
+        offer_metadata_digest = os.urandom(32)
+        invreq_quantity = 5
+        invreq_payer_note = "Thanks for the Pizza, it was delicious!"
+        offer_description = "Pizza Salami - 30 cm - Old Italy"
+        path_id_payload = BOLT12InvoicePathIDPayload(
+            amount_msat=amount_msat,
+            created_at=created_at,
+            relative_expiry=relative_expiry,
+            payment_preimage=payment_preimage,
+            min_final_cltv_expiry_delta=min_final_cltv_expiry_delta,
+            invoice_features=invoice_features,
+            payer_id=invreq_payer_id,
+            offer_metadata_digest=offer_metadata_digest,
+            quantity=invreq_quantity,
+            payer_note=invreq_payer_note,
+            description=offer_description,
+        )
+        encoded = path_id_payload.encode()
+        decoded = BOLT12InvoicePathIDPayload.decode(encoded)
+        self.assertEqual(decoded.amount_msat, amount_msat)
+        self.assertEqual(decoded.created_at, created_at)
+        self.assertEqual(decoded.relative_expiry, relative_expiry)
+        self.assertEqual(decoded.payment_preimage, payment_preimage)
+        self.assertEqual(decoded.min_final_cltv_expiry_delta, min_final_cltv_expiry_delta)
+        self.assertEqual(decoded.invoice_features, invoice_features)
+        self.assertEqual(decoded.payer_id, invreq_payer_id)
+        self.assertEqual(decoded.offer_metadata_digest, offer_metadata_digest)
+        self.assertEqual(decoded.quantity, invreq_quantity)
+        self.assertEqual(decoded.payer_note, invreq_payer_note)
+        self.assertEqual(decoded.description, offer_description)
