@@ -401,6 +401,7 @@ def get_blinded_paths_to_me(
        - reply_path introduction points are direct peers only (TODO: longer paths)
     """
     # TODO: build longer paths and/or add dummy hops to increase privacy
+    assert final_recipient_data['path_id']['data'], f"missing path_id: {final_recipient_data}"
     if not my_channels:
         my_active_channels = [chan for chan in lnwallet.channels.values() if chan.is_active()]
         my_channels = my_active_channels
@@ -414,7 +415,6 @@ def get_blinded_paths_to_me(
 
     result = []
     mynodeid = lnwallet.node_keypair.pubkey
-    local_height = lnwallet.network.get_local_height()
 
     if len(my_channels):
         rchans = random_shuffled_copy(my_channels)
@@ -425,6 +425,7 @@ def get_blinded_paths_to_me(
                 # get policy
                 cp = get_mychannel_policy(chan.short_channel_id, chan.node_id, {chan.short_channel_id: chan})
 
+                local_height = lnwallet.network.get_local_height()
                 dest_max_cltv_expiry = local_height + MAXIMUM_REMOTE_TO_SELF_DELAY_ACCEPTED
 
                 # TODO: for longer paths (>2), reverse traverse and calculate max_cltv_expiry at each intermediate hop
