@@ -42,7 +42,8 @@ from electrum.crypto import sha256, get_ecdh
 from electrum.lnmsg import OnionWireSerializer
 from electrum.lnonion import (get_bolt04_onion_key, OnionPacket, process_onion_packet, blinding_privkey,
                               OnionHopsDataSingle, decrypt_onionmsg_data_tlv, encrypt_onionmsg_data_tlv,
-                              get_shared_secrets_along_route, new_onion_packet, encrypt_hops_recipient_data)
+                              get_shared_secrets_along_route, new_onion_packet, encrypt_hops_recipient_data,
+                              next_blinding_from_shared_secret)
 from electrum.lnutil import LnFeatures, MIN_FINAL_CLTV_DELTA_ACCEPTED, MAXIMUM_REMOTE_TO_SELF_DELAY_ACCEPTED
 from electrum.util import OldTaskGroup, log_exceptions
 
@@ -310,12 +311,7 @@ def send_onion_message_to(
                 if next_path_key_override:
                     next_path_key = next_path_key_override.get('path_key')
                 else:
-                    # E_i+1=SHA256(E_i||ss_i) * E_i
-                    blinding_factor = sha256(our_blinding + shared_secret)
-                    blinding_factor_int = int.from_bytes(blinding_factor, byteorder="big")
-                    next_public_key_int = ecc.ECPubkey(our_blinding) * blinding_factor_int
-                    next_path_key = next_public_key_int.get_public_key_bytes()
-
+                    next_path_key = next_blinding_from_shared_secret(our_blinding, shared_secret)
                 path_key = next_path_key
 
             else:
@@ -846,8 +842,9 @@ class OnionMessageManager(Logger):
         self.process_onion_message_packet(path_key, onion_packet)
 
     def process_onion_message_packet(self, blinding: bytes, onion_packet: OnionPacket) -> None:
-        our_privkey = blinding_privkey(self.lnwallet.node_keypair.privkey, blinding)
-        processed_onion_packet = process_onion_packet(onion_packet, our_privkey, is_onion_message=True, tlv_stream_name='onionmsg_tlv')
+        processed_onion_packet = process_onion_packet(
+            onion_packet, self.lnwallet.node_keypair.privkey, blinding=blinding, is_onion_message=True,
+            tlv_stream_name='onionmsg_tlv')
         payload = processed_onion_packet.hop_data.payload
 
         self.logger.debug(f'onion peeled: {processed_onion_packet!r}')
