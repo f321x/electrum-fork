@@ -21,7 +21,7 @@ import aiorpcx
 from aiorpcx import ignore_after
 
 from .lrucache import LRUCache
-from .crypto import sha256, sha256d, privkey_to_pubkey
+from .crypto import sha256, sha256d, privkey_to_pubkey, get_ecdh
 from . import bitcoin, util
 from . import constants
 from .util import (log_exceptions, ignore_exceptions, chunks, OldTaskGroup,
@@ -35,7 +35,7 @@ from . import lnonion
 from .lnonion import (OnionFailureCode, OnionPacket, obfuscate_onion_error,
                       OnionRoutingFailure, ProcessedOnionPacket, UnsupportedOnionPacketVersion,
                       InvalidOnionMac, InvalidOnionPubkey, OnionFailureCodeMetaFlag,
-                      OnionParsingError)
+                      OnionParsingError, decrypt_onionmsg_data_tlv)
 from .lnchannel import Channel, RevokeAndAck, ChannelState, PeerState, ChanCloseOption, CF_ANNOUNCE_CHANNEL
 from . import lnutil
 from .lnutil import (Outpoint, LocalConfig, RECEIVED, UpdateAddHtlc, ChannelConfig,
@@ -2002,12 +2002,14 @@ class Peer(Logger, EventListener):
         cltv_abs = payload["cltv_expiry"]
         amount_msat_htlc = payload["amount_msat"]
         onion_packet = payload["onion_routing_packet"]
+        blinding = payload.get("update_add_htlc_tlvs", {}).get("blinded_path", {}).get("path_key")
         htlc = UpdateAddHtlc(
             amount_msat=amount_msat_htlc,
             payment_hash=payment_hash,
             cltv_abs=cltv_abs,
             timestamp=int(time.time()),
-            htlc_id=htlc_id)
+            htlc_id=htlc_id,
+            blinding=blinding)
         self.logger.info(f"on_update_add_htlc. chan {chan.short_channel_id}. htlc={str(htlc)}")
         if chan.get_state() != ChannelState.OPEN:
             raise RemoteMisbehaving(f"received update_add_htlc while chan.get_state() != OPEN. state was {chan.get_state()!r}")
@@ -2023,8 +2025,8 @@ class Peer(Logger, EventListener):
         chan.receive_htlc(htlc, onion_packet)
         util.trigger_callback('htlc_added', chan, htlc, RECEIVED)
 
-    @staticmethod
     def _check_accepted_final_htlc(
+            self,
             *, chan: Channel,
             htlc: UpdateAddHtlc,
             processed_onion: ProcessedOnionPacket,
@@ -2051,10 +2053,27 @@ class Peer(Logger, EventListener):
 
         exc_incorrect_or_unknown_pd = OnionRoutingFailure(
             code=OnionFailureCode.INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS,
-            data=amt_to_forward.to_bytes(8, byteorder="big")) # height will be added later
-        if (total_msat := processed_onion.total_msat) is None:
-            log_fail_reason(f"'total_msat' missing from onion")
-            raise exc_incorrect_or_unknown_pd
+            data=amt_to_forward.to_bytes(8, byteorder="big"))  # height will be added later
+
+        if htlc.blinding:  # payment over blinded path
+            # spec: MUST return an error if the payload contains other tlv fields than encrypted_recipient_data,
+            # current_path_key, amt_to_forward, outgoing_cltv_value and total_amount_msat.
+            assert all(x in ['encrypted_recipient_data', 'current_blinding_point', 'amt_to_forward', 'outgoing_cltv_value', 'total_amount_msat']
+                       for x in processed_onion.hop_data.payload.keys())
+            shared_secret = get_ecdh(self.privkey, htlc.blinding)
+            recipient_data = decrypt_onionmsg_data_tlv(
+                shared_secret=shared_secret,
+                encrypted_recipient_data=processed_onion.hop_data.payload['encrypted_recipient_data']['encrypted_data']
+            )
+            payment_secret_from_onion = recipient_data['path_id']['data']
+            if (total_msat := processed_onion.hop_data.payload.get('total_amount_msat', {}).get('total_msat')) is None:
+                log_fail_reason(f"'total_msat' missing from onion")
+                raise exc_incorrect_or_unknown_pd
+        else:
+            payment_secret_from_onion = processed_onion.payment_secret
+            if (total_msat := processed_onion.total_msat) is None:
+                log_fail_reason(f"'total_msat' missing from onion")
+                raise exc_incorrect_or_unknown_pd
 
         if chan.jit_opening_fee:
             channel_opening_fee = chan.jit_opening_fee
@@ -2071,7 +2090,7 @@ class Peer(Logger, EventListener):
                     code=OnionFailureCode.FINAL_INCORRECT_HTLC_AMOUNT,
                     data=htlc.amount_msat.to_bytes(8, byteorder="big"))
 
-        if (payment_secret_from_onion := processed_onion.payment_secret) is None:
+        if payment_secret_from_onion is None:
             log_fail_reason(f"'payment_secret' missing from onion")
             raise exc_incorrect_or_unknown_pd
 
@@ -2270,6 +2289,7 @@ class Peer(Logger, EventListener):
             processed_onion_packet = self._process_incoming_onion_packet(
                 onion_packet,
                 payment_hash=payment_hash,
+                blinding=mpp_htlc.htlc.blinding,
                 is_trampoline=False,
             )
             if raw_error:
@@ -2790,6 +2810,7 @@ class Peer(Logger, EventListener):
                     processed_onion_packet = self._process_incoming_onion_packet(
                         onion_packet,
                         payment_hash=htlc.payment_hash,
+                        blinding=htlc.blinding,
                         is_trampoline=False,
                     )
                     payment_key: str = self._check_unfulfilled_htlc(
@@ -2897,6 +2918,7 @@ class Peer(Logger, EventListener):
                     processed_onion = self._process_incoming_onion_packet(
                         onion_packet=self._parse_onion_packet(mpp_htlc.unprocessed_onion),
                         payment_hash=mpp_htlc.htlc.payment_hash,
+                        blinding=mpp_htlc.htlc.blinding,
                         is_trampoline=False,
                     )
                     onion_payload = processed_onion.hop_data.payload
@@ -2949,6 +2971,7 @@ class Peer(Logger, EventListener):
             processed_onion = self._process_incoming_onion_packet(
                 onion_packet=self._parse_onion_packet(mpp_htlc.unprocessed_onion),
                 payment_hash=payment_hash,
+                blinding=mpp_htlc.htlc.blinding,
                 is_trampoline=False,  # this is always the outer onion
             )
             processed_onions[mpp_htlc] = (processed_onion, None)
@@ -3205,17 +3228,20 @@ class Peer(Logger, EventListener):
             self,
             onion_packet: OnionPacket, *,
             payment_hash: bytes,
+            blinding: bytes = None,
             is_trampoline: bool = False) -> ProcessedOnionPacket:
         onion_hash = onion_packet.onion_hash
         cache_key = sha256(onion_hash + payment_hash + bytes([is_trampoline]))  # type: ignore
         if cached_onion := self._processed_onion_cache.get(cache_key):
             return cached_onion
+
         try:
             processed_onion = lnonion.process_onion_packet(
                 onion_packet,
                 our_onion_private_key=self.privkey,
                 associated_data=payment_hash,
-                is_trampoline=is_trampoline)
+                is_trampoline=is_trampoline,
+                blinding=blinding)
             self._processed_onion_cache[cache_key] = processed_onion
         except UnsupportedOnionPacketVersion:
             raise OnionRoutingFailure(code=OnionFailureCode.INVALID_ONION_VERSION, data=onion_hash)
