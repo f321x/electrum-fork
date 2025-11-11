@@ -39,7 +39,8 @@ from electrum.crypto import sha256, get_ecdh
 from electrum.lnmsg import OnionWireSerializer
 from electrum.lnonion import (get_bolt04_onion_key, OnionPacket, process_onion_packet, blinding_privkey,
                               OnionHopsDataSingle, decrypt_onionmsg_data_tlv, encrypt_onionmsg_data_tlv,
-                              get_shared_secrets_along_route, new_onion_packet, encrypt_hops_recipient_data)
+                              get_shared_secrets_along_route, new_onion_packet, encrypt_hops_recipient_data,
+                              next_blinding_from_shared_secret)
 from electrum.lnutil import LnFeatures, MIN_FINAL_CLTV_DELTA_ACCEPTED, MAXIMUM_REMOTE_TO_SELF_DELAY_ACCEPTED
 from electrum.util import OldTaskGroup, log_exceptions, random_shuffled_copy
 
@@ -297,12 +298,7 @@ def send_onion_message_to(
                 if next_path_key_override:
                     next_path_key = next_path_key_override.get('path_key')
                 else:
-                    # E_i+1=SHA256(E_i||ss_i) * E_i
-                    blinding_factor = sha256(our_blinding + shared_secret)
-                    blinding_factor_int = int.from_bytes(blinding_factor, byteorder="big")
-                    next_public_key_int = ecc.ECPubkey(our_blinding) * blinding_factor_int
-                    next_path_key = next_public_key_int.get_public_key_bytes()
-
+                    next_path_key = next_blinding_from_shared_secret(our_blinding, shared_secret)
                 path_key = next_path_key
 
             else:
@@ -833,9 +829,9 @@ class OnionMessageManager(Logger):
         onion_packet = OnionPacket.from_bytes(packet)
         self.process_onion_message_packet(path_key, onion_packet)
 
-    def process_onion_message_packet(self, blinding: bytes, onion_packet: OnionPacket) -> None:
-        our_privkey = blinding_privkey(self.lnwallet.node_keypair.privkey, blinding)
-        processed_onion_packet = process_onion_packet(onion_packet, our_privkey, tlv_stream_name='onionmsg_tlv')
+    def process_onion_message_packet(self, path_key: bytes, onion_packet: OnionPacket) -> None:
+        processed_onion_packet = process_onion_packet(
+            onion_packet, self.lnwallet.node_keypair.privkey, path_key=path_key, tlv_stream_name='onionmsg_tlv')
         payload = processed_onion_packet.hop_data.payload
 
         self.logger.debug(f'onion peeled: {processed_onion_packet!r}')
@@ -846,7 +842,7 @@ class OnionMessageManager(Logger):
                 return
 
         # decrypt
-        shared_secret = get_ecdh(self.lnwallet.node_keypair.privkey, blinding)
+        shared_secret = get_ecdh(self.lnwallet.node_keypair.privkey, path_key)
         recipient_data = decrypt_onionmsg_data_tlv(
             shared_secret=shared_secret,
             encrypted_recipient_data=payload['encrypted_recipient_data']['encrypted_recipient_data']
@@ -857,4 +853,4 @@ class OnionMessageManager(Logger):
         if processed_onion_packet.are_we_final:
             self.on_onion_message_received(recipient_data, payload)
         else:
-            self.on_onion_message_forward(recipient_data, processed_onion_packet.next_packet, blinding, shared_secret)
+            self.on_onion_message_forward(recipient_data, processed_onion_packet.next_packet, path_key, shared_secret)
