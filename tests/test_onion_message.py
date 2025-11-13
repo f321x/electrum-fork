@@ -5,7 +5,9 @@ import time
 import dataclasses
 import logging
 from functools import partial
+from unittest.mock import Mock
 from types import MappingProxyType
+from aiorpcx import NetAddress
 
 import electrum_ecc as ecc
 from electrum_ecc import ECPrivkey
@@ -17,6 +19,7 @@ from electrum.lnonion import (
     get_shared_secrets_along_route, new_onion_packet, ONION_MESSAGE_LARGE_SIZE, HOPS_DATA_SIZE, InvalidPayloadSize,
     encrypt_hops_recipient_data)
 from electrum.crypto import get_ecdh, privkey_to_pubkey
+from electrum.lntransport import LNPeerAddr
 from electrum.lnutil import LnFeatures, Keypair
 from electrum.onion_message import (
     blinding_privkey, create_blinded_path,OnionMessageManager, NoRouteFound, Timeout
@@ -350,8 +353,10 @@ class TestOnionMessageManager(ElectrumTestCase):
             payload={'message': {'text': 'no_peer'.encode('utf-8')}},
             node_id_or_blinded_path=self.eve.pubkey)
 
-        with self.assertRaises(NoRouteFound):
+        # will not find eve, but has
+        with self.assertRaises(NoRouteFound) as c:
             await t5
+        self.assertEqual(c.exception.peer_address, LNPeerAddr('localhost', 1234, self.eve.pubkey))
 
     async def test_request_and_reply(self):
         n = MockNetwork()
@@ -374,6 +379,7 @@ class TestOnionMessageManager(ElectrumTestCase):
         lnw.lnpeermgr._peers[self.bob.pubkey] = MockPeer(self.bob.pubkey, on_send_message=slow)
         lnw.lnpeermgr._peers[self.carol.pubkey] = MockPeer(self.carol.pubkey, on_send_message=partial(withreply, rkey1))
         lnw.lnpeermgr._peers[self.dave.pubkey] = MockPeer(self.dave.pubkey, on_send_message=partial(slowwithreply, rkey2))
+        lnw.channel_db._addresses[self.eve.pubkey] = {NetAddress('localhost', '1234'): int(time.time())}
         t = OnionMessageManager(lnw)
         t.start_network(network=n)
 
