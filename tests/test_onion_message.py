@@ -5,7 +5,8 @@ import time
 import dataclasses
 import logging
 from functools import partial
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from types import MappingProxyType
 from aiorpcx import NetAddress
 
 import electrum_ecc as ecc
