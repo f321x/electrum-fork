@@ -2256,8 +2256,8 @@ class LNWallet(Logger):
         addr.validate_and_compare_features(self.features)
         return addr
 
-    def _check_bolt12_invoice(self, invoice: dict, *, amount_msat: int = None) -> LnAddr:
-        """Parses and validates a bolt12 invoice dict into a LnAddr.
+    def _check_bolt12_invoice(self, invoice, *, amount_msat: int = None) -> BOLT11Addr:
+        """Parses and validates a bolt12 invoice into a BOLT11Addr.
         Includes pre-payment checks external to the parser.
         """
         addr = bolt12.to_lnaddr(invoice)
