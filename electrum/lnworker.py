@@ -2277,8 +2277,10 @@ class LNWallet(Logger):
         #     raise InvoiceError("{}\n{}".format(
         #         _("Invoice wants us to risk locking funds for unreasonably long."),
         #         f"min_final_cltv_delta: {addr.get_min_final_cltv_delta()}"))
-        # # check features
-        # addr.validate_and_compare_features(self.features)
+
+        # check features
+        if addr.get_features() != LnFeatures(0):
+            addr.validate_and_compare_features(self.features)
 
         return addr
 
