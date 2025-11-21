@@ -30,6 +30,7 @@ import dns.exception
 from aiorpcx import run_in_thread, NetAddress, ignore_after
 
 from . import bolt12
+from .bolt12 import Bolt12InvoiceError
 from .logging import Logger
 from .i18n import _
 from .json_db import stored_in
@@ -4294,7 +4295,12 @@ class LNWallet(Logger):
             else:
                 node_id_or_blinded_path = invreq.invreq_payer_id
 
-        invoice = bolt12.verify_request_and_create_invoice(self, offer, invreq)
+        try:
+            invoice = bolt12.verify_request_and_create_invoice(self, offer, invreq)
+        except Bolt12InvoiceError as e:
+            error_payload = {'invoice_error': {'invoice_error': e.to_tlv()}}
+            send_onion_message_to(self, node_id_or_blinded_path, error_payload)
+            return
 
         destination_payload = {
             'invoice': {'invoice': invoice.encode(signing_key=self.node_keypair.privkey)}

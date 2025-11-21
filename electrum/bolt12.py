@@ -699,15 +699,35 @@ def verify_request_and_create_invoice(
 class NoMatchingChainError(Exception): pass
 
 
-# wraps remote invoice_error
-class Bolt12InvoiceError(Exception): pass
+# wraps invoice_error
+class Bolt12InvoiceError(Exception):
+    def __init__(self, msg: str, *, erroneous_field: Optional[int] = None, suggested_value: Optional[bytes] = None):
+        assert msg
+        assert suggested_value is None if erroneous_field is None else True
+
+        super().__init__(self, msg)
+        self.message = msg
+        self.erroneous_field = erroneous_field
+        self.suggested_value = suggested_value
+
+    def to_tlv(self):
+        data = {'error': {'msg': self.message}}
+        if self.erroneous_field is not None:
+            data.update({'erroneous_field': {'tlv_fieldnum': self.erroneous_field}})
+        if self.suggested_value is not None:
+            data.update({'suggested_value': {'value': self.suggested_value}})
+        with io.BytesIO() as fd:
+            OnionWireSerializer.write_tlv_stream(fd=fd, tlv_stream_name='invoice_error', **data)
+            return fd.getvalue()
 
 
 def _raise_invoice_error(payload):
     invoice_error_tlv = payload['invoice_error']['invoice_error']
     with io.BytesIO(invoice_error_tlv) as fd:
         invoice_error = OnionWireSerializer.read_tlv_stream(fd=fd, tlv_stream_name='invoice_error')
-    raise Bolt12InvoiceError(invoice_error.get('error', {}).get('msg'))
+    raise Bolt12InvoiceError(invoice_error.get('error', {}).get('msg'),
+                             erroneous_field=invoice_error.get('erroneous_field', {}).get('tlv_fieldnum'),
+                             suggested_value=invoice_error.get('suggested_value', {}).get('value'))
 
 
 def remove_bolt12_whitespace(bolt12_bech32: str) -> str:
