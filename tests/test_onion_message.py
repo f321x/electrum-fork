@@ -18,7 +18,7 @@ from electrum.lnonion import (
     get_shared_secrets_along_route, new_onion_packet, ONION_MESSAGE_LARGE_SIZE, HOPS_DATA_SIZE, InvalidPayloadSize,
     encrypt_hops_recipient_data, blinding_privkey)
 from electrum.crypto import get_ecdh, privkey_to_pubkey
-from electrum.lntransport import LNPeerAddr
+from electrum.lntransport import LNPeerAddr, extract_nodeid
 from electrum.lnutil import LnFeatures, Keypair
 from electrum.onion_message import (
     create_blinded_path,OnionMessageManager, NoRouteFound, Timeout
@@ -313,6 +313,7 @@ class TestOnionMessageManager(ElectrumTestCase):
         self.dave = keypair(ECPrivkey(privkey_bytes=b'\x44'*32))
         self.eve = keypair(ECPrivkey(privkey_bytes=b'\x45'*32))
         self.fred = keypair(ECPrivkey(privkey_bytes=b'\x46'*32))
+        self.gerald = keypair(ECPrivkey(privkey_bytes=b'\x47'*32))
 
     async def run_test1(self, t):
         t1 = t.submit_send(
@@ -349,13 +350,38 @@ class TestOnionMessageManager(ElectrumTestCase):
         self.assertEqual(t4_result, ({'path_id': {'data': b'electrum' + rkey}}, {}))
 
     async def run_test5(self, t):
-        t5 = t.submit_send(
-            payload={'message': {'text': 'no_peer'.encode('utf-8')}},
+        lnw = t.lnwallet
+        self.assertFalse(self.eve.pubkey in lnw.peers)
+
+        t.send_direct_connect_fallback = True
+        t5_1 = t.submit_send(
+            payload={'message': {'text': 'no_route_peer_address_known'.encode('utf-8')}},
             node_id_or_blinded_paths=self.eve.pubkey)
 
-        # will not find eve, but has
+        with self.assertRaises(Timeout) as c:
+            await t5_1
+
+        self.assertTrue(self.eve.pubkey in lnw.peers)
+        del lnw.peers[self.eve.pubkey]
+
+        t5_2 = t.submit_send(
+            payload={'message': {'text': 'no_route_no_peer_address'.encode('utf-8')}},
+            node_id_or_blinded_paths=self.gerald.pubkey)
+
+        # will not find route to gerald, and doesn't have gerald's address
         with self.assertRaises(NoRouteFound) as c:
-            await t5
+            await t5_2
+
+        self.assertIsNone(c.exception.peer_address)
+
+        t.send_direct_connect_fallback = False
+        t5_3 = t.submit_send(
+            payload={'message': {'text': 'no_route_peer_address_known_but_ignored'.encode('utf-8')}},
+            node_id_or_blinded_paths=self.eve.pubkey)
+        # will not find route to eve, but has eve's address, but we are configured to not direct connect
+        with self.assertRaises(NoRouteFound) as c:
+            await t5_3
+
         self.assertEqual(c.exception.peer_address, LNPeerAddr('localhost', 1234, self.eve.pubkey))
 
     async def run_test6(self, t, rkey):
