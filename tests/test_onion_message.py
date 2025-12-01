@@ -166,7 +166,7 @@ class TestOnionMessage(ElectrumTestCase):
         our_privkey = bfh(test_vectors['decrypt']['hops'][0]['privkey'])
         blinding = bfh(test_vectors['route']['first_path_key'])
 
-        p = process_onion_packet(o, our_privkey, is_onion_message=True, tlv_stream_name='onionmsg_tlv', blinding=blinding)
+        p = process_onion_packet(o, our_privkey, tlv_stream_name='onionmsg_tlv', blinding=blinding)
 
         self.assertEqual(p.hop_data.blind_fields, {})
         self.assertEqual(p.hop_data.hmac, bfh('a5296325ba478ba1e1a9d1f30a2d5052b2e2889bbd64f72c72bc71d8817288a2'))
