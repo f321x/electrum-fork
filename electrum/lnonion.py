@@ -453,6 +453,7 @@ def process_onion_packet(
         raise UnsupportedOnionPacketVersion()
     if not ecc.ECPubkey.is_pubkey_bytes(onion_packet.public_key):
         raise InvalidOnionPubkey()
+    is_onion_message = tlv_stream_name == 'onionmsg_tlv'
     recipient_data_shared_secret = None
     blinded_path_recipient_data = {}
     if path_key:
