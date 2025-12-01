@@ -455,7 +455,6 @@ def process_onion_packet(
         *,
         associated_data: bytes = b'',
         is_trampoline=False,
-        is_onion_message=False,
         blinding: bytes = None,
         tlv_stream_name='payload') -> ProcessedOnionPacket:
     # TODO: check Onion features ( PERM|NODE|3 (required_node_feature_missing )
@@ -463,6 +462,7 @@ def process_onion_packet(
         raise UnsupportedOnionPacketVersion()
     if not ecc.ECPubkey.is_pubkey_bytes(onion_packet.public_key):
         raise InvalidOnionPubkey()
+    is_onion_message = tlv_stream_name == 'onionmsg_tlv'
     recipient_data_shared_secret = None
     blinded_path_recipient_data = {}
     if blinding:
