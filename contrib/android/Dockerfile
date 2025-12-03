@@ -185,6 +185,10 @@ RUN chown --recursive ${UID} ${WORK_DIR} ${ANDROID_SDK_HOME}
 RUN chown ${UID} /opt
 USER ${UID}
 
+## rust for cryptography module
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y
+ENV PATH="${HOME}/.cargo/bin:${PATH}"
+
 # venv, VIRTUAL_ENV is used by buildozer to indicate a venv environment
 ENV VIRTUAL_ENV=/opt/venv
 RUN python3 -m venv ${VIRTUAL_ENV}
