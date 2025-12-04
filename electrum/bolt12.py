@@ -42,7 +42,7 @@ from .bolt11 import BOLT11Addr
 from .json_db import stored_in, StoredObject
 from .lnmsg import OnionWireSerializer, batched
 from .lnutil import LnFeatures, validate_features, hex_to_bytes, bytes_to_hex
-from .onion_message import Timeout, BlindedPath, BlindedPayInfo, get_blinded_paths_to_me, get_blinded_reply_paths, NoRouteBlindingChannelPeers
+from .onion_message import Timeout, BlindedPath, BlindedPayInfo, BlindedPathInfo, get_blinded_paths_to_me, get_blinded_reply_paths, NoRouteBlindingChannelPeers
 from .segwit_addr import (
     bech32_decode, convertbits, bech32_encode, Encoding, INVALID_BECH32,
     CHARSET as BECH32_CHARSET,
@@ -491,40 +491,31 @@ def bolt12_bech32_to_bytes(data: str) -> bytes:
 
 
 def create_offer(
-    lnwallet: 'LNWallet',
     *,
+    offer_paths: Optional[Iterable[BlindedPathInfo]] = None,
+    node_id: Optional[bytes] = None,
     amount_msat: Optional[int] = None,
     memo: Optional[str] = None,
     expiry: Optional[int] = None,
-    issuer: str = None,
-    allow_unblinded: bool = True,
-) -> Tuple[bytes, 'BOLT12Offer']:
-    path_id = os.urandom(32)  # TODO: move path_id gen get_blinded_reply_paths, unique per path
-    reply_paths = get_blinded_reply_paths(lnwallet, path_id)  # TODO: catch exceptions
-    if not len(reply_paths) and not allow_unblinded:
-        raise Exception('No suitable channels')
-
+    issuer: Optional[str] = None,
+) -> tuple[bytes, BOLT12Offer]:
     offer_id = os.urandom(16)  # todo: use hmac instead of random id?
-    node_id = lnwallet.node_keypair.pubkey
 
     chains = None
     if constants.net != constants.BitcoinMainnet:
         chains = [constants.net.rev_genesis_bytes()]
 
-    offer_paths = tuple(reply_paths) if reply_paths else None
-
     offer = BOLT12Offer(
         offer_metadata=offer_id,
+        offer_issuer=issuer,
         offer_description=memo,
         offer_chains=chains,
         offer_amount=amount_msat,
         offer_absolute_expiry=int(time.time()) + expiry if expiry else None,
         # TODO: remove adding of offer_issuer_id, once we can sign invoices properly based on invreq used blinded path
         offer_issuer_id=node_id, # node_id if not offer_paths else None,
-        offer_issuer=issuer,
-        offer_paths=offer_paths,
+        offer_paths=tuple(p.path for p in offer_paths) if offer_paths else None,
     )
-
     return offer_id, offer
 
 
@@ -719,7 +710,7 @@ def verify_request_and_create_invoice(
         raise Bolt12InvoiceError('no active channels with sufficient receive capacity, cannot receive this payment.')
 
     try:
-        invoice_paths, payinfo = get_blinded_paths_to_me(
+        invoice_path_info = get_blinded_paths_to_me(
             lnwallet, final_recipient_data=recipient_data, my_channels=invoice_channels)
     except NoRouteBlindingChannelPeers as e:
         raise Bolt12InvoiceError("no peers with route blinding support") from e
@@ -733,11 +724,13 @@ def verify_request_and_create_invoice(
             invoice_payment_hash=invoice_payment_hash,
             invoice_features=invoice_features,
             invoice_node_id=invoice_node_id,
-            invoice_paths=tuple(invoice_paths),
-            invoice_blindedpay=tuple(payinfo),
+            invoice_paths=tuple(p.path for p in invoice_path_info),
+            invoice_blindedpay=tuple(p.payinfo for p in invoice_path_info),
         )
     except Exception as e:
         raise Bolt12InvoiceError(str(e)) from e
+
+    lnwallet.add_path_ids_for_payment_hash(invoice_payment_hash, invoice_path_info)
 
     return invoice
 
