@@ -1388,6 +1388,32 @@ class Commands(Logger):
         return wallet.export_request(req)
 
     @command('wnl')
+    async def pay_bolt12_offer(
+            self,
+            offer: str,
+            amount: Optional[Decimal] = None,
+            wallet: Abstract_Wallet = None
+    ):
+        """Retrieve an invoice from a bolt12 offer, and pay that invoice
+
+        arg:str:offer:bolt-12 offer (bech32)
+        arg:decimal:amount:Amount to send
+        """
+        amount_msat = satoshis(amount) * 1000 if amount else None
+        bolt12_offer = bolt12.BOLT12Offer.decode(offer)
+        offer_amount_msat = bolt12_offer.offer_amount
+        if amount_msat and offer_amount_msat:
+            assert amount_msat == offer_amount_msat
+        lnworker = wallet.lnworker
+        bolt12_invoice, bolt12_invoice_bech32 = await bolt12.request_invoice(lnworker, bolt12_offer, amount_msat or offer_amount_msat)
+        invoice = Invoice.from_bech32(bolt12_invoice_bech32)
+        success, log = await lnworker.pay_invoice(invoice)
+        return {
+            'success': success,
+            'log': [x.formatted_tuple() for x in log]
+        }
+
+    @command('wnl')
     async def add_offer(
             self,
             amount: Optional[Decimal] = None,
