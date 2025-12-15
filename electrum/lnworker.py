@@ -4275,7 +4275,9 @@ class LNWallet(Logger):
 
     def delete_offer(self, offer_id: bytes):
         with self.lock:
-            self._offers.pop(offer_id)
+            offer = self._offers.pop(offer_id, None)
+            if offer is None:
+                return
             self.db.get('offers').pop(offer_id.hex())
 
     @property
