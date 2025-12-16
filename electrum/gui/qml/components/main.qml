@@ -120,7 +120,7 @@ ApplicationWindow
 
     header: ToolBar {
         id: toolbar
- 
+
         // Add top margin for status bar on Android when using edge-to-edge
         topPadding: app.statusBarHeight
 
@@ -269,7 +269,7 @@ ApplicationWindow
             Layout.fillWidth: true
 
             initialItem: Component {
-                WalletMainView {}
+                Wallets {}
             }
 
             function getRoot() {
@@ -281,6 +281,10 @@ ApplicationWindow
                 } else {
                     mainStackView.push(item)
                 }
+            }
+            function replaceRoot(item_url) {
+                mainStackView.clear()
+                mainStackView.push(Qt.resolvedUrl(item_url))
             }
         }
 
