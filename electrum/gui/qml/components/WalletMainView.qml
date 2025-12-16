@@ -441,6 +441,19 @@ Item {
     }
 
     Connections {
+        target: AppController
+        function onUriReceived(uri) {
+            console.log('uri received: ' + uri)
+            if (!Daemon.currentWallet) {
+                console.log('No wallet open, deferring')
+                _intentUri = uri
+                return
+            }
+            piResolver.recipient = uri
+        }
+    }
+
+    Connections {
         target: Daemon
         function onWalletLoaded() {
             if (!Daemon.currentWallet) {  // wallet got deleted
