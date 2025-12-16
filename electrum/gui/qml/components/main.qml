@@ -684,6 +684,12 @@ ApplicationWindow
             _opendialog = openWalletDialog.createObject(app, { name: name, path: path })
             _opendialog.closed.connect(function() {
                 _opendialog = undefined
+                // show the wallets list if the dialog gets closed and no wallet has been loaded
+                if (!Daemon.currentWallet && Daemon.availableWallets.rowCount() > 0) {
+                    if (!stack.currentItem || stack.currentItem.objectName !== "Wallets") {
+                        stack.push(Qt.resolvedUrl('Wallets.qml'))
+                    }
+                }
                 _loadingWalletContext = null  // dialog closed, we can allow trying biometric auth again
             })
             _opendialog.open()

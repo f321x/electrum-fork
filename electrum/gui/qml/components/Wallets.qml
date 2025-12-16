@@ -9,7 +9,7 @@ import "controls"
 
 Pane {
     id: rootItem
-    objectName: 'Wallets'
+    objectName: 'Wallets'  // showOpenWalletDialog.closed depends on objectName
 
     padding: 0
 
