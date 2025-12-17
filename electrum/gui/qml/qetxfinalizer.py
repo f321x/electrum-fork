@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Optional, TYPE_CHECKING, Callable
 from functools import partial
 
-from PyQt6.QtCore import pyqtProperty, pyqtSignal, pyqtSlot, QObject, pyqtEnum
+from PyQt6.QtCore import pyqtProperty, pyqtSignal, pyqtSlot, QObject, pyqtEnum, QRegularExpression
 
 from electrum.logging import get_logger
 from electrum.i18n import _
