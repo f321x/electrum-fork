@@ -360,6 +360,15 @@ class QEConfig(AuthMixin, QObject):
         """
         return self.config.WALLET_SHOULD_USE_SINGLE_PASSWORD
 
+    walletDidUseSinglePasswordChanged = pyqtSignal()
+    @pyqtProperty(bool, notify=walletDidUseSinglePasswordChanged)
+    def walletDidUseSinglePassword(self):
+        """
+        Allows to guess if this is a unified password instance without having
+        unlocked any wallet yet. Might be out of sync e.g. if wallet files get copied manually.
+        """
+        return self.config.WALLET_DID_USE_SINGLE_PASSWORD
+
     @pyqtSlot('qint64', result=str)
     @pyqtSlot(QEAmount, result=str)
     def formatSatsForEditing(self, satoshis):

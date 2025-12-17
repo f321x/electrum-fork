@@ -94,9 +94,40 @@ ElDialog {
         Daemon.loadWallet(openwalletdialog.path, password.text)
     }
 
+    function maybeUnlockAnyOtherWallet() {
+        // try to open any other wallet with the password the user entered, hack to improve ux for
+        // users with non-unified wallet password.
+        // we should only fall back to opening a random wallet if:
+        // - the user did not select a specific wallet, otherwise this is confusing
+        // - there can be more than one password, otherwise this scan would be pointless
+        if (Daemon.availableWallets.rowCount() <= 1 || password.text === '') {
+            return false
+        }
+        if (Config.walletDidUseSinglePassword) {
+            // the last time the wallet was unlocked all wallets used the same password.
+            // trying to decrypt all of them now is most probably useless.
+            return false
+        }
+        if (rootLayout.Window.window.stack.currentItem
+                && rootLayout.Window.window.stack.currentItem.objectName === 'Wallets') {
+            return false  // user is in the wallets list, so they manually selected a wallet
+        }
+        let wallet_paths = Daemon.getWalletsUnlockableWithPassword(password.text)
+        if (wallet_paths && wallet_paths.length > 0) {
+            console.log('could not unlock recent wallet, falling back to: ' + wallet_paths[0])
+            Daemon.loadWallet(wallet_paths[0], password.text)
+            return true
+        }
+        return false
+    }
+
     Connections {
         target: Daemon
         function onWalletRequiresPassword() {
+            if (maybeUnlockAnyOtherWallet()) {
+                password.text = ''  // reset pw so we cannot end up in a loop
+                return
+            }
             console.log('invalid password')
             _invalidPassword = true
             password.tf.forceActiveFocus()
