@@ -14,7 +14,6 @@ Item {
     property string title: Daemon.currentWallet.name
 
     property var _sendDialog
-    property string _intentUri
 
     property string _request_amount
     property string _request_description
@@ -442,29 +441,21 @@ Item {
     }
 
     Connections {
-        target: AppController
-        function onUriReceived(uri) {
-            console.log('uri received: ' + uri)
-            if (!Daemon.currentWallet) {
-                console.log('No wallet open, deferring')
-                _intentUri = uri
-                return
-            }
-            piResolver.recipient = uri
-        }
-    }
-
-    Connections {
         target: Daemon
         function onWalletLoaded() {
             if (!Daemon.currentWallet) {  // wallet got deleted
                 app.stack.replaceRoot('Wallets.qml')
                 return
             }
-            infobanner.hide() // start hidden when switching wallets
-            if (_intentUri) {
-                piResolver.recipient = _intentUri
-                _intentUri = ''
+        }
+    }
+
+    Connections {
+        target: app
+        function onPendingIntentChanged() {
+            if (app.pendingIntent) {
+                piResolver.recipient = app.pendingIntent
+                app.pendingIntent = ""
             }
         }
     }
@@ -776,5 +767,13 @@ Item {
         }
     }
 
+    Component.onCompleted: {
+        console.log("WalletMainView completed: ", Daemon.currentWallet.name)
+        infobanner.hide() // start hidden when switching wallets
+        if (app.pendingIntent) {
+            piResolver.recipient = app.pendingIntent
+            app.pendingIntent = ""
+        }
+    }
 }
 

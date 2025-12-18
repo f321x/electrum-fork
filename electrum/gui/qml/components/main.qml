@@ -38,6 +38,8 @@ ApplicationWindow
     property alias keyboardFreeZone: _keyboardFreeZone
     property alias infobanner: _infobanner
 
+    property string pendingIntent: ""
+
     property variant activeDialogs: []
 
     property var _exceptionDialog
@@ -707,6 +709,10 @@ ApplicationWindow
             var obj = comp.createObject(app)
             if (obj != null)
                 app.pluginobjects[name] = obj
+        }
+        function onUriReceived(uri) {
+            console.log('uri received (main): ' + uri)
+            app.pendingIntent = uri
         }
     }
 
