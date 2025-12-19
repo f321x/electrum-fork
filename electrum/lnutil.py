@@ -527,7 +527,7 @@ NBLOCK_CLTV_DELTA_TOO_FAR_INTO_FUTURE = 28 * 144
 
 MAXIMUM_REMOTE_TO_SELF_DELAY_ACCEPTED = 2016
 
-# timeout after which we consider a zeroconf channel without funding tx to be failed
+# timeout after which we consider a zeroconf channel without funding tx to be failed (as client)
 ZEROCONF_TIMEOUT = 60 * 10
 
 

@@ -374,27 +374,37 @@ class AbstractChannel(Logger, ABC):
             elif self.has_funding_timed_out():
                 self.logger.warning(f"dropping incoming channel, funding tx not found in mempool")
                 self.lnworker.remove_channel(self.channel_id)
-        elif self.is_zeroconf() and state in [ChannelState.OPEN, ChannelState.CLOSING, ChannelState.FORCE_CLOSING]:
-            chan_age = now() - self.storage['init_timestamp']
-            # handling zeroconf channels with no funding tx, can happen if broadcasting fails on LSP side
-            # or if the LSP did double spent the funding tx/never published it intentionally
-            # only remove a timed out OPEN channel if we are connected to the network to prevent removing it if we went
-            # offline before seeing the funding tx
-            if state != ChannelState.OPEN or chan_age > ZEROCONF_TIMEOUT and self.lnworker.network.is_connected():
-                # we delete the channel if its in closing state (either initiated manually by client or by LSP on failure)
-                # or if the channel is not seeing any funding tx after 10 minutes to prevent further usage (limit damage)
-                self.set_state(ChannelState.REDEEMED, force=True)
-                local_balance_sat = int(self.balance(LOCAL) // 1000)
-                if local_balance_sat > 0:
-                    self.logger.warning(
-                        f"we may have been scammed out of {local_balance_sat} sat by our "
-                        f"JIT provider: {self.lnworker.config.ZEROCONF_TRUSTED_NODE} or he didn't use our preimage")
-                    self.lnworker.config.ZEROCONF_TRUSTED_NODE = ''
-                # FIXME this is broken: lnwatcher.unwatch_channel does not exist
-                self.lnworker.lnwatcher.unwatch_channel(self.get_funding_address(), self.funding_outpoint.to_str())
-                # remove remaining local transactions from the wallet, this will also remove child transactions (closing tx)
-                self.lnworker.lnwatcher.adb.remove_transaction(self.funding_outpoint.txid)
-                self.lnworker.remove_channel(self.channel_id)
+        elif self._has_zeroconf_channel_funding_timed_out():
+            self._remove_unfunded_zeroconf_channel()
+
+    def _has_zeroconf_channel_funding_timed_out(self) -> bool:
+        state = self.get_state()
+        if not self.is_zeroconf() or state not in (ChannelState.OPEN, ChannelState.CLOSING, ChannelState.FORCE_CLOSING):
+            return False
+        chan_age = now() - self.storage['init_timestamp']
+        # handling zeroconf channels with no funding tx, can happen if broadcasting fails on LSP side
+        # or if the LSP did double spent the funding tx/never published it intentionally
+        # only remove a timed out OPEN channel if we are connected to the network to prevent removing it if we went
+        # offline before seeing the funding tx
+        if state != ChannelState.OPEN or chan_age > ZEROCONF_TIMEOUT and self.lnworker.network.is_connected():
+            return True
+        return False
+
+    def _remove_unfunded_zeroconf_channel(self) -> None:
+        # we delete the channel if its in closing state (either initiated manually by client or by LSP on failure)
+        # or if the channel is not seeing any funding tx after 10 minutes to prevent further usage (limit damage)
+        self.set_state(ChannelState.REDEEMED, force=True)
+        local_balance_sat = int(self.balance(LOCAL) // 1000)
+        if local_balance_sat > 0:
+            self.logger.warning(
+                f"we may have been scammed out of {local_balance_sat} sat by our "
+                f"JIT provider: {self.lnworker.config.ZEROCONF_TRUSTED_NODE} or he didn't use our preimage")
+            self.lnworker.config.ZEROCONF_TRUSTED_NODE = ''
+        # FIXME this is broken: lnwatcher.unwatch_channel does not exist
+        self.lnworker.lnwatcher.unwatch_channel(self.get_funding_address(), self.funding_outpoint.to_str())
+        # remove remaining local transactions from the wallet, this will also remove child transactions (closing tx)
+        self.lnworker.lnwatcher.adb.remove_transaction(self.funding_outpoint.txid)
+        self.lnworker.remove_channel(self.channel_id)
 
     def update_funded_state(self, *, funding_txid: str, funding_height: TxMinedInfo) -> None:
         self.save_funding_height(txid=funding_txid, height=funding_height.height(), timestamp=funding_height.timestamp)
