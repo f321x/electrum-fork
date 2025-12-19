@@ -1497,7 +1497,7 @@ class LNWallet(Logger):
             )
             async def wait_for_channel():
                 while not next_chan.is_open():
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.1)
             await util.wait_for2(wait_for_channel(), LN_P2P_NETWORK_TIMEOUT)
             next_chan.save_remote_scid_alias(self._scid_alias_of_node(next_peer.pubkey))
             self.logger.info(f'JIT channel is open')
@@ -1511,15 +1511,17 @@ class LNWallet(Logger):
                 onion=next_onion)
             async def wait_for_preimage():
                 while self.get_preimage(payment_hash) is None:
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.1)
             await util.wait_for2(wait_for_preimage(), LN_P2P_NETWORK_TIMEOUT)
 
             # We have been paid and can broadcast
             # todo: if broadcasting raise an exception, we should try to rebroadcast
             await self.network.broadcast_transaction(funding_tx)
         except OnionRoutingFailure:
+            self._preimages.pop(payment_hash.hex(), None)
             raise
         except Exception:
+            self._preimages.pop(payment_hash.hex(), None)
             raise OnionRoutingFailure(code=OnionFailureCode.TEMPORARY_NODE_FAILURE, data=b'')
         finally:
             del self.dont_settle_htlcs[payment_hash.hex()]
