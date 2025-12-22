@@ -398,6 +398,8 @@ def main():
             'cmd': 'gui',
             SimpleConfig.GUI_NAME.key(): 'qml',
             SimpleConfig.WALLET_SHOULD_USE_SINGLE_PASSWORD.key(): True,
+            SimpleConfig.WRITE_LOGS_TO_DISK.key(): True,
+            SimpleConfig.LOGS_NUM_FILES_KEEP.key(): 100,
         }
         SimpleConfig.set_chain_config_opt_based_on_android_packagename(config_options)
     else:
