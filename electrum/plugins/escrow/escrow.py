@@ -6,6 +6,8 @@ from electrum.i18n import _
 from electrum.plugin import BasePlugin, hook
 from electrum import constants
 
+from .nostr_worker import EscrowNostrWorker
+
 if TYPE_CHECKING:
     from electrum.simple_config import SimpleConfig
     from electrum.wallet import Abstract_Wallet
@@ -64,7 +66,14 @@ class EscrowPlugin(BasePlugin):
         BasePlugin.__init__(self, parent, config, name)
         self.wallets = set()  # type: set[Abstract_Wallet]
         self.config = config
+        self.nostr_worker = None  # type: Optional[EscrowNostrWorker]
         self.logger.debug(f"Escrow plugin created")
+
+    def is_available(self) -> bool:
+        network_available = not self.config.NETWORK_OFFLINE
+        if not network_available:
+            self.logger.warning(f"Escrow Plugin unavailable: no network")
+        return network_available
 
     def is_escrow_agent(self, wallet: Abstract_Wallet) -> Optional[bool]:
         """Is stored in wallet db as the user might is agent in one wallet and user in another wallet"""
@@ -79,7 +88,13 @@ class EscrowPlugin(BasePlugin):
     @hook
     def daemon_wallet_loaded(self, daemon: 'Daemon', wallet: 'Abstract_Wallet'):
         self.wallets.add(wallet)
+        if not self.nostr_worker:
+            self.nostr_worker = EscrowNostrWorker(self.config, daemon.network)
+            self.nostr_worker.start()
 
     @hook
     def close_wallet(self, wallet: 'Abstract_Wallet'):
         self.wallets.discard(wallet)
+        if not self.wallets:
+            self.nostr_worker.stop()
+            self.nostr_worker = None
