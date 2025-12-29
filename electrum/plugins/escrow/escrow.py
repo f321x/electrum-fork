@@ -54,6 +54,7 @@ class EscrowTrade:
 
 
 class EscrowPlugin(BasePlugin):
+    MAX_CONTRACT_LEN_CHARS = 2000
     # todo: check compatibility with electrum version
     # todo: check for plugin updates (nostr)
 
