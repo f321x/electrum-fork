@@ -13,7 +13,7 @@ from electrum.plugin import hook
 from electrum.gui.qt.util import (
     WindowModalDialog, Buttons, OkButton,
     read_QIcon_from_bytes, read_QPixmap_from_bytes, read_QIcon, HelpLabel,
-    icon_path
+    icon_path, WWLabel
 )
 from electrum.gui.qt.my_treeview import QMenuWithConfig
 from electrum.gui.qt.amountedit import BTCAmountEdit, AmountEdit
@@ -35,7 +35,7 @@ class EscrowType(Enum):
 
 class WCCreateTrade(WizardComponent):
     def __init__(self, parent, wizard: 'EscrowWizardDialog'):
-        WizardComponent.__init__(self, parent, wizard, title=_("Create Trade"))
+        super().__init__(parent, wizard, title=_("Create Trade"))
         self.wizard = wizard
 
         layout = self.layout()
@@ -119,16 +119,23 @@ class WCCreateTrade(WizardComponent):
 
 
 class WCSelectEscrowAgent(WizardComponent):
-    def __init__(self, parent, wizard):
-        super().__init__(parent, wizard, title=_("Select Escrow Agent"))
+    """
+    Trade maker selects escrow agent for this trade from a drop-down menu. Also has the possibility
+    add a new escrow agent. Gives details of the escrow agent.
+    """
+    def __init__(self, parent, wizard: 'EscrowWizardDialog'):
+        super().__init__(parent, wizard, title=_("Escrow Agent"))
         layout = self.layout()
-        layout.addWidget(QLabel("Select Escrow Agent (TODO)"))
-        # Trade maker selects escrow agent for this trade from a drop-down menu. Also has the possibility
-        # to add a new escrow agent. Gives details of the escrow agent.
-        self.valid = True
+        layout.addWidget(QLabel(_("Select trusted Escrow Agent")))
+        self.escrow_agent_pubkey = None  # type: Optional[str]
+        self.valid = False
+        # todo: fetch kind 0 profiles and nip 38 status of providers
+
+    def validate(self):
+        self.valid = self.escrow_agent_pubkey is not None
 
     def apply(self):
-        pass
+        self.wizard_data['escrow_agent_pubkey'] = self.escrow_agent_pubkey
 
 
 class WCConfirmCreate(WizardComponent):
@@ -215,8 +222,9 @@ class EscrowPluginDialog(WindowModalDialog):
         self._wallet = None  # type: Optional['Abstract_Wallet']
         self._main_layout = None  # type: Optional[QHBoxLayout]
         self._content_vbox = None  # type: Optional[QVBoxLayout]
-        self.new_trade_button = None
-        self.accept_trade_button = None
+        self._new_trade_button = None
+        self._accept_trade_button = None
+        self._notification_label = None  # type: Optional[QLabel]
 
     @classmethod
     def run(cls, window: 'ElectrumWindow', plugin: 'Plugin'):
@@ -228,6 +236,7 @@ class EscrowPluginDialog(WindowModalDialog):
         d._content_vbox.addLayout(d._plugin_dialog_footer(d))
         d._main_layout.addLayout(d._content_vbox)
         d.setLayout(d._main_layout)
+        d._maybe_show_warning()
         try:
             return bool(d.exec())
         finally:
@@ -246,12 +255,12 @@ class EscrowPluginDialog(WindowModalDialog):
     def _plugin_dialog_title_hbox(self, window: 'ElectrumWindow') -> QHBoxLayout:
         # title (New trade + menu + info)
         title_hbox = QHBoxLayout()
-        self.new_trade_button = QPushButton(_("Create Trade"))
-        self.new_trade_button.clicked.connect(self.create_trade)
-        title_hbox.addWidget(self.new_trade_button)
-        self.accept_trade_button = QPushButton(_("Accept Trade"))
-        self.accept_trade_button.clicked.connect(self.accept_trade)
-        title_hbox.addWidget(self.accept_trade_button)
+        self._new_trade_button = QPushButton(_("Create Trade"))
+        self._new_trade_button.clicked.connect(self._create_trade)
+        title_hbox.addWidget(self._new_trade_button)
+        self._accept_trade_button = QPushButton(_("Accept Trade"))
+        self._accept_trade_button.clicked.connect(self._accept_trade)
+        title_hbox.addWidget(self._accept_trade_button)
 
         self._update_visibility()
         title_hbox.addStretch(1)
@@ -296,6 +305,12 @@ class EscrowPluginDialog(WindowModalDialog):
         header.setSectionResizeMode(1, header.ResizeMode.Stretch)           # Name fills remaining space
         header.setSectionResizeMode(2, header.ResizeMode.ResizeToContents)  # State
         content_vbox.addLayout(self._plugin_dialog_title_hbox(window))
+
+        # notification label for urgent user infos
+        self._notification_label = WWLabel()
+        self._notification_label.setVisible(False)
+
+        content_vbox.addWidget(self._notification_label)
         content_vbox.addWidget(trades_list)
         return content_vbox
 
@@ -307,11 +322,41 @@ class EscrowPluginDialog(WindowModalDialog):
         )
         return footer_buttons
 
+    def _maybe_show_warning(self):
+        """
+        Check if there is any issue that could cause the plugin to be unreliable and show a warning.
+        """
+        if len(self._plugin.config.get_nostr_relays()) < 3:
+            self.show_notification(
+                _("You have configured only a few Nostr relays. To ensure reliable operation, "
+                  "you should add more Nostr relays in the network settings."),
+                critical=True,
+            )
+
+    def show_notification(self, msg: Optional[str], *, critical: bool = False):
+        """
+        Shows a notification in the dialog. Overrides the previous notification.
+        """
+        if not msg:
+            self._notification_label.clear()
+            return
+        self._notification_label.setText(msg)
+        if critical:
+            self._notification_label.setStyleSheet(
+                "QLabel { color: black; background-color: #e74c3c; padding: 10px; border-radius: 5px; }"
+            )
+        else:
+            self._notification_label.setStyleSheet(
+                "QLabel { color: black; background-color: #f1c40f; padding: 10px; border-radius: 5px; }"
+            )
+        self._notification_label.setVisible(bool(msg))
+
     def _cleanup(self):
         self._main_layout = None
         self._content_vbox = None
         self._plugin = None
         self._wallet = None
+        self._notification_label = None
 
     def _toggle_escrow_agent_mode(self):
         escrow_agent_enabled = self._plugin.is_escrow_agent(self._wallet)
@@ -323,17 +368,17 @@ class EscrowPluginDialog(WindowModalDialog):
 
     def _update_visibility(self):
         is_agent = self._plugin.is_escrow_agent(self._wallet)
-        if self.new_trade_button:
-            self.new_trade_button.setVisible(not is_agent)
-        if self.accept_trade_button:
-            self.accept_trade_button.setVisible(not is_agent)
+        if self._new_trade_button:
+            self._new_trade_button.setVisible(not is_agent)
+        if self._accept_trade_button:
+            self._accept_trade_button.setVisible(not is_agent)
 
-    def create_trade(self):
+    def _create_trade(self):
         d = EscrowWizardDialog(self.window, self._plugin, EscrowType.MAKE)
         if d.exec():
             self._trigger_update()
 
-    def accept_trade(self):
+    def _accept_trade(self):
         d = EscrowWizardDialog(self.window, self._plugin, EscrowType.TAKE)
         if d.exec():
             self._trigger_update()
