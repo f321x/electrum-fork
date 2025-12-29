@@ -55,8 +55,10 @@ class EscrowTrade:
 
 class EscrowPlugin(BasePlugin):
     MAX_CONTRACT_LEN_CHARS = 2000
+    ICON_FILE_NAME = "escrow-icon.png"
     # todo: check compatibility with electrum version
     # todo: check for plugin updates (nostr)
+    # todo: telegram bot notification
 
     def __init__(self, parent, config: 'SimpleConfig', name):
         BasePlugin.__init__(self, parent, config, name)
