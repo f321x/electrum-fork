@@ -1,23 +1,24 @@
 from typing import TYPE_CHECKING, Optional
-from dataclasses import dataclass
 from functools import partial
+from enum import Enum
 
-from PyQt6.QtGui import QPixmap, QImage
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTreeWidget, QTreeWidgetItem,
-    QTextEdit, QApplication, QSpinBox, QSizePolicy, QComboBox, QLineEdit, QToolButton, QGridLayout,
-    QWidget,
+    QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTreeWidget,
+    QTextEdit, QSpinBox, QLineEdit, QToolButton, QGridLayout,
 )
 
 from electrum.i18n import _
 from electrum.plugin import hook
 from electrum.gui.qt.util import (
-    WindowModalDialog, Buttons, OkButton, CancelButton, CloseButton,
-    read_QIcon_from_bytes, read_QPixmap_from_bytes, read_QIcon, HelpLabel
+    WindowModalDialog, Buttons, OkButton,
+    read_QIcon_from_bytes, read_QPixmap_from_bytes, read_QIcon, HelpLabel,
+    icon_path
 )
 from electrum.gui.qt.my_treeview import QMenuWithConfig
 from electrum.gui.qt.amountedit import BTCAmountEdit, AmountEdit
+from electrum.gui.qt.wizard.wizard import QEAbstractWizard, WizardComponent
+from electrum.wizard import WizardViewState
 
 from .escrow import EscrowPlugin
 from .wizard import EscrowWizard
@@ -27,86 +28,26 @@ if TYPE_CHECKING:
     from electrum.gui.qt.main_window import ElectrumWindow
 
 
-class EscrowWizardDialog(WindowModalDialog):
-    def __init__(self, window: 'ElectrumWindow', plugin: 'EscrowPlugin', flow_type: str):
-        WindowModalDialog.__init__(self, window, _("Escrow Wizard"))
-        self.wizard = EscrowWizard(plugin)
-        self.electrum_window = window
-        self.view_state = self.wizard.start(flow_type)
+class EscrowType(Enum):
+    MAKE = 1
+    TAKE = 2
 
-        self.vbox = QVBoxLayout(self)
-        self.content_layout = QVBoxLayout()
-        self.vbox.addLayout(self.content_layout)
 
-        self.back_button = QPushButton(_("Back"))
-        self.back_button.clicked.connect(self.on_back)
-        self.next_button = QPushButton(_("Next"))
-        self.next_button.clicked.connect(self.on_next)
-        self.cancel_button = QPushButton(_("Cancel"))
-        self.cancel_button.clicked.connect(self.reject)
+class WCCreateTrade(WizardComponent):
+    def __init__(self, parent, wizard: 'EscrowWizardDialog'):
+        WizardComponent.__init__(self, parent, wizard, title=_("Create Trade"))
+        self.wizard = wizard
 
-        self.vbox.addLayout(Buttons(self.back_button, self.next_button, self.cancel_button))
-
-        self.current_widget = None
-        self.update_ui()
-
-    def update_ui(self):
-        if self.current_widget:
-            self.content_layout.removeWidget(self.current_widget)
-            self.current_widget.deleteLater()
-
-        view = self.view_state.view
-        self.current_widget = self.get_widget_for_view(view, self.view_state.wizard_data)
-        self.content_layout.addWidget(self.current_widget)
-
-        is_last = self.wizard.is_last_view(view, self.view_state.wizard_data)
-        self.next_button.setText(_("Finish") if is_last else _("Next"))
-        self.back_button.setEnabled(len(self.wizard._stack) > 0)
-
-    def on_next(self):
-        data = self.view_state.wizard_data
-
-        if self.wizard.is_last_view(self.view_state.view, data):
-            self.accept()
-            return
-
-        self.view_state = self.wizard.resolve_next(self.view_state.view, data)
-        self.update_ui()
-
-    def on_back(self):
-        self.view_state = self.wizard.resolve_prev()
-        self.update_ui()
-
-    def get_widget_for_view(self, view: str, data: dict) -> QWidget:
-        if view == 'create_trade':
-            return self._create_trade_widget()
-            # l.addWidget(QLabel(_("Enter Trade Terms:")))
-            # self.terms_edit = QLineEdit(data.get('terms', ''))
-            # l.addWidget(self.terms_edit)
-        elif view == 'select_escrow_agent':
-            return self._select_escrow_agent_widget()
-        elif view == 'confirm_create':
-            return self._confirm_create_widget()
-            # l.addWidget(QLabel(f"Terms: {data.get('terms', 'N/A')}"))
-        elif view == 'fetch_trade':
-            return self._fetch_trade_widget()
-        elif view == 'accept_trade':
-            return self._accept_trade_widget()
-        else:
-            raise ValueError(f'Invalid view: {view}')
-
-    def _create_trade_widget(self) -> QWidget:
-        """
-        Trade maker enters their trade conditions.
-        """
-        w = QWidget()
-        layout = QVBoxLayout(w)
+        layout = self.layout()
+        assert isinstance(layout, QVBoxLayout), type(layout)
         grid = QGridLayout()
         layout.addLayout(grid)
 
         # Title
         grid.addWidget(QLabel(_("Title:")), 0, 0)
         self.title_edit = QLineEdit()
+        self.title_edit.setPlaceholderText(_("Enter a short trade description..."))
+        self.title_edit.textChanged.connect(self.validate)
         grid.addWidget(self.title_edit, 0, 1, 1, 3)
 
         # Contract
@@ -119,19 +60,21 @@ class EscrowWizardDialog(WindowModalDialog):
         self.contract_edit.setMaximumHeight(100)
         self.contract_edit.setPlaceholderText(_("Enter contract details (max 2000 characters)..."))
         self.contract_edit.textChanged.connect(self._limit_contract_length)
+        self.contract_edit.textChanged.connect(self.validate)
         grid.addWidget(self.contract_edit, 1, 1, 1, 3)
 
         # Trade Amount
         grid.addWidget(QLabel(_("Trade Amount:")), 2, 0)
-        self.receive_amount_e = BTCAmountEdit(self.electrum_window.get_decimal_point)
+        self.receive_amount_e = BTCAmountEdit(self.wizard.window.get_decimal_point)
+        self.receive_amount_e.textChanged.connect(self.validate)
         grid.addWidget(self.receive_amount_e, 2, 1)
 
-        fiat_currency = self.electrum_window.fx.get_currency if self.electrum_window.fx else None
+        fiat_currency = self.wizard.window.fx.get_currency if self.wizard.window.fx else None
         self.fiat_receive_e = AmountEdit(fiat_currency)
-        if not self.electrum_window.fx or not self.electrum_window.fx.is_enabled():
+        if not self.wizard.window.fx or not self.wizard.window.fx.is_enabled():
             self.fiat_receive_e.setVisible(False)
         else:
-            self.electrum_window.connect_fields(self.receive_amount_e, self.fiat_receive_e)
+            self.wizard.window.connect_fields(self.receive_amount_e, self.fiat_receive_e)
         grid.addWidget(self.fiat_receive_e, 2, 2)
 
         # Bond Amount
@@ -151,7 +94,6 @@ class EscrowWizardDialog(WindowModalDialog):
         grid.setHorizontalSpacing(15)
 
         layout.addStretch(1)
-        return w
 
     def _limit_contract_length(self):
         text = self.contract_edit.toPlainText()
@@ -161,43 +103,108 @@ class EscrowWizardDialog(WindowModalDialog):
             cursor.movePosition(cursor.MoveOperation.End)
             self.contract_edit.setTextCursor(cursor)
 
-    def _select_escrow_agent_widget(self) -> QWidget:
-        """
-        Trade maker selects escrow agent for this trade from a drop-down menu. Also has the possibility
-        to add a new escrow agent. Gives details of the escrow agent.
-        """
-        w = QWidget()
-        l = QVBoxLayout(w)
+    def validate(self):
+        title = self.title_edit.text().strip()
+        contract = self.contract_edit.toPlainText().strip()
+        amount = self.receive_amount_e.get_amount()
 
-        return w
+        is_valid = bool(title) and bool(contract) and (amount is not None and amount > 0)
+        self.valid = is_valid
 
-    def _confirm_create_widget(self) -> QWidget:
-        """
-        Maker can review the trade conditions and escrow agent profile. Submitting will request the
-        escrow from the escrow agent via Nostr. The escrow agent will return a bond and trade lightning invoice.
-        """
-        w = QWidget()
-        l = QVBoxLayout(w)
+    def apply(self):
+        self.wizard_data['title'] = self.title_edit.text().strip()
+        self.wizard_data['contract'] = self.contract_edit.toPlainText().strip()
+        self.wizard_data['amount_sat'] = self.receive_amount_e.get_amount()
+        self.wizard_data['bond_percent'] = self.bond_percentage_sb.value()
 
-        return w
 
-    def _fetch_trade_widget(self) -> QWidget:
-        """
-        Taker enters id of the trade they got from the maker, fetches trade conditions.
-        """
-        w = QWidget()
-        l = QVBoxLayout(w)
+class WCSelectEscrowAgent(WizardComponent):
+    def __init__(self, parent, wizard):
+        super().__init__(parent, wizard, title=_("Select Escrow Agent"))
+        layout = self.layout()
+        layout.addWidget(QLabel("Select Escrow Agent (TODO)"))
+        # Trade maker selects escrow agent for this trade from a drop-down menu. Also has the possibility
+        # to add a new escrow agent. Gives details of the escrow agent.
+        self.valid = True
 
-        return w
+    def apply(self):
+        pass
 
-    def _accept_trade_widget(self) -> QWidget:
-        """
-        Taker reviews the trade conditions and escrow agent profile.
-        """
-        w = QWidget()
-        l = QVBoxLayout(w)
 
-        return w
+class WCConfirmCreate(WizardComponent):
+    def __init__(self, parent, wizard):
+        super().__init__(parent, wizard, title=_("Confirm Trade Creation"))
+        layout = self.layout()
+        layout.addWidget(QLabel("Confirm Create (TODO)"))
+        # Maker can review the trade conditions and escrow agent profile. Submitting will request the
+        # escrow from the escrow agent via Nostr. The escrow agent will return a bond and trade lightning invoice.
+        self.valid = True
+
+    def apply(self):
+        pass
+
+
+class WCFetchTrade(WizardComponent):
+    def __init__(self, parent, wizard):
+        super().__init__(parent, wizard, title=_("Fetch Trade"))
+        layout = self.layout()
+        layout.addWidget(QLabel("Fetch Trade (TODO)"))
+        # Taker enters id of the trade they got from the maker, fetches trade conditions.
+        self.valid = True
+
+    def apply(self):
+        pass
+
+
+class WCAcceptTrade(WizardComponent):
+    def __init__(self, parent, wizard):
+        super().__init__(parent, wizard, title=_("Accept Trade"))
+        layout = self.layout()
+        layout.addWidget(QLabel("Accept Trade (TODO)"))
+        # Taker reviews the trade conditions and escrow agent profile.
+        self.valid = True
+
+    def apply(self):
+        pass
+
+
+class EscrowWizardDialog(EscrowWizard, QEAbstractWizard):
+    def __init__(self, window: 'ElectrumWindow', plugin: 'Plugin', escrow_type: EscrowType):
+        EscrowWizard.__init__(self, plugin)
+
+        if escrow_type == EscrowType.MAKE:
+            start_view = 'create_trade'
+        elif escrow_type == EscrowType.TAKE:
+            start_view = 'fetch_trade'
+        else:
+            raise NotImplementedError(escrow_type)
+
+        start_viewstate = WizardViewState(start_view, {}, {})
+
+        QEAbstractWizard.__init__(self, window.config, window.app, start_viewstate=start_viewstate)
+        self.window = window
+        self.window_title = _("Escrow Wizard")
+        self._set_logo()
+
+        self.navmap_merge({
+            'create_trade': {'gui': WCCreateTrade},
+            'select_escrow_agent': {'gui': WCSelectEscrowAgent},
+            'confirm_create': {'gui': WCConfirmCreate},
+            'fetch_trade': {'gui': WCFetchTrade},
+            'accept_trade': {'gui': WCAcceptTrade},
+        })
+
+    def _set_logo(self):
+        self.logo.setPixmap(
+            read_QPixmap_from_bytes(
+                self.plugin.read_file(self.plugin.ICON_FILE_NAME)
+            ).scaledToWidth(
+                60,
+                mode=Qt.TransformationMode.SmoothTransformation
+            )
+        )
+        # ugly hack to prevent QEAbstractWizard from overriding the icon
+        self.icon_filename = icon_path('electrum.png')
 
 
 class EscrowPluginDialog(WindowModalDialog):
@@ -322,19 +329,17 @@ class EscrowPluginDialog(WindowModalDialog):
             self.accept_trade_button.setVisible(not is_agent)
 
     def create_trade(self):
-        d = EscrowWizardDialog(self.window, self._plugin, 'create')
+        d = EscrowWizardDialog(self.window, self._plugin, EscrowType.MAKE)
         if d.exec():
             self._trigger_update()
 
     def accept_trade(self):
-        d = EscrowWizardDialog(self.window, self._plugin, 'accept')
+        d = EscrowWizardDialog(self.window, self._plugin, EscrowType.TAKE)
         if d.exec():
             self._trigger_update()
 
 
 class Plugin(EscrowPlugin):
-    ICON_FILE_NAME = "escrow-icon.png"
-
     def __init__(self, *args):
         EscrowPlugin.__init__(self, *args)
 

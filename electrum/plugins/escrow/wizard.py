@@ -13,10 +13,10 @@ class EscrowWizard(AbstractWizard):
                 'next': 'select_escrow_agent',
             },
             'select_escrow_agent': {
-                'next': 'create_confirm',
+                'next': 'confirm_create',
             },
             'confirm_create': {
-                'last': True
+                'last': True,
             },
             'fetch_trade': {
                 'next': 'accept_trade',
@@ -26,8 +26,8 @@ class EscrowWizard(AbstractWizard):
             }
         }
 
-    def start(self, flow_type: str) -> WizardViewState:
+    def start(self, start_viewstate: WizardViewState) -> WizardViewState:
+        assert start_viewstate
         self.reset()
-        start_view = 'create_trade' if flow_type == 'create' else 'fetch_trade'
-        self._current = WizardViewState(start_view, {}, {})
+        self._current = start_viewstate
         return self._current
