@@ -31,6 +31,8 @@ class EscrowPluginDialog(WindowModalDialog):
         self._wallet = None  # type: Optional['Abstract_Wallet']
         self._main_layout = None  # type: Optional[QHBoxLayout]
         self._content_vbox = None  # type: Optional[QVBoxLayout]
+        self.new_trade_button = None
+        self.accept_trade_button = None
 
     @classmethod
     def run(cls, window: 'ElectrumWindow', plugin: 'EscrowPlugin'):
@@ -60,10 +62,12 @@ class EscrowPluginDialog(WindowModalDialog):
     def _plugin_dialog_title_hbox(self, window: 'ElectrumWindow') -> QHBoxLayout:
         # title (New trade + menu + info)
         title_hbox = QHBoxLayout()
-        new_trade_button = QPushButton(_("Create Trade"))
-        title_hbox.addWidget(new_trade_button)
-        accept_trade_button = QPushButton(_("Accept Trade"))
-        title_hbox.addWidget(accept_trade_button)
+        self.new_trade_button = QPushButton(_("Create Trade"))
+        title_hbox.addWidget(self.new_trade_button)
+        self.accept_trade_button = QPushButton(_("Accept Trade"))
+        title_hbox.addWidget(self.accept_trade_button)
+
+        self._update_visibility()
         title_hbox.addStretch(1)
 
         # help button
@@ -129,7 +133,14 @@ class EscrowPluginDialog(WindowModalDialog):
         self._trigger_update()
 
     def _trigger_update(self):
-        pass
+        self._update_visibility()
+
+    def _update_visibility(self):
+        is_agent = self._plugin.is_escrow_agent(self._wallet)
+        if self.new_trade_button:
+            self.new_trade_button.setVisible(not is_agent)
+        if self.accept_trade_button:
+            self.accept_trade_button.setVisible(not is_agent)
 
 
 class Plugin(EscrowPlugin):
