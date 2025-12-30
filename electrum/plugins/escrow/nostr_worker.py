@@ -202,5 +202,6 @@ class EscrowNostrWorker(Logger, EventListener):
             tags=tags,
             pubkey=signing_key.public_key.hex(),
         )
+        event.add_expiration_tag(expiration_ts=int(time.time()) + 7_700_000)  # ~3 months
         event.sign(signing_key.hex())
         self._broadcast_event(event)
