@@ -52,7 +52,16 @@ class EscrowTrade:
     # the bond ensures both participants have something to lose
     bond_sat: int
     payment_protocol: TradePaymentProtocol
-    trade_network: str  #  AbstractNet.NET_NAME
+    payment_network: str  #  AbstractNet.NET_NAME
+
+
+@dataclass(frozen=True)
+class EscrowAgentProfile:
+    """
+    Information broadcast by the escrow agent, visible to its customers.
+    Using Nostr kind 0 (NIP-01) profile event.
+    """
+    name: str
 
 
 class EscrowPlugin(BasePlugin):
@@ -61,6 +70,7 @@ class EscrowPlugin(BasePlugin):
     # todo: check compatibility with electrum version
     # todo: check for plugin updates (nostr)
     # todo: telegram bot notification
+    # todo: onchain support (with taproot)
 
     def __init__(self, parent, config: 'SimpleConfig', name):
         BasePlugin.__init__(self, parent, config, name)
