@@ -1,5 +1,5 @@
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 import asyncio
 from dataclasses import dataclass
 
@@ -20,6 +20,11 @@ class EscrowAgentProfile:
     Using Nostr kind 0 (NIP-01) profile event.
     """
     name: str
+    about: str  # short description
+    languages: list[str]
+    service_fee_ppm: int  # fees of traded amount (excluding bonds) in ppm
+    gpg_fingerprint: Optional[str]
+    picture: Optional[str]  # url to profile picture
 
 
 class EscrowAgent(EscrowWorker):
@@ -30,6 +35,7 @@ class EscrowAgent(EscrowWorker):
         EscrowWorker.__init__(self, wallet, nostr_worker)
         # we derive a persistent nostr identity from the wallet
         self.nostr_identity_private_key = nostr_worker.get_nostr_privkey_for_wallet(wallet)
+        self.profile_changed = asyncio.Event()
 
     async def main_loop(self):
         self.logger.debug(f"escrow agent started: {self.wallet.basename()}")

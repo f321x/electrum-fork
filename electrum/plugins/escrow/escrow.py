@@ -1,12 +1,14 @@
+import dataclasses
 from typing import Optional, TYPE_CHECKING, Dict
 from dataclasses import dataclass
 from enum import Enum
 
 from electrum.i18n import _
 from electrum.plugin import BasePlugin, hook
+from electrum.util import run_sync_function_on_asyncio_thread, get_asyncio_loop
 
 from .nostr_worker import EscrowNostrWorker
-from .agent import EscrowAgent
+from .agent import EscrowAgent, EscrowAgentProfile
 from .client import EscrowClient
 
 if TYPE_CHECKING:
@@ -79,21 +81,6 @@ class EscrowPlugin(BasePlugin):
             self.logger.warning(f"Escrow Plugin unavailable: no network")
         return network_available
 
-    def is_escrow_agent(self, wallet: 'Abstract_Wallet') -> Optional[bool]:
-        """Is stored in wallet db as the user might is agent in one wallet and user in another wallet"""
-        storage = self.get_storage(wallet)
-        return storage.get('is_escrow_agent', False)
-
-    def set_escrow_agent_mode(self, *, enabled: bool, wallet: 'Abstract_Wallet'):
-        storage = self.get_storage(wallet)
-        self.wallets[wallet].stop()
-        storage['is_escrow_agent'] = enabled
-        if enabled:
-            self.wallets[wallet] = EscrowAgent.create(wallet, self.nostr_worker)
-        else:
-            self.wallets[wallet] = EscrowClient.create(wallet, self.nostr_worker)
-        self.logger.debug(f"escrow agent mode {enabled=}")
-
     @hook
     def daemon_wallet_loaded(self, daemon: 'Daemon', wallet: 'Abstract_Wallet'):
         if not self.nostr_worker:
@@ -118,3 +105,40 @@ class EscrowPlugin(BasePlugin):
             if self.nostr_worker:
                 self.nostr_worker.stop()
                 self.nostr_worker = None
+
+    def is_escrow_agent(self, wallet: 'Abstract_Wallet') -> Optional[bool]:
+        """Is stored in wallet db as the user might is agent in one wallet and user in another wallet"""
+        storage = self.get_storage(wallet)
+        return storage.get('is_escrow_agent', False)
+
+    def set_escrow_agent_mode(self, *, enabled: bool, wallet: 'Abstract_Wallet'):
+        storage = self.get_storage(wallet)
+        self.wallets[wallet].stop()
+        storage['is_escrow_agent'] = enabled
+        if enabled:
+            self.wallets[wallet] = EscrowAgent.create(wallet, self.nostr_worker)
+        else:
+            self.wallets[wallet] = EscrowClient.create(wallet, self.nostr_worker)
+        self.logger.debug(f"escrow agent mode {enabled=}")
+
+    def _get_agent_storage(self, wallet: 'Abstract_Wallet') -> dict:
+        storage = self.get_storage(wallet)
+        if 'agent_data' not in storage:
+            storage['agent_data'] = {}
+        return storage['agent_data']
+
+    def get_escrow_agent_profile(self, wallet: 'Abstract_Wallet') -> Optional[EscrowAgentProfile]:
+        agent_storage = self._get_agent_storage(wallet)
+        if 'profile' not in agent_storage:
+            return None
+        return EscrowAgentProfile(**agent_storage['profile'])
+
+    def save_escrow_agent_profile(self, profile_data: EscrowAgentProfile, wallet: 'Abstract_Wallet') -> None:
+        agent_storage = self._get_agent_storage(wallet)
+        agent_storage['profile'] = dataclasses.asdict(profile_data)
+        worker = self.wallets[wallet]
+        assert isinstance(worker, EscrowAgent)
+        run_sync_function_on_asyncio_thread(
+            worker.profile_changed.set,
+            block=False,
+        )

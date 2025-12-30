@@ -12,7 +12,7 @@ from electrum import constants
 from electrum.i18n import _
 from electrum.plugin import hook
 from electrum.gui.qt.util import (
-    WindowModalDialog, Buttons, OkButton,
+    WindowModalDialog, Buttons, OkButton, CancelButton,
     read_QIcon_from_bytes, read_QPixmap_from_bytes, read_QIcon, HelpLabel,
     icon_path, WWLabel
 )
@@ -20,10 +20,11 @@ from electrum.gui.qt.my_treeview import QMenuWithConfig
 from electrum.gui.qt.amountedit import BTCAmountEdit, AmountEdit
 from electrum.gui.qt.wizard.wizard import QEAbstractWizard, WizardComponent
 from electrum.wizard import WizardViewState
+from electrum.keystore import MasterPublicKeyMixin
 
 from .escrow import EscrowPlugin, TradePaymentProtocol
 from .wizard import EscrowWizard
-from ...keystore import MasterPublicKeyMixin
+from .agent import EscrowAgentProfile
 
 if TYPE_CHECKING:
     from electrum.gui.qt.main_window import ElectrumWindow
@@ -283,6 +284,130 @@ class EscrowWizardDialog(EscrowWizard, QEAbstractWizard):
         self.icon_filename = icon_path('electrum.png')
 
 
+class EscrowAgentProfileDialog(WindowModalDialog):
+    def __init__(self, window: 'ElectrumWindow', plugin: 'Plugin', profile: Optional['EscrowAgentProfile']):
+        WindowModalDialog.__init__(self, window, _("Escrow Agent Profile"))
+        self.plugin = plugin
+        self.wallet = window.wallet
+
+        vbox = QVBoxLayout(self)
+        grid = QGridLayout()
+        vbox.addLayout(grid)
+
+        self.ok_button = OkButton(self, _("Save"))
+        self.ok_button.setEnabled(False)
+
+        # Name
+        grid.addWidget(HelpLabel(
+            text=_("Name:"),
+            help_text=_("The name that will be displayed to other users.")
+        ), 0, 0)
+        self.name_e = QLineEdit()
+        self.name_e.setPlaceholderText(_("Enter your display name"))
+        self.name_e.setMaxLength(50)
+        self.name_e.textChanged.connect(self.validate)
+        grid.addWidget(self.name_e, 0, 1)
+
+        # About
+        grid.addWidget(HelpLabel(
+            text=_("About:"),
+            help_text=_("A description of your services, terms, and any other relevant information.")
+        ), 1, 0)
+        self.about_e = QTextEdit()
+        self.about_e.setPlaceholderText(_("Enter a description (max 1000 characters)..."))
+        self.about_e.setMaximumHeight(100)
+        self.about_e.textChanged.connect(self._limit_about_length)
+        self.about_e.textChanged.connect(self.validate)
+        grid.addWidget(self.about_e, 1, 1)
+
+        # Languages
+        grid.addWidget(HelpLabel(
+            text=_("Languages:"),
+            help_text=_("Comma-separated list of languages you support for dispute resolution.")
+        ), 2, 0)
+        self.languages_e = QLineEdit()
+        self.languages_e.setPlaceholderText(_("e.g. en, es, de"))
+        self.languages_e.setMaxLength(100)
+        self.languages_e.textChanged.connect(self.validate)
+        grid.addWidget(self.languages_e, 2, 1)
+
+        # Service Fee
+        grid.addWidget(HelpLabel(
+            text=_("Service Fee:"),
+            help_text=_("Your fee in parts per million. 10,000 ppm is 1%.")
+        ), 3, 0)
+        self.fee_sb = QSpinBox()
+        self.fee_sb.setRange(0, 1000000)
+        self.fee_sb.setSuffix(" ppm")
+        grid.addWidget(self.fee_sb, 3, 1)
+
+        # GPG Fingerprint
+        grid.addWidget(HelpLabel(
+            text=_("GPG Fingerprint:"),
+            help_text=_("Your GPG key fingerprint for identity verification.")
+        ), 4, 0)
+        self.gpg_e = QLineEdit()
+        self.gpg_e.setPlaceholderText(_("Enter your GPG fingerprint"))
+        self.gpg_e.setMaxLength(100)
+        self.gpg_e.textChanged.connect(self.validate)
+        grid.addWidget(self.gpg_e, 4, 1)
+
+        # Picture URL
+        grid.addWidget(HelpLabel(
+            text=_("Picture URL:"),
+            help_text=_("A URL to your profile picture.")
+        ), 5, 0)
+        self.picture_e = QLineEdit()
+        self.picture_e.setPlaceholderText(_("https://example.com/avatar.png"))
+        self.picture_e.setMaxLength(200)
+        self.picture_e.textChanged.connect(self.validate)
+        grid.addWidget(self.picture_e, 5, 1)
+
+        if profile:
+            self.name_e.setText(profile.name)
+            self.about_e.setText(profile.about)
+            self.languages_e.setText(", ".join(profile.languages))
+            self.fee_sb.setValue(profile.service_fee_ppm)
+            self.gpg_e.setText(profile.gpg_fingerprint or "")
+            self.picture_e.setText(profile.picture or "")
+
+        vbox.addLayout(Buttons(CancelButton(self), self.ok_button))
+        self.validate()
+
+    def _limit_about_length(self):
+        text = self.about_e.toPlainText()
+        max_len = 1000
+        if len(text) > max_len:
+            self.about_e.setPlainText(text[:max_len])
+            cursor = self.about_e.textCursor()
+            cursor.movePosition(cursor.MoveOperation.End)
+            self.about_e.setTextCursor(cursor)
+
+    def validate(self):
+        name = self.name_e.text().strip()
+        about = self.about_e.toPlainText().strip()
+        # Basic validation
+        valid = bool(name) and bool(about)
+
+        # Optional: Validate URL format if provided
+        picture_url = self.picture_e.text().strip()
+        if picture_url and not picture_url.startswith("https://"):
+             valid = False
+
+        self.ok_button.setEnabled(valid)
+
+    def get_profile(self) -> 'EscrowAgentProfile':
+        languages = [x.strip() for x in self.languages_e.text().split(',') if x.strip()]
+        return EscrowAgentProfile(
+            name=self.name_e.text(),
+            about=self.about_e.toPlainText(),
+            languages=languages,
+            service_fee_ppm=self.fee_sb.value(),
+            gpg_fingerprint=self.gpg_e.text() or None,
+            picture=self.picture_e.text() or None
+        )
+
+
 class EscrowPluginDialog(WindowModalDialog):
     def __init__(self, window: 'ElectrumWindow'):
         WindowModalDialog.__init__(self, window, _("Trade Escrow Plugin"))
@@ -294,6 +419,7 @@ class EscrowPluginDialog(WindowModalDialog):
         self._new_trade_button = None
         self._accept_trade_button = None
         self._notification_label = None  # type: Optional[QLabel]
+        self._configure_profile_action = None
 
     @classmethod
     def run(cls, window: 'ElectrumWindow', plugin: 'Plugin'):
@@ -353,6 +479,8 @@ class EscrowPluginDialog(WindowModalDialog):
                 tooltip="Act as escrow agent for trades",
                 default_state=self._plugin.is_escrow_agent(self._wallet),
             )
+            self._configure_profile_action = menu.addAction(_("Configure Profile"), self._configure_profile)
+
         tool_button = QToolButton()
         tool_button.setText(_('Tools'))
         tool_button.setIcon(read_QIcon("preferences.png"))
@@ -396,11 +524,18 @@ class EscrowPluginDialog(WindowModalDialog):
         """
         Check if there is any issue that could cause the plugin to be unreliable and show a warning.
         """
+        self.show_notification(msg=None)
         if len(self._plugin.config.get_nostr_relays()) < 3:
             self.show_notification(
                 _("You have configured only a few Nostr relays. To ensure reliable operation, "
                   "you should add more Nostr relays in the network settings."),
                 critical=True,
+            )
+        is_agent = self._plugin.is_escrow_agent(self._wallet)
+        if is_agent and not self._plugin.get_escrow_agent_profile(self._wallet):
+            self.show_notification(
+                msg=_("Configure your Escrow Agent profile to become visible to other users."),
+                critical=False,
             )
 
     def show_notification(self, msg: Optional[str], *, critical: bool = False):
@@ -435,6 +570,7 @@ class EscrowPluginDialog(WindowModalDialog):
 
     def _trigger_update(self):
         self._update_visibility()
+        self._maybe_show_warning()
 
     def _update_visibility(self):
         is_agent = self._plugin.is_escrow_agent(self._wallet)
@@ -442,6 +578,16 @@ class EscrowPluginDialog(WindowModalDialog):
             self._new_trade_button.setVisible(not is_agent)
         if self._accept_trade_button:
             self._accept_trade_button.setVisible(not is_agent)
+        if self._configure_profile_action:
+            self._configure_profile_action.setVisible(is_agent)
+
+    def _configure_profile(self):
+        profile = self._plugin.get_escrow_agent_profile(self._wallet)
+        d = EscrowAgentProfileDialog(self.window, self._plugin, profile)
+        if d.exec():
+            new_profile = d.get_profile()
+            self._plugin.save_escrow_agent_profile(new_profile, self._wallet)
+            self._trigger_update()
 
     def _create_trade(self):
         d = EscrowWizardDialog(self.window, self._plugin, EscrowType.MAKE)
