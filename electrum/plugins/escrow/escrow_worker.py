@@ -1,7 +1,7 @@
 import asyncio
 from typing import TYPE_CHECKING, Optional
 from abc import ABC, abstractmethod
-from concurrent.futures import Future
+from concurrent.futures import Future, CancelledError
 
 from electrum.util import get_asyncio_loop
 from electrum.logging import Logger
@@ -29,6 +29,16 @@ class EscrowWorker(ABC, Logger):
             worker.main_loop(),
             get_asyncio_loop(),
         )
+
+        def done_callback(f):
+            try:
+                f.result()
+            except (asyncio.CancelledError, CancelledError):
+                pass
+            except Exception:
+                worker.logger.exception("EscrowWorker task failed")
+
+        task.add_done_callback(done_callback)
         worker.main_task = task
         return worker
 
