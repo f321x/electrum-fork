@@ -92,8 +92,13 @@ class EscrowNostrWorker(Logger, EventListener):
                             self.jobs_event.clear()
 
                             if not running_tasks:
-                                # No running tasks and no pending jobs, close connection
-                                break
+                                # No running tasks and no pending jobs.
+                                # Wait a bit for new jobs before closing connection.
+                                try:
+                                    await asyncio.wait_for(self.jobs_event.wait(), timeout=10.0)
+                                    continue
+                                except asyncio.TimeoutError:
+                                    break
 
                             wait_objs = list(running_tasks)
                             job_waiter = asyncio.create_task(self.jobs_event.wait())
