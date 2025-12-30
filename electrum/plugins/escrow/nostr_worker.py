@@ -1,5 +1,7 @@
 import asyncio
-from concurrent.futures import Future
+import json
+import time
+from concurrent.futures import Future, CancelledError
 import secrets
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Optional, Callable, Awaitable, Any, Set, Deque, Coroutine
@@ -8,7 +10,9 @@ import ssl
 
 import electrum_aionostr as aionostr
 from electrum_aionostr.key import PrivateKey
+from electrum_aionostr.event import Event as nEvent
 
+from electrum.keystore import MasterPublicKeyMixin
 from electrum.logging import Logger
 from electrum.util import (
     EventListener, make_aiohttp_proxy_connector, ca_path, event_listener, get_asyncio_loop,
@@ -26,6 +30,7 @@ if TYPE_CHECKING:
 NostrJob = Callable[['aionostr.Manager'], Coroutine[Any, Any, None]]
 
 class EscrowNostrWorker(Logger, EventListener):
+    AGENT_STATUS_EVENT_KIND = 30315
 
     def __init__(self, config: 'SimpleConfig', network: 'Network'):
         Logger.__init__(self)
@@ -44,6 +49,16 @@ class EscrowNostrWorker(Logger, EventListener):
             self.main_loop(),
             get_asyncio_loop(),
         )
+
+        def done_callback(f):
+            try:
+                f.result()
+            except (asyncio.CancelledError, CancelledError):
+                pass
+            except Exception:
+                self.logger.exception("EscrowNostrWorker task failed")
+
+        task.add_done_callback(done_callback)
         self.main_task = task
         self.logger.debug(f"Nostr worker started")
 
@@ -127,8 +142,10 @@ class EscrowNostrWorker(Logger, EventListener):
         This should only be used to store application data on nostr but not as identity.
         Each trade should use a new keypair to prevent trades from getting linked to each other.
         """
-        dummy_address = wallet.dummy_address()
-        privkey = sha256('nostr_escrow:' + dummy_address)
+        keystore = wallet.get_keystore()
+        assert isinstance(keystore, MasterPublicKeyMixin)
+        xpub = keystore.get_master_public_key()
+        privkey = sha256('nostr_escrow:' + xpub)
         return PrivateKey(privkey)
 
     @asynccontextmanager
@@ -162,3 +179,23 @@ class EscrowNostrWorker(Logger, EventListener):
         self.main_task = None
         self.start()
         self.logger.debug(f"Nostr worker restarted")
+
+    def _broadcast_event(self, nostr_event: 'nEvent'):
+        async def _job(manager: 'aionostr.Manager'):
+            try:
+                event_id = await manager.add_event(nostr_event)
+                self.logger.debug(f"nostr event {event_id} broadcast")
+            except asyncio.TimeoutError:
+                self.logger.warn(f"broadcasting event {nostr_event.id} timed out")
+        self._add_job(job=_job)
+
+    def broadcast_agent_status_event(self, *, content: dict, tags: list, signing_key: PrivateKey) -> None:
+        content = json.dumps(content)
+        event = nEvent(
+            content=content,
+            kind=self.AGENT_STATUS_EVENT_KIND,
+            tags=tags,
+            pubkey=signing_key.public_key.hex(),
+        )
+        event.sign(signing_key.hex())
+        self._broadcast_event(event)

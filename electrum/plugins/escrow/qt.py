@@ -23,6 +23,7 @@ from electrum.wizard import WizardViewState
 
 from .escrow import EscrowPlugin, TradePaymentProtocol
 from .wizard import EscrowWizard
+from ...keystore import MasterPublicKeyMixin
 
 if TYPE_CHECKING:
     from electrum.gui.qt.main_window import ElectrumWindow
@@ -345,12 +346,13 @@ class EscrowPluginDialog(WindowModalDialog):
 
         # tools button
         menu = QMenuWithConfig(window.wallet.config)
-        menu.addToggle(
-            text="Escrow Agent Mode",
-            callback=self._toggle_escrow_agent_mode,
-            tooltip="Act as escrow agent for trades",
-            default_state=self._plugin.is_escrow_agent(self._wallet),
-        )
+        if self._wallet and isinstance(self._wallet.get_keystore(), MasterPublicKeyMixin):
+            menu.addToggle(
+                text="Escrow Agent Mode",
+                callback=self._toggle_escrow_agent_mode,
+                tooltip="Act as escrow agent for trades",
+                default_state=self._plugin.is_escrow_agent(self._wallet),
+            )
         tool_button = QToolButton()
         tool_button.setText(_('Tools'))
         tool_button.setIcon(read_QIcon("preferences.png"))
