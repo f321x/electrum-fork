@@ -9,6 +9,7 @@ from types import MappingProxyType
 from electrum_aionostr.event import Event as nEvent
 
 from electrum.util import OldTaskGroup, is_valid_websocket_url
+from electrum import constants
 
 from .escrow_worker import EscrowWorker, EscrowAgentProfile
 from .nostr_worker import EscrowNostrWorker
@@ -27,7 +28,9 @@ class EscrowAgentInfo:
     status_ts: Optional[int] = None
     relay_ts: Optional[int] = None
 
-    def last_seen_minutes(self) -> int:
+    def last_seen_minutes(self) -> Optional[int]:
+        if self.status_ts is None:
+            return None
         now = int(time.time())
         age = now - self.status_ts
         return age // 60
@@ -58,7 +61,12 @@ class EscrowClient(EscrowWorker):
         ]
         event_queue = asyncio.Queue()
         while True:
-            agent_pubkeys = self.storage.get('agents') or []
+            agent_pubkeys = self.storage.get('agents')
+            if not agent_pubkeys:
+                # If no agents are configured, wait until some are added
+                await asyncio.sleep(1)
+                continue
+
             query = {
                 "kinds": event_kinds,
                 "authors": agent_pubkeys,
@@ -73,6 +81,12 @@ class EscrowClient(EscrowWorker):
                 if event.pubkey not in self.agent_infos and event.pubkey not in agent_pubkeys:
                     self.logger.debug(f"got event for unknown pubkey: {event.pubkey=}")
                     continue
+
+                for tag in event.tags:
+                    if len(tag) >= 2 and tag[0] == 'r':
+                        if tag[1] != f"net:{constants.net.NET_NAME}":
+                            self.logger.debug(f"got event for different network: {tag[1]}")
+                            continue
 
                 match event.kind:
                     case self.nostr_worker.AGENT_PROFILE_EVENT_KIND:

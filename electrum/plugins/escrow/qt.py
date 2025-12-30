@@ -2,10 +2,11 @@ from typing import TYPE_CHECKING, Optional
 from functools import partial
 from enum import Enum
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTreeWidget,
     QTextEdit, QSpinBox, QLineEdit, QToolButton, QGridLayout, QComboBox,
+    QInputDialog,
 )
 
 from electrum import constants
@@ -22,7 +23,7 @@ from electrum.gui.qt.wizard.wizard import QEAbstractWizard, WizardComponent
 from electrum.wizard import WizardViewState
 from electrum.keystore import MasterPublicKeyMixin
 
-from .escrow import EscrowPlugin, TradePaymentProtocol
+from .escrow import EscrowPlugin, TradePaymentProtocol, StoragePurpose
 from .wizard import EscrowWizard
 from .agent import EscrowAgentProfile
 
@@ -195,14 +196,176 @@ class WCSelectEscrowAgent(WizardComponent):
     """
     def __init__(self, parent, wizard: 'EscrowWizardDialog'):
         super().__init__(parent, wizard, title=_("Escrow Agent"))
+        self.plugin = wizard.plugin
+        self.wallet = wizard.window.wallet
+
         layout = self.layout()
+        assert isinstance(layout, QVBoxLayout)
         layout.addWidget(QLabel(_("Select trusted Escrow Agent")))
+
+        hbox = QHBoxLayout()
+        self.agent_combo = QComboBox()
+        self.agent_combo.currentIndexChanged.connect(self.on_agent_selected)
+        hbox.addWidget(self.agent_combo, stretch=1)
+
+        add_button = QPushButton(_("Add"))
+        add_button.clicked.connect(self.add_agent)
+        hbox.addWidget(add_button)
+
+        del_button = QPushButton(_("Delete"))
+        del_button.clicked.connect(self.delete_agent)
+        hbox.addWidget(del_button)
+
+        layout.addLayout(hbox)
+
+        self.info_label = QLabel()
+        self.info_label.setWordWrap(True)
+        self.info_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.info_label.setOpenExternalLinks(True)
+        layout.addWidget(self.info_label)
+
+        self.warning_label = WWLabel('')
+        self.warning_label.setStyleSheet("color: red")
+        layout.addWidget(self.warning_label)
+
+        layout.addStretch(1)
+
         self.escrow_agent_pubkey = None  # type: Optional[str]
         self.valid = False
-        # todo: fetch kind 0 profiles and nip 38 status of providers
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_info)
+        self.timer.start(1000)
+
+        self.update_combo()
+
+    def update_combo(self):
+        current_pubkey = self.escrow_agent_pubkey
+        self.agent_combo.blockSignals(True)
+        self.agent_combo.clear()
+
+        agents = self.plugin.client_get_escrow_agents(self.wallet)
+        infos = self.plugin.client_get_escrow_agent_profiles(self.wallet)
+
+        for pubkey in agents:
+            info = infos.get(pubkey)
+            name = pubkey[:12]
+            if info and info.profile_info and info.profile_info.name:
+                name = info.profile_info.name
+            self.agent_combo.addItem(name, pubkey)
+
+        if current_pubkey:
+            index = self.agent_combo.findData(current_pubkey)
+            if index >= 0:
+                self.agent_combo.setCurrentIndex(index)
+            else:
+                self.escrow_agent_pubkey = None
+
+        self.agent_combo.blockSignals(False)
+
+        if self.agent_combo.count() > 0 and not self.escrow_agent_pubkey:
+             self.agent_combo.setCurrentIndex(0)
+             self.on_agent_selected(0)
+        elif self.agent_combo.count() == 0:
+             self.escrow_agent_pubkey = None
+             self.update_info()
+
+    def on_agent_selected(self, index):
+        if index < 0:
+            self.escrow_agent_pubkey = None
+        else:
+            self.escrow_agent_pubkey = self.agent_combo.itemData(index)
+        self.update_info()
+
+    def add_agent(self):
+        text, ok = QInputDialog.getText(self, _("Add Escrow Agent"), _("Enter Escrow Agent Public Key:"))
+        if ok and text:
+            pubkey = text.strip()
+            try:
+                bytes.fromhex(pubkey)
+                if len(pubkey) != 64:
+                    raise ValueError
+            except ValueError:
+                self.wizard.window.show_error(_("Invalid public key"))
+                return
+
+            self.plugin.client_save_escrow_agent(agent_pubkey=pubkey, wallet=self.wallet)
+            self.escrow_agent_pubkey = pubkey
+            self.update_combo()
+
+    def delete_agent(self):
+        pubkey = self.escrow_agent_pubkey
+        if not pubkey:
+            return
+        if self.wizard.window.question(_("Delete this escrow agent?")):
+            self.plugin.client_delete_escrow_agent(agent_pubkey=pubkey, wallet=self.wallet)
+            self.escrow_agent_pubkey = None
+            self.update_combo()
+
+    def update_info(self):
+        agents = self.plugin.client_get_escrow_agents(self.wallet)
+        infos = self.plugin.client_get_escrow_agent_profiles(self.wallet)
+
+        # Update current item text if name changed
+        current_index = self.agent_combo.currentIndex()
+        if current_index >= 0:
+            pubkey = self.agent_combo.itemData(current_index)
+            info = infos.get(pubkey)
+            if info and info.profile_info and info.profile_info.name:
+                current_text = self.agent_combo.itemText(current_index)
+                if current_text != info.profile_info.name:
+                    self.agent_combo.setItemText(current_index, info.profile_info.name)
+
+        if self.agent_combo.count() != len(agents):
+             self.update_combo()
+
+        pubkey = self.escrow_agent_pubkey
+        if not pubkey:
+            self.info_label.setText("")
+            self.warning_label.setText("")
+            self.valid = False
+            return
+
+        info = infos.get(pubkey)
+        if not info or not info.profile_info:
+            self.info_label.setText(_("Fetching agent information..."))
+            self.warning_label.setText(_("No information available for this agent."))
+            self.valid = False
+            return
+
+        profile = info.profile_info
+        lines = []
+        lines.append(f"<b>{profile.name}</b>")
+        if profile.about:
+            lines.append(f"{profile.about}")
+        if profile.website:
+            lines.append(f"<a href='{profile.website}'>{profile.website}</a>")
+
+        lines.append("")
+        lines.append(f"<b>{_('Fee')}:</b> {profile.service_fee_ppm/10000}%")
+
+        if info.inbound_liquidity is not None:
+            lines.append(f"<b>{_('Inbound Liquidity')}:</b> {self.wizard.window.format_amount_and_units(info.inbound_liquidity)}")
+        if info.outbound_liquidity is not None:
+            lines.append(f"<b>{_('Outbound Liquidity')}:</b> {self.wizard.window.format_amount_and_units(info.outbound_liquidity)}")
+
+        last_seen = info.last_seen_minutes()
+        if last_seen is not None:
+             lines.append(f"<b>{_('Last Seen')}:</b> {last_seen} {_('minutes ago')}")
+
+        if profile.languages:
+            lines.append(f"<b>{_('Languages')}:</b> {', '.join(profile.languages)}")
+
+        if profile.gpg_fingerprint:
+            lines.append(f"<b>{_('GPG')}:</b> {profile.gpg_fingerprint}")
+
+        self.info_label.setText("<br>".join(lines))
+        self.warning_label.setText("")
+        self.valid = True
 
     def validate(self):
-        self.valid = self.escrow_agent_pubkey is not None
+        # Validation state is updated in update_info
+        pass
 
     def apply(self):
         self.wizard_data['escrow_agent_pubkey'] = self.escrow_agent_pubkey
@@ -259,7 +422,7 @@ class EscrowWizardDialog(EscrowWizard, QEAbstractWizard):
         start_viewstate = WizardViewState(start_view, {}, {})
 
         QEAbstractWizard.__init__(self, window.config, window.app, start_viewstate=start_viewstate)
-        self.window = window
+        self.window: 'ElectrumWindow' = window
         self.window_title = _("Escrow Wizard")
         self._set_logo()
 
