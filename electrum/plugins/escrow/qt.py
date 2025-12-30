@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (
     QTextEdit, QSpinBox, QLineEdit, QToolButton, QGridLayout, QComboBox,
 )
 
+from electrum import constants
 from electrum.i18n import _
 from electrum.plugin import hook
 from electrum.gui.qt.util import (
@@ -20,7 +21,7 @@ from electrum.gui.qt.amountedit import BTCAmountEdit, AmountEdit
 from electrum.gui.qt.wizard.wizard import QEAbstractWizard, WizardComponent
 from electrum.wizard import WizardViewState
 
-from .escrow import EscrowPlugin
+from .escrow import EscrowPlugin, TradePaymentProtocol
 from .wizard import EscrowWizard
 
 if TYPE_CHECKING:
@@ -30,6 +31,11 @@ if TYPE_CHECKING:
 class EscrowType(Enum):
     MAKE = 1
     TAKE = 2
+
+
+class PaymentDirection(Enum):
+    SENDING = 1
+    RECEIVING = 2
 
 
 class WCCreateTrade(WizardComponent):
@@ -67,16 +73,16 @@ class WCCreateTrade(WizardComponent):
         self.direction_cb.addItems([_("I receive"), _("I send")])
         grid.addWidget(self.direction_cb, 2, 0)
 
-        self.receive_amount_e = BTCAmountEdit(self.wizard.window.get_decimal_point)
-        self.receive_amount_e.textChanged.connect(self.validate)
-        grid.addWidget(self.receive_amount_e, 2, 1)
+        self.amount_e = BTCAmountEdit(self.wizard.window.get_decimal_point)
+        self.amount_e.textChanged.connect(self.validate)
+        grid.addWidget(self.amount_e, 2, 1)
 
         fiat_currency = self.wizard.window.fx.get_currency if self.wizard.window.fx else None
         self.fiat_receive_e = AmountEdit(fiat_currency)
         if not self.wizard.window.fx or not self.wizard.window.fx.is_enabled():
             self.fiat_receive_e.setVisible(False)
         else:
-            self.wizard.window.connect_fields(self.receive_amount_e, self.fiat_receive_e)
+            self.wizard.window.connect_fields(self.amount_e, self.fiat_receive_e)
         grid.addWidget(self.fiat_receive_e, 2, 2)
 
         # Bond Amount
@@ -95,6 +101,10 @@ class WCCreateTrade(WizardComponent):
         grid.setColumnStretch(3, 1)
         grid.setHorizontalSpacing(15)
 
+        self.warning_label = WWLabel('')
+        self.warning_label.setStyleSheet("color: red")
+        layout.addWidget(self.warning_label)
+
         layout.addStretch(1)
 
     def _limit_contract_length(self):
@@ -105,20 +115,75 @@ class WCCreateTrade(WizardComponent):
             cursor.movePosition(cursor.MoveOperation.End)
             self.contract_edit.setTextCursor(cursor)
 
+    @property
+    def trade_payment_protocol(self) -> TradePaymentProtocol:
+        # todo: with onchain support this could be decided by the user or depending on the trade amount
+        return TradePaymentProtocol.BITCOIN_LIGHTNING
+
+    @property
+    def payment_direction(self) -> PaymentDirection:
+        if self.direction_cb.currentIndex() == 0:
+            return PaymentDirection.RECEIVING
+        return PaymentDirection.SENDING
+
+    @property
+    def total_send_amount(self) -> int:
+        total_send_amount_sat = 0
+        trade_amount = self.amount_e.get_amount() or 0
+        if self.payment_direction == PaymentDirection.SENDING:
+            total_send_amount_sat += trade_amount
+        bond_percentage = self.bond_percentage_sb.value()
+        bond_amount_sat = (bond_percentage * trade_amount) // 100
+        total_send_amount_sat += bond_amount_sat
+        return total_send_amount_sat
+
     def validate(self):
         title = self.title_edit.text().strip()
         contract = self.contract_edit.toPlainText().strip()
-        amount = self.receive_amount_e.get_amount()
+        amount = self.amount_e.get_amount()
+        if self.trade_payment_protocol == TradePaymentProtocol.BITCOIN_LIGHTNING:
+            liquidity_valid = self._get_lightning_liquidity_error() is None
+        else:
+            liquidity_valid = True  # todo: _check_onchain_balance
 
-        is_valid = bool(title) and bool(contract) and (amount is not None and amount > 0)
+        is_valid = bool(title) and bool(contract) and (amount is not None and amount > 0) and liquidity_valid
         self.valid = is_valid
+        self._maybe_show_warning()
+
+    def _get_lightning_liquidity_error(self) -> Optional[str]:
+        assert self.trade_payment_protocol == TradePaymentProtocol.BITCOIN_LIGHTNING
+        if not self.wizard.window.wallet.has_lightning():
+            return _("Your wallet doesn't support the Lightning Network. Please use a wallet with Lightning Network support.")
+        can_send = self.wizard.window.wallet.lnworker.num_sats_can_send() or 0
+        if can_send < self.total_send_amount:
+            return _("You cannot send this amount with your Lightning channels. Please open a larger Lightning channel or "
+                      "do a submarine swap in the 'Channels' tab to increase your outgoing liquidity. "
+                      "You can send: {}").format(self.wizard.window.format_amount_and_units(can_send))
+        if self.payment_direction == PaymentDirection.RECEIVING:
+            can_receive = self.wizard.window.wallet.lnworker.num_sats_can_receive() or 0
+            if can_receive < (self.amount_e.get_amount() or 0):
+                return _("You cannot receive this amount with your Lightning channels. Please do a "
+                      "submarine swap in the 'Channels' tab to increase your incoming liquidity. "
+                      "You can receive: {}").format(self.wizard.window.format_amount_and_units(can_receive))
+        return None
+
+    def _maybe_show_warning(self):
+        self.warning_label.clear()
+
+        # check lightning liquidity
+        if self.trade_payment_protocol == TradePaymentProtocol.BITCOIN_LIGHTNING:
+            error = self._get_lightning_liquidity_error()
+            if error:
+                self.warning_label.setText(error)
 
     def apply(self):
         self.wizard_data['title'] = self.title_edit.text().strip()
         self.wizard_data['contract'] = self.contract_edit.toPlainText().strip()
-        self.wizard_data['amount_sat'] = self.receive_amount_e.get_amount()
+        self.wizard_data['amount_sat'] = self.amount_e.get_amount()
         self.wizard_data['bond_percent'] = self.bond_percentage_sb.value()
-        self.wizard_data['is_receiving'] = self.direction_cb.currentIndex() == 0
+        self.wizard_data['payment_direction'] = self.payment_direction
+        self.wizard_data['payment_protocol'] = self.trade_payment_protocol
+        self.wizard_data['payment_network'] = constants.net.NET_NAME
 
 
 class WCSelectEscrowAgent(WizardComponent):
