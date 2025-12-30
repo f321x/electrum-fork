@@ -1,17 +1,19 @@
-from typing import Optional, TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING, Dict
 from dataclasses import dataclass
 from enum import Enum
 
 from electrum.i18n import _
 from electrum.plugin import BasePlugin, hook
-from electrum import constants
 
 from .nostr_worker import EscrowNostrWorker
+from .agent import EscrowAgent
+from .client import EscrowClient
 
 if TYPE_CHECKING:
     from electrum.simple_config import SimpleConfig
     from electrum.wallet import Abstract_Wallet
     from electrum.daemon import Daemon
+    from .escrow_worker import EscrowWorker
 
 
 class TradeState(Enum):
@@ -55,15 +57,6 @@ class EscrowTrade:
     payment_network: str  #  AbstractNet.NET_NAME
 
 
-@dataclass(frozen=True)
-class EscrowAgentProfile:
-    """
-    Information broadcast by the escrow agent, visible to its customers.
-    Using Nostr kind 0 (NIP-01) profile event.
-    """
-    name: str
-
-
 class EscrowPlugin(BasePlugin):
     MAX_CONTRACT_LEN_CHARS = 2000
     ICON_FILE_NAME = "escrow-icon.png"
@@ -74,7 +67,7 @@ class EscrowPlugin(BasePlugin):
 
     def __init__(self, parent, config: 'SimpleConfig', name):
         BasePlugin.__init__(self, parent, config, name)
-        self.wallets = set()  # type: set[Abstract_Wallet]
+        self.wallets = {}  # type: Dict[Abstract_Wallet, EscrowWorker]
         self.config = config
         self.nostr_worker = None  # type: Optional[EscrowNostrWorker]
         self.logger.debug(f"Escrow plugin created")
@@ -85,26 +78,42 @@ class EscrowPlugin(BasePlugin):
             self.logger.warning(f"Escrow Plugin unavailable: no network")
         return network_available
 
-    def is_escrow_agent(self, wallet: Abstract_Wallet) -> Optional[bool]:
+    def is_escrow_agent(self, wallet: 'Abstract_Wallet') -> Optional[bool]:
         """Is stored in wallet db as the user might is agent in one wallet and user in another wallet"""
         storage = self.get_storage(wallet)
         return storage.get('is_escrow_agent', False)
 
     def set_escrow_agent_mode(self, *, enabled: bool, wallet: 'Abstract_Wallet'):
         storage = self.get_storage(wallet)
+        self.wallets[wallet].stop()
         storage['is_escrow_agent'] = enabled
+        if enabled:
+            self.wallets[wallet] = EscrowAgent.create(wallet, self.nostr_worker)
+        else:
+            self.wallets[wallet] = EscrowClient.create(wallet, self.nostr_worker)
         self.logger.debug(f"escrow agent mode {enabled=}")
 
     @hook
     def daemon_wallet_loaded(self, daemon: 'Daemon', wallet: 'Abstract_Wallet'):
-        self.wallets.add(wallet)
         if not self.nostr_worker:
+            # create shared nostr worker for all wallets
             self.nostr_worker = EscrowNostrWorker(self.config, daemon.network)
             self.nostr_worker.start()
 
+        if self.is_escrow_agent(wallet):
+            worker = EscrowAgent.create(wallet, self.nostr_worker)
+        else:
+            worker = EscrowClient.create(wallet, self.nostr_worker)
+        self.wallets[wallet] = worker
+
     @hook
     def close_wallet(self, wallet: 'Abstract_Wallet'):
-        self.wallets.discard(wallet)
+        if wallet in self.wallets:
+            self.wallets[wallet].stop()
+            del self.wallets[wallet]
+
         if not self.wallets:
-            self.nostr_worker.stop()
-            self.nostr_worker = None
+            # stop nostr worker if there is no open wallet left
+            if self.nostr_worker:
+                self.nostr_worker.stop()
+                self.nostr_worker = None
