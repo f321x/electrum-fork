@@ -5,7 +5,7 @@ from enum import Enum
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTreeWidget,
-    QTextEdit, QSpinBox, QLineEdit, QToolButton, QGridLayout,
+    QTextEdit, QSpinBox, QLineEdit, QToolButton, QGridLayout, QComboBox,
 )
 
 from electrum.i18n import _
@@ -24,7 +24,6 @@ from .escrow import EscrowPlugin
 from .wizard import EscrowWizard
 
 if TYPE_CHECKING:
-    from electrum.wallet import Abstract_Wallet
     from electrum.gui.qt.main_window import ElectrumWindow
 
 
@@ -64,7 +63,10 @@ class WCCreateTrade(WizardComponent):
         grid.addWidget(self.contract_edit, 1, 1, 1, 3)
 
         # Trade Amount
-        grid.addWidget(QLabel(_("Trade Amount:")), 2, 0)
+        self.direction_cb = QComboBox()
+        self.direction_cb.addItems([_("I receive"), _("I send")])
+        grid.addWidget(self.direction_cb, 2, 0)
+
         self.receive_amount_e = BTCAmountEdit(self.wizard.window.get_decimal_point)
         self.receive_amount_e.textChanged.connect(self.validate)
         grid.addWidget(self.receive_amount_e, 2, 1)
@@ -116,6 +118,7 @@ class WCCreateTrade(WizardComponent):
         self.wizard_data['contract'] = self.contract_edit.toPlainText().strip()
         self.wizard_data['amount_sat'] = self.receive_amount_e.get_amount()
         self.wizard_data['bond_percent'] = self.bond_percentage_sb.value()
+        self.wizard_data['is_receiving'] = self.direction_cb.currentIndex() == 0
 
 
 class WCSelectEscrowAgent(WizardComponent):
