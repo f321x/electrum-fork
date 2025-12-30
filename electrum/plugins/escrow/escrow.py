@@ -64,6 +64,7 @@ class EscrowPlugin(BasePlugin):
     # todo: check for plugin updates (nostr)
     # todo: telegram bot notification
     # todo: onchain support (with taproot)
+    # todo: verifiable 'first seen' with OTS
 
     def __init__(self, parent, config: 'SimpleConfig', name):
         BasePlugin.__init__(self, parent, config, name)
