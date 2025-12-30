@@ -148,6 +148,12 @@ class EscrowPlugin(BasePlugin):
             storage[key] = {}
         return storage[key]
 
+    def client_get_escrow_agents(self, wallet: 'Abstract_Wallet') -> list[str]:
+        client_storage = self._get_storage(wallet=wallet, purpose=StoragePurpose.CLIENT_DATA)
+        if 'agents' not in client_storage:
+            client_storage['agents'] = []
+        return client_storage['agents']
+
     def client_save_escrow_agent(self, *, agent_pubkey: str, wallet: 'Abstract_Wallet'):
         client_storage = self._get_storage(wallet=wallet, purpose=StoragePurpose.CLIENT_DATA)
         agents = set(client_storage.get('agents', []))
@@ -155,8 +161,8 @@ class EscrowPlugin(BasePlugin):
         client_storage['agents'] = list(agents)
 
         worker = self.wallets.get(wallet)
-        if isinstance(worker, EscrowClient):
-            worker.reload_agents()
+        assert isinstance(worker, EscrowClient)
+        worker.reload_agents()
 
     def client_delete_escrow_agent(self, *, agent_pubkey: str, wallet: 'Abstract_Wallet'):
         client_storage = self._get_storage(wallet=wallet, purpose=StoragePurpose.CLIENT_DATA)

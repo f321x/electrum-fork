@@ -92,6 +92,7 @@ class EscrowAgent(EscrowWorker):
         Publishes a NIP-38 status event every STATUS_EVENT_INTERVAL_SEC so clients can see the
         agent is available and useful dynamic information of the agent (like liquidity).
         """
+        await asyncio.sleep(30)  # wait for channel reestablish on startup, otherwise we announce 0 liquidity
         tags = [
             ['d', f'electrum-escrow-plugin-{str(self.NOSTR_PROTOCOL_VERSION)}'],
             ['r', 'net:' + constants.net.NET_NAME],

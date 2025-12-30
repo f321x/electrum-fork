@@ -248,7 +248,7 @@ class EscrowNostrWorker(Logger, EventListener):
         )
         if expiration_ts:
             event.add_expiration_tag(expiration_ts=expiration_ts)
-        event.sign(signing_key.hex())
+        event = event.sign(signing_key.hex())
         return event
 
     def broadcast_agent_status_event(self, *, content: dict, tags: list, signing_key: PrivateKey) -> None:
