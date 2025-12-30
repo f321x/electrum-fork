@@ -4,7 +4,7 @@ import time
 from concurrent.futures import Future, CancelledError
 import secrets
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Optional, Callable, Awaitable, Any, Set, Deque, Coroutine
+from typing import TYPE_CHECKING, Optional, Callable, Any, Set, Deque, Coroutine, Sequence
 from collections import deque
 import ssl
 
@@ -32,6 +32,7 @@ NostrJob = Callable[['aionostr.Manager'], Coroutine[Any, Any, None]]
 class EscrowNostrWorker(Logger, EventListener):
     AGENT_STATUS_EVENT_KIND = 30315
     AGENT_PROFILE_EVENT_KIND = 0  # regular nostr user profile
+    AGENT_RELAY_LIST_METADATA_KIND = 10002  # NIP-65 relay list
 
     def __init__(self, config: 'SimpleConfig', network: 'Network'):
         Logger.__init__(self)
@@ -199,12 +200,13 @@ class EscrowNostrWorker(Logger, EventListener):
     def _prepare_event(
         *,
         kind: int,
-        content: dict,
+        content: dict | str,
         tags: list,
         signing_key: PrivateKey,
         expiration_ts: Optional[int] = None,
     ) -> nEvent:
-        content = json.dumps(content)
+        if isinstance(content, dict):
+            content = json.dumps(content)
         event = nEvent(
             content=content,
             kind=kind,
@@ -230,6 +232,17 @@ class EscrowNostrWorker(Logger, EventListener):
         event = self._prepare_event(
             kind=self.AGENT_PROFILE_EVENT_KIND,
             content=content,
+            tags=tags,
+            signing_key=signing_key,
+            expiration_ts=int(time.time()) + 7_700_000, # ~ 3m
+        )
+        self._broadcast_event(event)
+
+    def broadcast_agent_relay_event(self, *, relays: Sequence[str], signing_key: PrivateKey) -> None:
+        tags = [['r', relay_url] for relay_url in relays]
+        event = self._prepare_event(
+            kind=self.AGENT_RELAY_LIST_METADATA_KIND,
+            content='',
             tags=tags,
             signing_key=signing_key,
             expiration_ts=int(time.time()) + 7_700_000, # ~ 3m
