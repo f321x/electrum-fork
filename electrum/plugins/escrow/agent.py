@@ -25,46 +25,72 @@ class EscrowAgentProfile:
     service_fee_ppm: int  # fees of traded amount (excluding bonds) in ppm
     gpg_fingerprint: Optional[str]
     picture: Optional[str]  # url to profile picture
+    website: Optional[str]
 
 
 class EscrowAgent(EscrowWorker):
     STATUS_EVENT_INTERVAL_SEC = 1800  # 30 min
-    AGENT_STATUS_EVENT_VERSION = 1
+    PROFILE_EVENT_INTERVAL_SEC = 1_209_600  # 2 weeks
+    AGENT_NOSTR_PROTOCOL_VERSION = 1
 
-    def __init__(self, wallet: 'Abstract_Wallet', nostr_worker: 'EscrowNostrWorker'):
-        EscrowWorker.__init__(self, wallet, nostr_worker)
+    def __init__(self, wallet: 'Abstract_Wallet', nostr_worker: 'EscrowNostrWorker', storage: dict):
+        EscrowWorker.__init__(self, wallet, nostr_worker, storage)
         # we derive a persistent nostr identity from the wallet
         self.nostr_identity_private_key = nostr_worker.get_nostr_privkey_for_wallet(wallet)
-        self.profile_changed = asyncio.Event()
 
     async def main_loop(self):
         self.logger.debug(f"escrow agent started: {self.wallet.basename()}")
-        tasks = [
-            self.broadcast_profile_event()
-        ]
+        tasks = (
+            self._broadcast_status_event(),
+            self._maybe_rebroadcast_profile_event(),
+        )
         async with OldTaskGroup() as g:
             for task in tasks:
                 await g.spawn(task)
                 await asyncio.sleep(3)  # prevent getting rate limited by relays
-            # publish nostr events
-            # fetch and handle requests
-            # show user notifications
-            # progress trade states
-            await asyncio.sleep(1)
 
-    async def broadcast_profile_event(self):
-        # get profile data from db/gui
-        # broadcast once every now and then
-        # while True:
-        pass
+    def broadcast_profile_event(self, profile_data: EscrowAgentProfile):
+        content = {
+            "name": profile_data.name,
+            "about": profile_data.about,
+            "languages": profile_data.languages,
+            "service_fee_ppm": profile_data.service_fee_ppm,
+        }
+        if profile_data.gpg_fingerprint:
+            content["gpg_fingerprint"] = profile_data.gpg_fingerprint
+        if profile_data.picture:
+            content["picture"] = profile_data.picture
+        if profile_data.website:
+            content["website"] = profile_data.website
+        tags = [
+            ['d', f'electrum-escrow-plugin-{str(self.AGENT_NOSTR_PROTOCOL_VERSION)}'],
+            ['r', 'net:' + constants.net.NET_NAME],
+        ]
+        self.nostr_worker.broadcast_agent_profile_event(
+            content=content,
+            tags=tags,
+            signing_key=self.nostr_identity_private_key,
+        )
 
-    async def broadcast_status_event(self):
+    async def _maybe_rebroadcast_profile_event(self):
+        """
+        Rebroadcast the profile on startup and every PROFILE_EVENT_INTERVAL_SEC to ensure
+        it is always widely available on relays.
+        """
+        while True:
+            profile_data = self.storage.get('profile')
+            if profile_data:
+                profile = EscrowAgentProfile(**profile_data)
+                self.broadcast_profile_event(profile)
+            await asyncio.sleep(self.PROFILE_EVENT_INTERVAL_SEC)
+
+    async def _broadcast_status_event(self):
         """
         Publishes a NIP-38 status event every STATUS_EVENT_INTERVAL_SEC so clients can see the
         agent is available and useful dynamic information of the agent (like liquidity).
         """
         tags = [
-            ['d', f'electrum-escrow-plugin-{str(self.AGENT_STATUS_EVENT_VERSION)}'],
+            ['d', f'electrum-escrow-plugin-{str(self.AGENT_NOSTR_PROTOCOL_VERSION)}'],
             ['r', 'net:' + constants.net.NET_NAME],
         ]
         while True:

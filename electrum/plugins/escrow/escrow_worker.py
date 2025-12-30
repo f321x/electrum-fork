@@ -12,10 +12,11 @@ if TYPE_CHECKING:
 
 
 class EscrowWorker(ABC, Logger):
-    def __init__(self, wallet: 'Abstract_Wallet', nostr_worker: 'EscrowNostrWorker'):
+    def __init__(self, wallet: 'Abstract_Wallet', nostr_worker: 'EscrowNostrWorker', storage: dict):
         Logger.__init__(self)
         self.wallet = wallet
         self.nostr_worker = nostr_worker
+        self.storage = storage
         self.main_task = None  # type: Optional[Future]
 
     @abstractmethod
@@ -23,8 +24,8 @@ class EscrowWorker(ABC, Logger):
         pass
 
     @classmethod
-    def create(cls, wallet: 'Abstract_Wallet', nostr_worker: 'EscrowNostrWorker') -> 'EscrowWorker':
-        worker = cls(wallet, nostr_worker)
+    def create(cls, wallet: 'Abstract_Wallet', nostr_worker: 'EscrowNostrWorker', storage: dict) -> 'EscrowWorker':
+        worker = cls(wallet, nostr_worker, storage)
         task = asyncio.run_coroutine_threadsafe(
             worker.main_loop(),
             get_asyncio_loop(),
