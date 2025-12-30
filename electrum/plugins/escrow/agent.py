@@ -1,38 +1,21 @@
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 import asyncio
-from dataclasses import dataclass
 
 from electrum.util import OldTaskGroup
 from electrum import constants
 
-from .escrow_worker import EscrowWorker
+from .escrow_worker import EscrowWorker, EscrowAgentProfile
 
 if TYPE_CHECKING:
     from .nostr_worker import EscrowNostrWorker
     from electrum.wallet import Abstract_Wallet
 
 
-@dataclass(frozen=True)
-class EscrowAgentProfile:
-    """
-    Information broadcast by the escrow agent, visible to its customers.
-    Using Nostr kind 0 (NIP-01) profile event.
-    """
-    name: str
-    about: str  # short description
-    languages: list[str]
-    service_fee_ppm: int  # fees of traded amount (excluding bonds) in ppm
-    gpg_fingerprint: Optional[str]
-    picture: Optional[str]  # url to profile picture
-    website: Optional[str]
-
-
 class EscrowAgent(EscrowWorker):
     STATUS_EVENT_INTERVAL_SEC = 1800  # 30 min
     PROFILE_EVENT_INTERVAL_SEC = 1_209_600  # 2 weeks
     RELAY_EVENT_INTERVAL_SEC = 1_209_800  # 2 weeks
-    AGENT_NOSTR_PROTOCOL_VERSION = 1
 
     def __init__(self, wallet: 'Abstract_Wallet', nostr_worker: 'EscrowNostrWorker', storage: dict):
         EscrowWorker.__init__(self, wallet, nostr_worker, storage)
@@ -64,7 +47,7 @@ class EscrowAgent(EscrowWorker):
         if profile_data.website:
             content["website"] = profile_data.website
         tags = [
-            ['d', f'electrum-escrow-plugin-{str(self.AGENT_NOSTR_PROTOCOL_VERSION)}'],
+            ['d', f'electrum-escrow-plugin-{str(self.NOSTR_PROTOCOL_VERSION)}'],
             ['r', 'net:' + constants.net.NET_NAME],
         ]
         self.nostr_worker.broadcast_agent_profile_event(
@@ -110,7 +93,7 @@ class EscrowAgent(EscrowWorker):
         agent is available and useful dynamic information of the agent (like liquidity).
         """
         tags = [
-            ['d', f'electrum-escrow-plugin-{str(self.AGENT_NOSTR_PROTOCOL_VERSION)}'],
+            ['d', f'electrum-escrow-plugin-{str(self.NOSTR_PROTOCOL_VERSION)}'],
             ['r', 'net:' + constants.net.NET_NAME],
         ]
         while True:

@@ -557,7 +557,7 @@ class EscrowPluginDialog(WindowModalDialog):
                 critical=True,
             )
         is_agent = self._plugin.is_escrow_agent(self._wallet)
-        if is_agent and not self._plugin.get_escrow_agent_profile(self._wallet):
+        if is_agent and not self._plugin.get_our_escrow_agent_profile(self._wallet):
             self.show_notification(
                 msg=_("Configure your Escrow Agent profile to become visible to other users."),
                 critical=False,
@@ -610,11 +610,11 @@ class EscrowPluginDialog(WindowModalDialog):
             self._agent_pubkey_label.setVisible(is_agent)
 
     def _configure_profile(self):
-        profile = self._plugin.get_escrow_agent_profile(self._wallet)
+        profile = self._plugin.get_our_escrow_agent_profile(self._wallet)
         d = EscrowAgentProfileDialog(self.window, self._plugin, profile)
         if d.exec():
             new_profile = d.get_profile()
-            self._plugin.save_escrow_agent_profile(new_profile, self._wallet)
+            self._plugin.save_our_escrow_agent_profile(new_profile, self._wallet)
             self._trigger_update()
 
     def _create_trade(self):
