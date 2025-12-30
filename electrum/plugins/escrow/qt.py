@@ -436,6 +436,7 @@ class EscrowPluginDialog(WindowModalDialog):
         self._accept_trade_button = None
         self._notification_label = None  # type: Optional[QLabel]
         self._configure_profile_action = None
+        self._agent_pubkey_label = None  # type: Optional[WWLabel]
 
     @classmethod
     def run(cls, window: 'ElectrumWindow', plugin: 'Plugin'):
@@ -448,6 +449,7 @@ class EscrowPluginDialog(WindowModalDialog):
         d._main_layout.addLayout(d._content_vbox)
         d.setLayout(d._main_layout)
         d._maybe_show_warning()
+        d._trigger_update()
         try:
             return bool(d.exec())
         finally:
@@ -524,7 +526,14 @@ class EscrowPluginDialog(WindowModalDialog):
         self._notification_label = WWLabel()
         self._notification_label.setVisible(False)
 
+        agent_pubkey_hex = self._plugin.nostr_worker.get_nostr_privkey_for_wallet(self._wallet).public_key.hex()
+        self._agent_pubkey_label = WWLabel()
+        self._agent_pubkey_label.setText(_("Your public key: {}").format(agent_pubkey_hex))
+        self._agent_pubkey_label.setToolTip(_("Share this public key with users so they use you as escrow agent"))
+        self._agent_pubkey_label.setVisible(False)
+
         content_vbox.addWidget(self._notification_label)
+        content_vbox.addWidget(self._agent_pubkey_label)
         content_vbox.addWidget(trades_list)
         return content_vbox
 
@@ -578,6 +587,7 @@ class EscrowPluginDialog(WindowModalDialog):
         self._plugin = None
         self._wallet = None
         self._notification_label = None
+        self._agent_pubkey_label = None
 
     def _toggle_escrow_agent_mode(self):
         escrow_agent_enabled = self._plugin.is_escrow_agent(self._wallet)
@@ -596,6 +606,8 @@ class EscrowPluginDialog(WindowModalDialog):
             self._accept_trade_button.setVisible(not is_agent)
         if self._configure_profile_action:
             self._configure_profile_action.setVisible(is_agent)
+        if self._agent_pubkey_label:
+            self._agent_pubkey_label.setVisible(is_agent)
 
     def _configure_profile(self):
         profile = self._plugin.get_escrow_agent_profile(self._wallet)
