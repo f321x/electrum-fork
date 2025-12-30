@@ -39,7 +39,7 @@ class EscrowAgent(EscrowWorker):
         async with OldTaskGroup() as g:
             for task in tasks:
                 await g.spawn(task)
-                await asyncio.sleep(10)  # prevent getting rate limited
+                await asyncio.sleep(3)  # prevent getting rate limited by relays
             # publish nostr events
             # fetch and handle requests
             # show user notifications
