@@ -347,7 +347,7 @@ class EscrowAgentProfileDialog(WindowModalDialog):
             help_text=_("Your GPG key fingerprint for identity verification.")
         ), 4, 0)
         self.gpg_e = QLineEdit()
-        self.gpg_e.setPlaceholderText(_("Enter your GPG fingerprint"))
+        self.gpg_e.setPlaceholderText(_("[Optional] Enter your GPG fingerprint"))
         self.gpg_e.setMaxLength(100)
         self.gpg_e.textChanged.connect(self.validate)
         grid.addWidget(self.gpg_e, 4, 1)
@@ -358,10 +358,21 @@ class EscrowAgentProfileDialog(WindowModalDialog):
             help_text=_("A URL to your profile picture.")
         ), 5, 0)
         self.picture_e = QLineEdit()
-        self.picture_e.setPlaceholderText(_("https://example.com/avatar.png"))
+        self.picture_e.setPlaceholderText("[Optional] https://example.com/avatar.png")
         self.picture_e.setMaxLength(200)
         self.picture_e.textChanged.connect(self.validate)
         grid.addWidget(self.picture_e, 5, 1)
+
+        # website
+        grid.addWidget(HelpLabel(
+            text=_("Website URL:"),
+            help_text=_("A URL to your website.")
+        ), 5, 0)
+        self.website_e = QLineEdit()
+        self.website_e.setPlaceholderText("[Optional] https://example.com/")
+        self.website_e.setMaxLength(200)
+        self.website_e.textChanged.connect(self.validate)
+        grid.addWidget(self.website_e, 6, 1)
 
         if profile:
             self.name_e.setText(profile.name)
@@ -370,6 +381,7 @@ class EscrowAgentProfileDialog(WindowModalDialog):
             self.fee_sb.setValue(profile.service_fee_ppm)
             self.gpg_e.setText(profile.gpg_fingerprint or "")
             self.picture_e.setText(profile.picture or "")
+            self.website_e.setText(profile.website or "")
 
         vbox.addLayout(Buttons(CancelButton(self), self.ok_button))
         self.validate()
@@ -389,22 +401,26 @@ class EscrowAgentProfileDialog(WindowModalDialog):
         # Basic validation
         valid = bool(name) and bool(about)
 
-        # Optional: Validate URL format if provided
         picture_url = self.picture_e.text().strip()
         if picture_url and not picture_url.startswith("https://"):
              valid = False
+
+        website_url = self.website_e.text().strip()
+        if website_url and not website_url.startswith("https://"):
+            valid = False
 
         self.ok_button.setEnabled(valid)
 
     def get_profile(self) -> 'EscrowAgentProfile':
         languages = [x.strip() for x in self.languages_e.text().split(',') if x.strip()]
         return EscrowAgentProfile(
-            name=self.name_e.text(),
-            about=self.about_e.toPlainText(),
+            name=self.name_e.text().strip(),
+            about=self.about_e.toPlainText().strip(),
             languages=languages,
             service_fee_ppm=self.fee_sb.value(),
-            gpg_fingerprint=self.gpg_e.text() or None,
-            picture=self.picture_e.text() or None
+            gpg_fingerprint=self.gpg_e.text().strip() or None,
+            picture=self.picture_e.text().strip() or None,
+            website=self.website_e.text().strip() or None,
         )
 
 

@@ -31,6 +31,7 @@ NostrJob = Callable[['aionostr.Manager'], Coroutine[Any, Any, None]]
 
 class EscrowNostrWorker(Logger, EventListener):
     AGENT_STATUS_EVENT_KIND = 30315
+    AGENT_PROFILE_EVENT_KIND = 0  # regular nostr user profile
 
     def __init__(self, config: 'SimpleConfig', network: 'Network'):
         Logger.__init__(self)
@@ -194,14 +195,43 @@ class EscrowNostrWorker(Logger, EventListener):
                 self.logger.warn(f"broadcasting event {nostr_event.id} timed out")
         self._add_job(job=_job)
 
-    def broadcast_agent_status_event(self, *, content: dict, tags: list, signing_key: PrivateKey) -> None:
+    @staticmethod
+    def _prepare_event(
+        *,
+        kind: int,
+        content: dict,
+        tags: list,
+        signing_key: PrivateKey,
+        expiration_ts: Optional[int] = None,
+    ) -> nEvent:
         content = json.dumps(content)
         event = nEvent(
             content=content,
-            kind=self.AGENT_STATUS_EVENT_KIND,
+            kind=kind,
             tags=tags,
             pubkey=signing_key.public_key.hex(),
         )
-        event.add_expiration_tag(expiration_ts=int(time.time()) + 7_700_000)  # ~3 months
+        if expiration_ts:
+            event.add_expiration_tag(expiration_ts=expiration_ts)
         event.sign(signing_key.hex())
+        return event
+
+    def broadcast_agent_status_event(self, *, content: dict, tags: list, signing_key: PrivateKey) -> None:
+        event = self._prepare_event(
+            kind=self.AGENT_STATUS_EVENT_KIND,
+            content=content,
+            tags=tags,
+            signing_key=signing_key,
+            expiration_ts=int(time.time()) + 2_600_000, # ~ 1m
+        )
+        self._broadcast_event(event)
+
+    def broadcast_agent_profile_event(self, *, content: dict, tags: list, signing_key: PrivateKey) -> None:
+        event = self._prepare_event(
+            kind=self.AGENT_PROFILE_EVENT_KIND,
+            content=content,
+            tags=tags,
+            signing_key=signing_key,
+            expiration_ts=int(time.time()) + 7_700_000, # ~ 3m
+        )
         self._broadcast_event(event)

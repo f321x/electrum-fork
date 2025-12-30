@@ -10,6 +10,7 @@ from electrum.util import run_sync_function_on_asyncio_thread, get_asyncio_loop
 from .nostr_worker import EscrowNostrWorker
 from .agent import EscrowAgent, EscrowAgentProfile
 from .client import EscrowClient
+from ...keystore import purpose48_derivation
 
 if TYPE_CHECKING:
     from electrum.simple_config import SimpleConfig
@@ -89,9 +90,17 @@ class EscrowPlugin(BasePlugin):
             self.nostr_worker.start()
 
         if self.is_escrow_agent(wallet):
-            worker = EscrowAgent.create(wallet, self.nostr_worker)
+            worker = EscrowAgent.create(
+                wallet,
+                self.nostr_worker,
+                self._get_storage(wallet=wallet, purpose='agent_data'),
+            )
         else:
-            worker = EscrowClient.create(wallet, self.nostr_worker)
+            worker = EscrowClient.create(
+                wallet,
+                self.nostr_worker,
+                self._get_storage(wallet=wallet, purpose='client_data'),
+            )
         self.wallets[wallet] = worker
 
     @hook
@@ -116,29 +125,34 @@ class EscrowPlugin(BasePlugin):
         self.wallets[wallet].stop()
         storage['is_escrow_agent'] = enabled
         if enabled:
-            self.wallets[wallet] = EscrowAgent.create(wallet, self.nostr_worker)
+            self.wallets[wallet] = EscrowAgent.create(
+                wallet,
+                self.nostr_worker,
+                self._get_storage(wallet=wallet, purpose='agent_data'),
+            )
         else:
-            self.wallets[wallet] = EscrowClient.create(wallet, self.nostr_worker)
+            self.wallets[wallet] = EscrowClient.create(
+                wallet,
+                self.nostr_worker,
+                self._get_storage(wallet=wallet, purpose='client_data'),
+            )
         self.logger.debug(f"escrow agent mode {enabled=}")
 
-    def _get_agent_storage(self, wallet: 'Abstract_Wallet') -> dict:
+    def _get_storage(self, *, wallet: 'Abstract_Wallet', purpose: str) -> dict:
         storage = self.get_storage(wallet)
-        if 'agent_data' not in storage:
-            storage['agent_data'] = {}
-        return storage['agent_data']
+        if purpose not in storage:
+            storage[purpose] = {}
+        return storage[purpose]
 
     def get_escrow_agent_profile(self, wallet: 'Abstract_Wallet') -> Optional[EscrowAgentProfile]:
-        agent_storage = self._get_agent_storage(wallet)
+        agent_storage = self._get_storage(wallet=wallet, purpose="agent_data")
         if 'profile' not in agent_storage:
             return None
         return EscrowAgentProfile(**agent_storage['profile'])
 
     def save_escrow_agent_profile(self, profile_data: EscrowAgentProfile, wallet: 'Abstract_Wallet') -> None:
-        agent_storage = self._get_agent_storage(wallet)
+        agent_storage = self._get_storage(wallet=wallet, purpose='agent_data')
         agent_storage['profile'] = dataclasses.asdict(profile_data)
         worker = self.wallets[wallet]
         assert isinstance(worker, EscrowAgent)
-        run_sync_function_on_asyncio_thread(
-            worker.profile_changed.set,
-            block=False,
-        )
+        worker.broadcast_profile_event(profile_data)
