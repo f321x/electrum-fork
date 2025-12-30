@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 from abc import ABC, abstractmethod
 from concurrent.futures import Future, CancelledError
@@ -11,7 +12,24 @@ if TYPE_CHECKING:
     from electrum.wallet import Abstract_Wallet
 
 
+@dataclass(frozen=True)
+class EscrowAgentProfile:
+    """
+    Information broadcast by the escrow agent, visible to its customers.
+    Using Nostr kind 0 (NIP-01) profile event.
+    """
+    name: str
+    about: str  # short description
+    languages: list[str]
+    service_fee_ppm: int  # fees of traded amount (excluding bonds) in ppm
+    gpg_fingerprint: Optional[str] = None
+    picture: Optional[str] = None  # url to profile picture
+    website: Optional[str] = None
+
+
 class EscrowWorker(ABC, Logger):
+    NOSTR_PROTOCOL_VERSION = 1
+
     def __init__(self, wallet: 'Abstract_Wallet', nostr_worker: 'EscrowNostrWorker', storage: dict):
         Logger.__init__(self)
         self.wallet = wallet

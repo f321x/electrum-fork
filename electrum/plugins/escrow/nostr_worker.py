@@ -4,7 +4,7 @@ import time
 from concurrent.futures import Future, CancelledError
 import secrets
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Optional, Callable, Any, Set, Deque, Coroutine, Sequence
+from typing import TYPE_CHECKING, Optional, Callable, Any, Set, Deque, Coroutine, Sequence, Tuple
 from collections import deque
 import ssl
 
@@ -29,6 +29,8 @@ if TYPE_CHECKING:
 # A job is an async function that takes the nostr manager as argument
 NostrJob = Callable[['aionostr.Manager'], Coroutine[Any, Any, None]]
 
+class NostrJobID(str): pass
+
 class EscrowNostrWorker(Logger, EventListener):
     AGENT_STATUS_EVENT_KIND = 30315
     AGENT_PROFILE_EVENT_KIND = 0  # regular nostr user profile
@@ -40,8 +42,9 @@ class EscrowNostrWorker(Logger, EventListener):
         self.config = config
         self.network = network
         self.main_task: Optional[Future] = None
-        self.jobs: Deque[NostrJob] = deque()
+        self.jobs: Deque[Tuple[NostrJobID, NostrJob]] = deque()
         self.jobs_event = asyncio.Event()
+        self.running_tasks: Set[asyncio.Task] = set()
         self.register_callbacks()
 
     def start(self):
@@ -64,11 +67,27 @@ class EscrowNostrWorker(Logger, EventListener):
         self.main_task = task
         self.logger.debug(f"Nostr worker started")
 
-    def _add_job(self, job: NostrJob):
+    def _add_job(self, job: NostrJob) -> NostrJobID:
+        job_id = NostrJobID(secrets.token_hex(8))
         def _add():
-            self.jobs.append(job)
+            self.jobs.append((job_id, job))
             self.jobs_event.set()
         run_sync_function_on_asyncio_thread(_add, block=False)
+        return job_id
+
+    def cancel_job(self, job_id: NostrJobID):
+        def _cancel():
+            # check pending jobs
+            for item in list(self.jobs):
+                if item[0] == job_id:
+                    self.jobs.remove(item)
+                    return
+            # check running tasks
+            for task in self.running_tasks:
+                if task.get_name() == job_id:
+                    task.cancel()
+                    return
+        run_sync_function_on_asyncio_thread(_cancel, block=False)
 
     async def main_loop(self):
         """
@@ -82,18 +101,18 @@ class EscrowNostrWorker(Logger, EventListener):
             self.logger.debug("Starting new nostr manager session")
             try:
                 async with self.nostr_manager() as manager:
-                    running_tasks: Set[asyncio.Task] = set()
                     try:
                         while True:
                             # Start all pending jobs
                             while self.jobs:
-                                job = self.jobs.popleft()
+                                job_id, job = self.jobs.popleft()
                                 task = asyncio.create_task(job(manager))
-                                running_tasks.add(task)
+                                task.set_name(job_id)
+                                self.running_tasks.add(task)
 
                             self.jobs_event.clear()
 
-                            if not running_tasks:
+                            if not self.running_tasks:
                                 # No running tasks and no pending jobs.
                                 # Wait a bit for new jobs before closing connection.
                                 try:
@@ -102,7 +121,7 @@ class EscrowNostrWorker(Logger, EventListener):
                                 except asyncio.TimeoutError:
                                     break
 
-                            wait_objs = list(running_tasks)
+                            wait_objs = list(self.running_tasks)
                             job_waiter = asyncio.create_task(self.jobs_event.wait())
                             wait_objs.append(job_waiter)
 
@@ -120,16 +139,17 @@ class EscrowNostrWorker(Logger, EventListener):
 
                             # Remove done tasks from running_tasks
                             for t in done:
-                                if t in running_tasks:
-                                    running_tasks.remove(t)
+                                if t in self.running_tasks:
+                                    self.running_tasks.remove(t)
                                     if not t.cancelled() and t.exception():
                                         try:
                                             t.result()
                                         except Exception:
                                             self.logger.exception("Nostr job failed")
                     finally:
-                        for t in running_tasks:
+                        for t in self.running_tasks:
                             t.cancel()
+                        self.running_tasks.clear()
 
             except Exception as e:
                 self.logger.exception("Error in nostr main loop")
@@ -186,6 +206,19 @@ class EscrowNostrWorker(Logger, EventListener):
         self.main_task = None
         self.start()
         self.logger.debug(f"Nostr worker restarted")
+
+    def fetch_events(self, query: dict, output_queue: asyncio.Queue) -> NostrJobID:
+        async def _job(manager: 'aionostr.Manager'):
+            try:
+                async for event in manager.get_events(
+                    query,
+                    single_event=False,
+                    only_stored=False,
+                ):
+                    await output_queue.put(event)
+            finally:  # put None in the queue when the query ends in case the job gets canceled
+                asyncio.create_task(output_queue.put(None))
+        return self._add_job(job=_job)
 
     def _broadcast_event(self, nostr_event: 'nEvent'):
         async def _job(manager: 'aionostr.Manager'):
