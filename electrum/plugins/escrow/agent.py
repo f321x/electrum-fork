@@ -31,6 +31,7 @@ class EscrowAgentProfile:
 class EscrowAgent(EscrowWorker):
     STATUS_EVENT_INTERVAL_SEC = 1800  # 30 min
     PROFILE_EVENT_INTERVAL_SEC = 1_209_600  # 2 weeks
+    RELAY_EVENT_INTERVAL_SEC = 1_209_800  # 2 weeks
     AGENT_NOSTR_PROTOCOL_VERSION = 1
 
     def __init__(self, wallet: 'Abstract_Wallet', nostr_worker: 'EscrowNostrWorker', storage: dict):
@@ -83,6 +84,25 @@ class EscrowAgent(EscrowWorker):
                 profile = EscrowAgentProfile(**profile_data)
                 self.broadcast_profile_event(profile)
             await asyncio.sleep(self.PROFILE_EVENT_INTERVAL_SEC)
+
+    async def _broadcast_relay_event(self):
+        """
+        Broadcast our list of relays from time to time to ensure clients know which
+        relays the agent is active on.
+        """
+        previous_relays = None
+        last_broadcast = 0
+        while True:
+            relays = self.wallet.config.get_nostr_relays()
+            if relays:
+                # broadcast if our relays have changed or if timeout
+                if relays != previous_relays or (int(time.time()) - last_broadcast) > self.RELAY_EVENT_INTERVAL_SEC:
+                    previous_relays, last_broadcast = relays, int(time.time())
+                    self.nostr_worker.broadcast_agent_relay_event(
+                        relays=relays,
+                        signing_key=self.nostr_identity_private_key,
+                    )
+            await asyncio.sleep(120)
 
     async def _broadcast_status_event(self):
         """
