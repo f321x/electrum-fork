@@ -35,6 +35,7 @@ class EscrowNostrWorker(Logger, EventListener):
     AGENT_STATUS_EVENT_KIND = 30315
     AGENT_PROFILE_EVENT_KIND = 0  # regular nostr user profile
     AGENT_RELAY_LIST_METADATA_KIND = 10002  # NIP-65 relay list
+    EPHEMERAL_REQUEST_EVENT_KIND = 25582
 
     def __init__(self, config: 'SimpleConfig', network: 'Network'):
         Logger.__init__(self)
