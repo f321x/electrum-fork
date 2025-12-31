@@ -1,5 +1,6 @@
 import time
-from typing import TYPE_CHECKING
+import dataclasses
+from typing import TYPE_CHECKING, Optional
 import asyncio
 
 from electrum.util import OldTaskGroup
@@ -117,3 +118,12 @@ class EscrowAgent(EscrowWorker):
         num_str = str(num)
         zeroed_num_str = f"{num_str[:digits]}{(len(num_str[digits:])) * '0'}"
         return int(zeroed_num_str)
+
+    def get_profile(self) -> Optional[EscrowAgentProfile]:
+        if 'profile' not in self.storage:
+            return None
+        return EscrowAgentProfile(**self.storage['profile'])
+
+    def save_profile(self, profile_data: EscrowAgentProfile) -> None:
+        self.storage['profile'] = dataclasses.asdict(profile_data)
+        self.broadcast_profile_event(profile_data)

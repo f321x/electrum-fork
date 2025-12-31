@@ -163,3 +163,20 @@ class EscrowClient(EscrowWorker):
 
     def get_escrow_agent_infos(self) -> Mapping[str, EscrowAgentInfo]:
         return MappingProxyType(self.agent_infos)
+
+    def get_escrow_agents(self) -> list[str]:
+        if 'agents' not in self.storage:
+            self.storage['agents'] = []
+        return self.storage['agents']
+
+    def add_escrow_agent(self, agent_pubkey: str):
+        agents = set(self.storage.get('agents', []))
+        agents.add(agent_pubkey)
+        self.storage['agents'] = list(agents)
+        self.reload_agents()
+
+    def delete_escrow_agent(self, agent_pubkey: str):
+        agents = self.storage.get('agents', [])
+        if agent_pubkey in agents:
+            agents.remove(agent_pubkey)
+            self.reload_agents()
