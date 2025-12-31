@@ -1,5 +1,4 @@
-import dataclasses
-from typing import Optional, TYPE_CHECKING, Dict, Mapping
+from typing import Optional, TYPE_CHECKING, Dict, Type
 from dataclasses import dataclass
 from enum import Enum
 
@@ -7,8 +6,8 @@ from electrum.i18n import _
 from electrum.plugin import BasePlugin, hook
 
 from .nostr_worker import EscrowNostrWorker
-from .agent import EscrowAgent, EscrowAgentProfile
-from .client import EscrowClient, EscrowAgentInfo
+from .agent import EscrowAgent
+from .client import EscrowClient
 
 if TYPE_CHECKING:
     from electrum.simple_config import SimpleConfig
@@ -148,49 +147,12 @@ class EscrowPlugin(BasePlugin):
             storage[key] = {}
         return storage[key]
 
-    def client_get_escrow_agents(self, wallet: 'Abstract_Wallet') -> list[str]:
-        client_storage = self._get_storage(wallet=wallet, purpose=StoragePurpose.CLIENT_DATA)
-        if 'agents' not in client_storage:
-            client_storage['agents'] = []
-        return client_storage['agents']
-
-    def client_save_escrow_agent(self, *, agent_pubkey: str, wallet: 'Abstract_Wallet'):
-        client_storage = self._get_storage(wallet=wallet, purpose=StoragePurpose.CLIENT_DATA)
-        agents = set(client_storage.get('agents', []))
-        agents.add(agent_pubkey)
-        client_storage['agents'] = list(agents)
-
-        worker = self.wallets.get(wallet)
-        assert isinstance(worker, EscrowClient)
-        worker.reload_agents()
-
-    def client_delete_escrow_agent(self, *, agent_pubkey: str, wallet: 'Abstract_Wallet'):
-        client_storage = self._get_storage(wallet=wallet, purpose=StoragePurpose.CLIENT_DATA)
-        agents = client_storage['agents']
-        assert isinstance(agents, list) and agent_pubkey in agents
-        agents.remove(agent_pubkey)
-
-        worker = self.wallets.get(wallet)
-        if isinstance(worker, EscrowClient):
-            worker.reload_agents()
-
-    def client_get_escrow_agent_profiles(self, wallet: 'Abstract_Wallet') -> Mapping[str, EscrowAgentInfo]:
-        """
-        Agent profiles are not persisted, we only persist the pubkeys and fetch the profiles in EscrowClient.
-        """
+    def get_escrow_worker(
+        self,
+        wallet: 'Abstract_Wallet',
+        *,
+        worker_type: Type[EscrowClient | EscrowAgent]
+    ) -> 'EscrowClient | EscrowAgent':
         worker = self.wallets[wallet]
-        assert isinstance(worker, EscrowClient)
-        return worker.get_escrow_agent_infos()
-
-    def get_our_escrow_agent_profile(self, wallet: 'Abstract_Wallet') -> Optional[EscrowAgentProfile]:
-        agent_storage = self._get_storage(wallet=wallet, purpose=StoragePurpose.AGENT_DATA)
-        if 'profile' not in agent_storage:
-            return None
-        return EscrowAgentProfile(**agent_storage['profile'])
-
-    def save_our_escrow_agent_profile(self, profile_data: EscrowAgentProfile, wallet: 'Abstract_Wallet') -> None:
-        agent_storage = self._get_storage(wallet=wallet, purpose=StoragePurpose.AGENT_DATA)
-        agent_storage['profile'] = dataclasses.asdict(profile_data)
-        worker = self.wallets[wallet]
-        assert isinstance(worker, EscrowAgent)
-        worker.broadcast_profile_event(profile_data)
+        assert isinstance(worker, worker_type)
+        return worker

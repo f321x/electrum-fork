@@ -25,10 +25,12 @@ from electrum.keystore import MasterPublicKeyMixin
 
 from .escrow import EscrowPlugin, TradePaymentProtocol, StoragePurpose
 from .wizard import EscrowWizard
-from .agent import EscrowAgentProfile
+from .agent import EscrowAgentProfile, EscrowAgent
+from .client import EscrowClient
 
 if TYPE_CHECKING:
     from electrum.gui.qt.main_window import ElectrumWindow
+    from electrum.wallet import Abstract_Wallet
 
 
 class EscrowType(Enum):
@@ -244,8 +246,9 @@ class WCSelectEscrowAgent(WizardComponent):
         self.agent_combo.blockSignals(True)
         self.agent_combo.clear()
 
-        agents = self.plugin.client_get_escrow_agents(self.wallet)
-        infos = self.plugin.client_get_escrow_agent_profiles(self.wallet)
+        worker = self.plugin.get_escrow_worker(self.wallet, worker_type=EscrowClient)
+        agents = worker.get_escrow_agents()
+        infos = worker.get_escrow_agent_infos()
 
         for pubkey in agents:
             info = infos.get(pubkey)
@@ -289,7 +292,8 @@ class WCSelectEscrowAgent(WizardComponent):
                 self.wizard.window.show_error(_("Invalid public key"))
                 return
 
-            self.plugin.client_save_escrow_agent(agent_pubkey=pubkey, wallet=self.wallet)
+            worker = self.plugin.get_escrow_worker(self.wallet, worker_type=EscrowClient)
+            worker.add_escrow_agent(pubkey)
             self.escrow_agent_pubkey = pubkey
             self.update_combo()
 
@@ -298,13 +302,15 @@ class WCSelectEscrowAgent(WizardComponent):
         if not pubkey:
             return
         if self.wizard.window.question(_("Delete this escrow agent?")):
-            self.plugin.client_delete_escrow_agent(agent_pubkey=pubkey, wallet=self.wallet)
+            worker = self.plugin.get_escrow_worker(self.wallet, worker_type=EscrowClient)
+            worker.delete_escrow_agent(pubkey)
             self.escrow_agent_pubkey = None
             self.update_combo()
 
     def update_info(self):
-        agents = self.plugin.client_get_escrow_agents(self.wallet)
-        infos = self.plugin.client_get_escrow_agent_profiles(self.wallet)
+        worker = self.plugin.get_escrow_worker(self.wallet, worker_type=EscrowClient)
+        agents = worker.get_escrow_agents()
+        infos = worker.get_escrow_agent_infos()
 
         # Update current item text if name changed
         current_index = self.agent_combo.currentIndex()
@@ -720,11 +726,13 @@ class EscrowPluginDialog(WindowModalDialog):
                 critical=True,
             )
         is_agent = self._plugin.is_escrow_agent(self._wallet)
-        if is_agent and not self._plugin.get_our_escrow_agent_profile(self._wallet):
-            self.show_notification(
-                msg=_("Configure your Escrow Agent profile to become visible to other users."),
-                critical=False,
-            )
+        if is_agent:
+            worker = self._plugin.get_escrow_worker(self._wallet, worker_type=EscrowAgent)
+            if not worker.get_profile():
+                self.show_notification(
+                    msg=_("Configure your Escrow Agent profile to become visible to other users."),
+                    critical=False,
+                )
 
     def show_notification(self, msg: Optional[str], *, critical: bool = False):
         """
@@ -773,11 +781,12 @@ class EscrowPluginDialog(WindowModalDialog):
             self._agent_pubkey_label.setVisible(is_agent)
 
     def _configure_profile(self):
-        profile = self._plugin.get_our_escrow_agent_profile(self._wallet)
+        worker = self._plugin.get_escrow_worker(self._wallet, worker_type=EscrowAgent)
+        profile = worker.get_profile()
         d = EscrowAgentProfileDialog(self.window, self._plugin, profile)
         if d.exec():
             new_profile = d.get_profile()
-            self._plugin.save_our_escrow_agent_profile(new_profile, self._wallet)
+            worker.save_profile(new_profile)
             self._trigger_update()
 
     def _create_trade(self):
