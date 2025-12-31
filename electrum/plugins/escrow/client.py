@@ -59,7 +59,7 @@ class EscrowClient(EscrowWorker):
             self.nostr_worker.AGENT_PROFILE_EVENT_KIND,
             self.nostr_worker.AGENT_RELAY_LIST_METADATA_KIND,
         ]
-        event_queue = asyncio.Queue()
+        event_queue = asyncio.Queue(maxsize=1000)
         while True:
             agent_pubkeys = self.storage.get('agents')
             if not agent_pubkeys:
@@ -75,6 +75,7 @@ class EscrowClient(EscrowWorker):
             while True:
                 event = await event_queue.get()
                 if event is None:
+                    await asyncio.sleep(10)
                     break  # job got canceled, maybe proxy changed
                 assert isinstance(event, nEvent)
 

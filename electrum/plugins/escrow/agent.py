@@ -1,10 +1,14 @@
 import time
+import json
 import dataclasses
 from typing import TYPE_CHECKING, Optional
 import asyncio
 
-from electrum.util import OldTaskGroup
+from electrum_aionostr.event import Event as nEvent
+
+from electrum.util import OldTaskGroup, InvoiceError
 from electrum import constants
+from electrum.invoices import Invoice
 
 from .escrow_worker import EscrowWorker, EscrowAgentProfile
 
@@ -17,9 +21,19 @@ class EscrowAgent(EscrowWorker):
     STATUS_EVENT_INTERVAL_SEC = 1800  # 30 min
     PROFILE_EVENT_INTERVAL_SEC = 1_209_600  # 2 weeks
     RELAY_EVENT_INTERVAL_SEC = 1_209_800  # 2 weeks
+    # ~3m, time after which we give up to pay a customer and just keep their money, they can contact out of band
+    PAYOUT_TIMEOUT_SEC = 7_776_000
+    PAYOUT_INTERVAL_SEC = 1800  # how often we try to pay out an invoice
 
     def __init__(self, wallet: 'Abstract_Wallet', nostr_worker: 'EscrowNostrWorker', storage: dict):
         EscrowWorker.__init__(self, wallet, nostr_worker, storage)
+        assert wallet.has_lightning(), "Wallet needs lightning support"
+
+        # wallet key -> next payment attempt ts
+        if 'pending_lightning_invoices' not in storage:
+            storage['pending_lightning_invoices'] = {}
+        self._lightning_invoices_to_pay = storage['pending_lightning_invoices']  # type: dict[str, int]
+
         # we derive a persistent nostr identity from the wallet
         self.nostr_identity_private_key = nostr_worker.get_nostr_privkey_for_wallet(wallet)
 
@@ -28,11 +42,138 @@ class EscrowAgent(EscrowWorker):
         tasks = (
             self._broadcast_status_event(),
             self._maybe_rebroadcast_profile_event(),
+            self._broadcast_relay_event(),
+            self._handle_requests(),
+            self._pay_pending_lightning_invoices(),
         )
         async with OldTaskGroup() as g:
             for task in tasks:
                 await g.spawn(task)
                 await asyncio.sleep(3)  # prevent getting rate limited by relays
+
+    async def _handle_requests(self):
+        query = {
+            "kinds": [self.nostr_worker.EPHEMERAL_REQUEST_EVENT_KIND],
+            "#p": [self.nostr_identity_private_key.public_key.hex()],
+            "#r": [f"net:{constants.net.NET_NAME}"],
+            "#d": [f"electrum-escrow-plugin-{self.NOSTR_PROTOCOL_VERSION}"],
+            "limit": 0,
+        }
+        privkey = self.nostr_identity_private_key
+        event_queue = asyncio.Queue(maxsize=1000)
+        while True:
+            _job_id = self.nostr_worker.fetch_events(query, event_queue)
+            while True:
+                await asyncio.sleep(0.1)
+                event = await event_queue.get()
+                if event is None:
+                    await asyncio.sleep(10)  # query job got canceled, maybe proxy changed
+                    break
+                assert isinstance(event, nEvent)
+                try:
+                    content = privkey.decrypt_message(event.content, event.pubkey)
+                    content = json.loads(content)
+                    if not isinstance(content, dict):
+                        raise Exception("malformed content, not dict")
+                except Exception:
+                    continue
+
+                # todo: some priority queue prioritizing existing trade rpcs over new trade rpcs would be nice
+                method = content.get('method')
+                match method:
+                    case 'register_escrow':
+                        self._handle_register_escrow(content)
+                    case 'collaborative_confirm':
+                        self._handle_collaborative_confirm(content)
+                    case 'collaborative_cancel':
+                        self._handle_collaborative_cancel(content)
+                    case 'handle_mediation':
+                        self._handle_request_mediation(content)
+                    case _:
+                        continue
+
+    def _handle_register_escrow(self, request: dict):
+        """
+        Each trade participant should call this once.
+        First call is the maker, second call is the taker.
+        """
+        pass
+
+    def _handle_collaborative_confirm(self, request: dict):
+        """
+        Once both trade parties called this the trade is marked done. Bond and amount have
+        to get paid back to the trade participants.
+        """
+        pass
+
+    def _handle_collaborative_cancel(self, request: dict):
+        """
+        If only one participant is registered yet the trade gets canceled.
+        If both are registered already both have to request collaborative cancel to cancel the trade.
+        """
+        pass
+
+    def _handle_request_mediation(self, request: dict):
+        """
+        Can be called unilaterally, if one party requests this the trade goes in mediation mode.
+        Now the traders have to contact the agent out of band (e.g. Signal) and the agent has to decide
+        who gets paid how much.
+        """
+        pass
+
+    def _register_payout_invoice(self, *, b11_invoice: str, expected_amount_sat: int):
+        """
+        Register an invoice to be paid. Will immediately try to get this invoice paid.
+        WARNING: Validate before that we haven't already paid the user requesting payout.
+        """
+        try:
+            invoice = Invoice.from_bech32(b11_invoice)
+        except InvoiceError:
+            self.logger.warn(f"got invalid invoice, rejecting")
+            return
+        if not invoice.get_amount_sat() == expected_amount_sat:
+            raise ValueError(f"invalid invoice amount: {invoice.get_amount_sat()}")
+        self.wallet.save_invoice(invoice)
+        key = invoice.get_id()
+        self._lightning_invoices_to_pay[key] = int(time.time())
+
+    async def _pay_pending_lightning_invoices(self):
+        while True:
+            await asyncio.sleep(10)
+            for key, not_before in list(self._lightning_invoices_to_pay.items()):
+                if int(time.time()) < not_before:
+                    continue
+
+                invoice = self.wallet.get_invoice(key)
+
+                if invoice.has_expired():
+                    self.logger.warn(f"dropping expired lightning invoice")
+                    # not deleting the invoice from the wallet so the user can see what was going on
+                    del self._lightning_invoices_to_pay[key]
+                    continue
+
+                if int(time.time()) - invoice.time > self.PAYOUT_TIMEOUT_SEC:
+                    self.logger.warn(f"we didn't manage to pay invoice in {self.PAYOUT_TIMEOUT_SEC=}, giving up")
+                    del self._lightning_invoices_to_pay[key]
+                    continue
+
+                self._lightning_invoices_to_pay[key] += 1000000000000 # lock
+                await self._pay_invoice(invoice)
+
+    async def _pay_invoice(self, invoice: Invoice):
+        self.logger.info(f'trying to pay invoice')
+        try:
+            success, log = await self.wallet.lnworker.pay_invoice(invoice)
+        except Exception:
+            self.logger.exception(f'exception paying invoice {invoice.get_id()}, will not retry')
+            del self._lightning_invoices_to_pay[invoice.get_id()]
+            return
+        if not success:
+            self.logger.info(f'failed to pay {invoice.get_id()}, will retry in {self.PAYOUT_INTERVAL_SEC=}')
+            self._lightning_invoices_to_pay[invoice.get_id()] = int(time.time()) + self.PAYOUT_INTERVAL_SEC
+        else:
+            self.logger.info(f'paid invoice {invoice.get_id()}')
+            del self._lightning_invoices_to_pay[invoice.get_id()]
 
     def broadcast_profile_event(self, profile_data: EscrowAgentProfile):
         content = {
