@@ -1,3 +1,4 @@
+from hashlib import algorithms_guaranteed
 from typing import TYPE_CHECKING, Optional
 from functools import partial
 from enum import Enum
@@ -11,11 +12,14 @@ from PyQt6.QtWidgets import (
 
 from electrum import constants
 from electrum.i18n import _
+from electrum.logging import Logger
 from electrum.plugin import hook
+from electrum.network import Network
+from electrum.util import make_aiohttp_session
 from electrum.gui.qt.util import (
     WindowModalDialog, Buttons, OkButton, CancelButton,
     read_QIcon_from_bytes, read_QPixmap_from_bytes, read_QIcon, HelpLabel,
-    icon_path, WWLabel
+    icon_path, WWLabel, TaskThread, QtEventListener, qt_event_listener
 )
 from electrum.gui.qt.my_treeview import QMenuWithConfig
 from electrum.gui.qt.amountedit import BTCAmountEdit, AmountEdit
@@ -23,7 +27,7 @@ from electrum.gui.qt.wizard.wizard import QEAbstractWizard, WizardComponent
 from electrum.wizard import WizardViewState
 from electrum.keystore import MasterPublicKeyMixin
 
-from .escrow import EscrowPlugin, TradePaymentProtocol, StoragePurpose
+from .escrow import EscrowPlugin, TradePaymentProtocol
 from .wizard import EscrowWizard
 from .agent import EscrowAgentProfile, EscrowAgent
 from .client import EscrowClient
@@ -31,6 +35,18 @@ from .client import EscrowClient
 if TYPE_CHECKING:
     from electrum.gui.qt.main_window import ElectrumWindow
     from electrum.wallet import Abstract_Wallet
+
+
+def fetch_url_bytes(url: str):
+    network = Network.get_instance()
+    if not network: return None
+    async def get_bytes():
+        proxy = network.proxy
+        async with make_aiohttp_session(proxy) as session:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    return await response.read()
+    return network.run_from_another_thread(get_bytes())
 
 
 class EscrowType(Enum):
@@ -181,6 +197,10 @@ class WCCreateTrade(WizardComponent):
             if error:
                 self.warning_label.setText(error)
 
+    def on_event_channel(self):
+        # called by the EscrowWizardDialog callback
+        self.validate()
+
     def apply(self):
         self.wizard_data['title'] = self.title_edit.text().strip()
         self.wizard_data['contract'] = self.contract_edit.toPlainText().strip()
@@ -191,15 +211,17 @@ class WCCreateTrade(WizardComponent):
         self.wizard_data['payment_network'] = constants.net.NET_NAME
 
 
-class WCSelectEscrowAgent(WizardComponent):
+class WCSelectEscrowAgent(WizardComponent, Logger):
     """
     Trade maker selects escrow agent for this trade from a drop-down menu. Also has the possibility
     add a new escrow agent. Gives details of the escrow agent.
     """
     def __init__(self, parent, wizard: 'EscrowWizardDialog'):
         super().__init__(parent, wizard, title=_("Escrow Agent"))
+        Logger.__init__(self)
         self.plugin = wizard.plugin
         self.wallet = wizard.window.wallet
+        self.thread = TaskThread(self, self.on_error)
 
         layout = self.layout()
         assert isinstance(layout, QVBoxLayout)
@@ -210,21 +232,37 @@ class WCSelectEscrowAgent(WizardComponent):
         self.agent_combo.currentIndexChanged.connect(self.on_agent_selected)
         hbox.addWidget(self.agent_combo, stretch=1)
 
-        add_button = QPushButton(_("Add"))
+        add_button = QToolButton()
+        add_button.setIcon(read_QIcon("add.png"))
+        add_button.setToolTip(_("Add Escrow Agent"))
+        add_button.setAutoRaise(True)
         add_button.clicked.connect(self.add_agent)
         hbox.addWidget(add_button)
 
-        del_button = QPushButton(_("Delete"))
+        del_button = QToolButton()
+        del_button.setIcon(read_QIcon("delete.png"))
+        del_button.setToolTip(_("Delete Escrow Agent"))
+        del_button.setAutoRaise(True)
         del_button.clicked.connect(self.delete_agent)
         hbox.addWidget(del_button)
 
         layout.addLayout(hbox)
 
+        info_layout = QHBoxLayout()
         self.info_label = QLabel()
         self.info_label.setWordWrap(True)
         self.info_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.info_label.setOpenExternalLinks(True)
-        layout.addWidget(self.info_label)
+        info_layout.addWidget(self.info_label, stretch=1)
+
+        self.avatar_label = QLabel()
+        self.avatar_label.setFixedSize(128, 128)
+        self.avatar_label.setStyleSheet("border: 1px solid gray")
+        self.avatar_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.avatar_label.setVisible(False)
+        info_layout.addWidget(self.avatar_label)
+
+        layout.addLayout(info_layout)
 
         self.warning_label = WWLabel('')
         self.warning_label.setStyleSheet("color: red")
@@ -233,6 +271,7 @@ class WCSelectEscrowAgent(WizardComponent):
         layout.addStretch(1)
 
         self.escrow_agent_pubkey = None  # type: Optional[str]
+        self.current_avatar_url = None
         self.valid = False
 
         self.timer = QTimer(self)
@@ -301,11 +340,10 @@ class WCSelectEscrowAgent(WizardComponent):
         pubkey = self.escrow_agent_pubkey
         if not pubkey:
             return
-        if self.wizard.window.question(_("Delete this escrow agent?")):
-            worker = self.plugin.get_escrow_worker(self.wallet, worker_type=EscrowClient)
-            worker.delete_escrow_agent(pubkey)
-            self.escrow_agent_pubkey = None
-            self.update_combo()
+        worker = self.plugin.get_escrow_worker(self.wallet, worker_type=EscrowClient)
+        worker.delete_escrow_agent(pubkey)
+        self.escrow_agent_pubkey = None
+        self.update_combo()
 
     def update_info(self):
         worker = self.plugin.get_escrow_worker(self.wallet, worker_type=EscrowClient)
@@ -326,10 +364,17 @@ class WCSelectEscrowAgent(WizardComponent):
              self.update_combo()
 
         pubkey = self.escrow_agent_pubkey
+
+        def update_avatar(url):
+            if url != self.current_avatar_url:
+                self.current_avatar_url = url
+                self.fetch_avatar(url)
+
         if not pubkey:
             self.info_label.setText("")
             self.warning_label.setText("")
             self.valid = False
+            update_avatar(None)
             return
 
         info = infos.get(pubkey)
@@ -337,6 +382,7 @@ class WCSelectEscrowAgent(WizardComponent):
             self.info_label.setText(_("Fetching agent information..."))
             self.warning_label.setText(_("No information available for this agent."))
             self.valid = False
+            update_avatar(None)
             return
 
         profile = info.profile_info
@@ -368,6 +414,42 @@ class WCSelectEscrowAgent(WizardComponent):
         self.info_label.setText("<br>".join(lines))
         self.warning_label.setText("")
         self.valid = True
+
+        update_avatar(profile.picture)
+
+    def fetch_avatar(self, url):
+        if not url:
+            self.avatar_label.clear()
+            self.avatar_label.setVisible(False)
+            return
+
+        def do_fetch():
+            return fetch_url_bytes(url)
+
+        def on_success(data):
+            if self.current_avatar_url != url:
+                return
+            if data:
+                pixmap = read_QPixmap_from_bytes(data)
+                if not pixmap.isNull():
+                    self.avatar_label.setPixmap(pixmap.scaled(128, 128, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+                    self.avatar_label.setVisible(True)
+                else:
+                    self.avatar_label.clear()
+                    self.avatar_label.setVisible(False)
+            else:
+                self.avatar_label.clear()
+                self.avatar_label.setVisible(False)
+
+        self.thread.add(do_fetch, on_success=on_success)
+
+    def stop(self):
+        self.thread.stop()
+        self.timer.stop()
+        self.logger.debug(f"WCSelectEscrowAgent tasks stopped")
+
+    def on_error(self, exc_info):
+        self.logger.exception("TaskThread error", exc_info=exc_info)
 
     def validate(self):
         # Validation state is updated in update_info
@@ -414,7 +496,7 @@ class WCAcceptTrade(WizardComponent):
         pass
 
 
-class EscrowWizardDialog(EscrowWizard, QEAbstractWizard):
+class EscrowWizardDialog(QEAbstractWizard, QtEventListener, EscrowWizard):
     def __init__(self, window: 'ElectrumWindow', plugin: 'Plugin', escrow_type: EscrowType):
         EscrowWizard.__init__(self, plugin)
 
@@ -431,6 +513,8 @@ class EscrowWizardDialog(EscrowWizard, QEAbstractWizard):
         self.window: 'ElectrumWindow' = window
         self.window_title = _("Escrow Wizard")
         self._set_logo()
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self.register_callbacks()
 
         self.navmap_merge({
             'create_trade': {'gui': WCCreateTrade},
@@ -452,12 +536,36 @@ class EscrowWizardDialog(EscrowWizard, QEAbstractWizard):
         # ugly hack to prevent QEAbstractWizard from overriding the icon
         self.icon_filename = icon_path('electrum.png')
 
+    @qt_event_listener
+    def on_event_channel(self, wallet: 'Abstract_Wallet', _channel):
+        if wallet != self.window.wallet:
+            return
+        current_widget = self.main_widget.currentWidget()
+        if hasattr(current_widget, 'on_event_channel'):
+            current_widget.on_event_channel()
 
-class EscrowAgentProfileDialog(WindowModalDialog):
+    def on_back_button_clicked(self):
+        if self.can_go_back():
+            w = self.main_widget.currentWidget()
+            if hasattr(w, 'stop'):
+                w.stop()
+        super().on_back_button_clicked()
+
+    def done(self, r):
+        self.unregister_callbacks()
+        for w in self.main_widget.widgets:
+            if hasattr(w, 'stop'):
+                w.stop()
+        super().done(r)
+
+
+class EscrowAgentProfileDialog(WindowModalDialog, Logger):
     def __init__(self, window: 'ElectrumWindow', plugin: 'Plugin', profile: Optional['EscrowAgentProfile']):
         WindowModalDialog.__init__(self, window, _("Escrow Agent Profile"))
+        Logger.__init__(self)
         self.plugin = plugin
         self.wallet = window.wallet
+        self.thread = TaskThread(self, self.on_error)
 
         vbox = QVBoxLayout(self)
         grid = QGridLayout()
@@ -465,6 +573,14 @@ class EscrowAgentProfileDialog(WindowModalDialog):
 
         self.ok_button = OkButton(self, _("Save"))
         self.ok_button.setEnabled(False)
+
+        # Avatar
+        self.avatar_label = QLabel()
+        self.avatar_label.setFixedSize(128, 128)
+        self.avatar_label.setStyleSheet("border: 1px solid gray")
+        self.avatar_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.avatar_label.setText(_("No Image"))
+        grid.addWidget(self.avatar_label, 0, 2, 4, 1)
 
         # Name
         grid.addWidget(HelpLabel(
@@ -529,19 +645,24 @@ class EscrowAgentProfileDialog(WindowModalDialog):
         self.picture_e = QLineEdit()
         self.picture_e.setPlaceholderText("[Optional] https://example.com/avatar.png")
         self.picture_e.setMaxLength(200)
-        self.picture_e.textChanged.connect(self.validate)
+        self.picture_e.textChanged.connect(self.on_picture_edit)
         grid.addWidget(self.picture_e, 5, 1)
 
         # website
         grid.addWidget(HelpLabel(
             text=_("Website URL:"),
             help_text=_("A URL to your website.")
-        ), 5, 0)
+        ), 6, 0)
         self.website_e = QLineEdit()
         self.website_e.setPlaceholderText("[Optional] https://example.com/")
         self.website_e.setMaxLength(200)
         self.website_e.textChanged.connect(self.validate)
         grid.addWidget(self.website_e, 6, 1)
+
+        self.avatar_fetch_timer = QTimer(self)
+        self.avatar_fetch_timer.setSingleShot(True)
+        self.avatar_fetch_timer.setInterval(800)
+        self.avatar_fetch_timer.timeout.connect(self.fetch_avatar)
 
         if profile:
             self.name_e.setText(profile.name)
@@ -554,6 +675,7 @@ class EscrowAgentProfileDialog(WindowModalDialog):
 
         vbox.addLayout(Buttons(CancelButton(self), self.ok_button))
         self.validate()
+        self.fetch_avatar()
 
     def _limit_about_length(self):
         text = self.about_e.toPlainText()
@@ -591,6 +713,41 @@ class EscrowAgentProfileDialog(WindowModalDialog):
             picture=self.picture_e.text().strip() or None,
             website=self.website_e.text().strip() or None,
         )
+
+    def on_picture_edit(self):
+        self.validate()
+        self.avatar_fetch_timer.start()
+
+    def fetch_avatar(self):
+        url = self.picture_e.text().strip()
+        if not url:
+            self.avatar_label.clear()
+            self.avatar_label.setText(_("No Image"))
+            return
+
+        def do_fetch():
+            return fetch_url_bytes(url)
+
+        def on_success(data):
+            if data:
+                pixmap = read_QPixmap_from_bytes(data)
+                if not pixmap.isNull():
+                    self.avatar_label.setPixmap(pixmap.scaled(128, 128, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+                    self.avatar_label.setText("")
+                else:
+                    self.avatar_label.clear()
+                    self.avatar_label.setText(_("Invalid Image"))
+
+        self.thread.add(do_fetch, on_success=on_success)
+
+    def done(self, r):
+        self.thread.stop()
+        self.avatar_fetch_timer.stop()
+        self.logger.debug(f"tasks done")
+        super().done(r)
+
+    def on_error(self, exc_info):
+        self.logger.exception("TaskThread error", exc_info=exc_info)
 
 
 class EscrowPluginDialog(WindowModalDialog):
