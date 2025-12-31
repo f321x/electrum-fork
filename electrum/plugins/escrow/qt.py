@@ -459,12 +459,19 @@ class WCSelectEscrowAgent(WizardComponent, Logger):
 
 
 class WCConfirmCreate(WizardComponent):
+    """
+    1. Requests the escrow from agent by sending the contract data.
+       -> Wizard is busy until we received the confirmation + invoice or error.
+    2. If we got an invoice, show all info to the user for review.
+    3. If the user clicks 'Create', show a popup asking for confirmation.
+    4. When confirming, the payment to the agent will be initiated.
+    5. If the payment was successful we save the trade and the state is waiting for the counterparty.
+    Now the counterparty has to accept the trade and pay the bond, or we have to request a refund.
+    """
     def __init__(self, parent, wizard):
         super().__init__(parent, wizard, title=_("Confirm Trade Creation"))
         layout = self.layout()
         layout.addWidget(QLabel("Confirm Create (TODO)"))
-        # Maker can review the trade conditions and escrow agent profile. Submitting will request the
-        # escrow from the escrow agent via Nostr. The escrow agent will return a bond and trade lightning invoice.
         self.valid = True
 
     def apply(self):
@@ -472,6 +479,15 @@ class WCConfirmCreate(WizardComponent):
 
 
 class WCFetchTrade(WizardComponent):
+    """
+    1. Taker enters ID of the trade they got from maker out of band.
+    2. We request trade info from (where?).
+    3. User has to confirm the trade by paying the invoice they got from the agent. (bond or trade payment).
+    4. If the taker has paid the trade is locked in and the participants have to either:
+       -> Collaboratively confirm
+       -> Collaboratively cancel
+       -> Unilaterally open dispute with agent
+    """
     def __init__(self, parent, wizard):
         super().__init__(parent, wizard, title=_("Fetch Trade"))
         layout = self.layout()
