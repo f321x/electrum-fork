@@ -109,7 +109,7 @@ class WCCreateTrade(WizardComponent):
         # Bond Amount
         grid.addWidget(HelpLabel(
             text=_("Bond Amount (%):"),
-            help_text=_("Percentage of the trade amount that both trade participants will lock to the escrow agent. "
+            help_text=_("Percentage of the trade amount that the trade participant which receives the main trade payment will lock to the escrow agent. "
                         "This ensures both participants have something to lose (skin-in-the-game). "
                         "The bond will get refunded in case of a successful trade.")
         ), 3, 0)
@@ -149,14 +149,13 @@ class WCCreateTrade(WizardComponent):
 
     @property
     def total_send_amount(self) -> int:
-        total_send_amount_sat = 0
         trade_amount = self.amount_e.get_amount() or 0
         if self.payment_direction == PaymentDirection.SENDING:
-            total_send_amount_sat += trade_amount
-        bond_percentage = self.bond_percentage_sb.value()
-        bond_amount_sat = (bond_percentage * trade_amount) // 100
-        total_send_amount_sat += bond_amount_sat
-        return total_send_amount_sat
+            return trade_amount
+        else:
+            bond_percentage = self.bond_percentage_sb.value()
+            bond_amount_sat = (bond_percentage * trade_amount) // 100
+            return bond_amount_sat
 
     def validate(self):
         title = self.title_edit.text().strip()
