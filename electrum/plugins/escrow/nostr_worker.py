@@ -20,7 +20,11 @@ from electrum.util import (
 )
 from electrum.wallet import Abstract_Wallet
 from electrum.crypto import sha256
-from electrum.i18n import _
+from electrum import constants
+from .constants import (
+    AGENT_STATUS_EVENT_KIND, AGENT_PROFILE_EVENT_KIND, AGENT_RELAY_LIST_METADATA_KIND,
+    EPHEMERAL_REQUEST_EVENT_KIND, ENCRYPTED_DIRECT_MESSAGE_KIND, PROTOCOL_VERSION
+)
 
 if TYPE_CHECKING:
     from electrum.simple_config import SimpleConfig
@@ -33,12 +37,6 @@ NostrJob = Callable[['aionostr.Manager'], Coroutine[Any, Any, None]]
 class NostrJobID(str): pass
 
 class EscrowNostrWorker(Logger, EventListener):
-    AGENT_STATUS_EVENT_KIND = 30315
-    AGENT_PROFILE_EVENT_KIND = 0  # regular nostr user profile
-    AGENT_RELAY_LIST_METADATA_KIND = 10002  # NIP-65 relay list
-    EPHEMERAL_REQUEST_EVENT_KIND = 25582
-    ENCRYPTED_DIRECT_MESSAGE_KIND = 4
-
     def __init__(self, config: 'SimpleConfig', network: 'Network'):
         Logger.__init__(self)
         EventListener.__init__(self)
@@ -267,7 +265,7 @@ class EscrowNostrWorker(Logger, EventListener):
         expiration_ts = int(time.time()) + expiration_duration
         tags = [['p', recipient_pubkey]]
         event = self._prepare_event(
-            kind=self.ENCRYPTED_DIRECT_MESSAGE_KIND,
+            kind=ENCRYPTED_DIRECT_MESSAGE_KIND,
             content=encrypted_content,
             tags=tags,
             signing_key=signing_key,
@@ -286,11 +284,15 @@ class EscrowNostrWorker(Logger, EventListener):
     ) -> nEvent:
         cleartext_msg = json.dumps(cleartext_content)
         encrypted_content = signing_key.encrypt_message(cleartext_msg, recipient_pubkey)
-        tags = [['p', recipient_pubkey]]
+        tags = [
+            ['p', recipient_pubkey],
+            ['r', f"net:{constants.net.NET_NAME}"],
+            ['d', f"electrum-escrow-plugin-{PROTOCOL_VERSION}"]
+        ]
         if response_to_id:
             tags.append(['e', response_to_id])
         event = self._prepare_event(
-            kind=self.EPHEMERAL_REQUEST_EVENT_KIND,
+            kind=EPHEMERAL_REQUEST_EVENT_KIND,
             content=encrypted_content,
             tags=tags,
             signing_key=signing_key,
@@ -332,19 +334,21 @@ class EscrowNostrWorker(Logger, EventListener):
             signing_key=signing_key,
         )
         query = {
-            "kinds": [self.EPHEMERAL_REQUEST_EVENT_KIND],
+            "kinds": [EPHEMERAL_REQUEST_EVENT_KIND],
             "#p": [signing_key.public_key.hex()],
             "#e": [event.id],
             "since": int(time.time()) - 1,
             "limit": 1,
         }
 
-        job_id = None
-        query_start = int(time.time())
         response_queue = asyncio.Queue()
+        job_id = self.fetch_events(query, response_queue)
+        self._broadcast_event(event)
+        query_start = int(time.time())
         while True:
             try:
-                job_id = self.fetch_events(query, response_queue)
+                if not job_id:
+                    job_id = self.fetch_events(query, response_queue)
                 while True:
                     try:
                         resp_event = await wait_for2(response_queue.get(), timeout=timeout_sec)
@@ -371,10 +375,11 @@ class EscrowNostrWorker(Logger, EventListener):
             finally:
                 if job_id:
                     self.cancel_job(job_id)
+                    job_id = None
 
     def broadcast_agent_status_event(self, *, content: dict, tags: list, signing_key: PrivateKey) -> None:
         event = self._prepare_event(
-            kind=self.AGENT_STATUS_EVENT_KIND,
+            kind=AGENT_STATUS_EVENT_KIND,
             content=content,
             tags=tags,
             signing_key=signing_key,
@@ -384,7 +389,7 @@ class EscrowNostrWorker(Logger, EventListener):
 
     def broadcast_agent_profile_event(self, *, content: dict, tags: list, signing_key: PrivateKey) -> None:
         event = self._prepare_event(
-            kind=self.AGENT_PROFILE_EVENT_KIND,
+            kind=AGENT_PROFILE_EVENT_KIND,
             content=content,
             tags=tags,
             signing_key=signing_key,
@@ -395,7 +400,7 @@ class EscrowNostrWorker(Logger, EventListener):
     def broadcast_agent_relay_event(self, *, relays: Sequence[str], signing_key: PrivateKey) -> None:
         tags = [['r', relay_url] for relay_url in relays]
         event = self._prepare_event(
-            kind=self.AGENT_RELAY_LIST_METADATA_KIND,
+            kind=AGENT_RELAY_LIST_METADATA_KIND,
             content='',
             tags=tags,
             signing_key=signing_key,
