@@ -36,6 +36,7 @@ class EscrowNostrWorker(Logger, EventListener):
     AGENT_PROFILE_EVENT_KIND = 0  # regular nostr user profile
     AGENT_RELAY_LIST_METADATA_KIND = 10002  # NIP-65 relay list
     EPHEMERAL_REQUEST_EVENT_KIND = 25582
+    ENCRYPTED_DIRECT_MESSAGE_KIND = 4
 
     def __init__(self, config: 'SimpleConfig', network: 'Network'):
         Logger.__init__(self)
@@ -251,6 +252,27 @@ class EscrowNostrWorker(Logger, EventListener):
             event.add_expiration_tag(expiration_ts=expiration_ts)
         event = event.sign(signing_key.hex())
         return event
+
+    def send_encrypted_direct_message(
+        self,
+        *,
+        cleartext_content: dict,
+        recipient_pubkey: str,
+        expiration_duration: int,
+        signing_key: PrivateKey,
+    ):
+        cleartext_msg = json.dumps(cleartext_content)
+        encrypted_content = signing_key.encrypt_message(cleartext_msg, recipient_pubkey)
+        expiration_ts = int(time.time()) + expiration_duration
+        tags = [['p', recipient_pubkey]]
+        event = self._prepare_event(
+            kind=self.ENCRYPTED_DIRECT_MESSAGE_KIND,
+            content=encrypted_content,
+            tags=tags,
+            signing_key=signing_key,
+            expiration_ts=expiration_ts,
+        )
+        self._broadcast_event(event)
 
     def broadcast_agent_status_event(self, *, content: dict, tags: list, signing_key: PrivateKey) -> None:
         event = self._prepare_event(

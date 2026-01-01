@@ -1,29 +1,56 @@
 import time
 import json
+import secrets
 import dataclasses
 from typing import TYPE_CHECKING, Optional
 import asyncio
 
 from electrum_aionostr.event import Event as nEvent
 
-from electrum.util import OldTaskGroup, InvoiceError
+from electrum.util import OldTaskGroup, InvoiceError, EventListener, event_listener
 from electrum import constants
-from electrum.invoices import Invoice
+from electrum.invoices import Invoice, PR_PAID
 
-from .escrow_worker import EscrowWorker, EscrowAgentProfile
+from .escrow_worker import (
+    EscrowWorker, EscrowAgentProfile, TradeState, TradePaymentProtocol, TradeRPC, TradeContract,
+)
 
 if TYPE_CHECKING:
     from .nostr_worker import EscrowNostrWorker
     from electrum.wallet import Abstract_Wallet
 
 
-class EscrowAgent(EscrowWorker):
+@dataclasses.dataclass
+class TradeParticipant:
+    pubkey: str
+    funding_request_key: str
+    onchain_fallback_address: str  # so we can refund/payout onchain in case lightning fails
+    contract_signature: str  # signature over 'ESCROW'|title|contract|trade_amount|bond_amount
+
+@dataclasses.dataclass
+class TradeParticipants:
+    maker: TradeParticipant
+    taker: Optional[TradeParticipant] = None
+
+@dataclasses.dataclass
+class AgentEscrowTrade:
+    state: TradeState
+    trade_participants: TradeParticipants
+    contract: TradeContract
+    payment_protocol: TradePaymentProtocol
+    trade_protocol_version: int
+    creation_timestamp: int = dataclasses.field(default_factory=lambda: int(time.time()))
+
+
+class EscrowAgent(EscrowWorker, EventListener):
     STATUS_EVENT_INTERVAL_SEC = 1800  # 30 min
     PROFILE_EVENT_INTERVAL_SEC = 1_209_600  # 2 weeks
     RELAY_EVENT_INTERVAL_SEC = 1_209_800  # 2 weeks
+    DIRECT_MESSAGE_EXPIRATION_SEC = 15_552_000  # 6 months
     # ~3m, time after which we give up to pay a customer and just keep their money, they can contact out of band
     PAYOUT_TIMEOUT_SEC = 7_776_000
     PAYOUT_INTERVAL_SEC = 1800  # how often we try to pay out an invoice
+    MAX_AMOUNT_PENDING_TRADES = 200  # how many pending (unfunded) trades we keep in memory until evicting the oldest one
 
     def __init__(self, wallet: 'Abstract_Wallet', nostr_worker: 'EscrowNostrWorker', storage: dict):
         EscrowWorker.__init__(self, wallet, nostr_worker, storage)
@@ -37,6 +64,16 @@ class EscrowAgent(EscrowWorker):
         # we derive a persistent nostr identity from the wallet
         self.nostr_identity_private_key = nostr_worker.get_nostr_privkey_for_wallet(wallet)
 
+        if 'trades' not in storage:
+            storage['trades'] = {}
+        self._trades = storage['trades']  # type: dict[str, AgentEscrowTrade]
+
+        # newly registered trades, waiting for the maker to send us the funds. We only persist the
+        # trade once the invoice is paid to avoid writing every request to the db, or when shutting down.
+        self._pending_trades = {}  # type: dict[str, AgentEscrowTrade]
+
+        self.register_callbacks()
+
     async def main_loop(self):
         self.logger.debug(f"escrow agent started: {self.wallet.basename()}")
         tasks = (
@@ -45,11 +82,106 @@ class EscrowAgent(EscrowWorker):
             self._broadcast_relay_event(),
             self._handle_requests(),
             self._pay_pending_lightning_invoices(),
+            self._cleanup_pending_trades_funding_expired(),
         )
         async with OldTaskGroup() as g:
             for task in tasks:
                 await g.spawn(task)
                 await asyncio.sleep(3)  # prevent getting rate limited by relays
+
+    def stop(self):
+        self._cleanup_pending_trades()
+        self.unregister_callbacks()
+        EscrowWorker.stop(self)
+
+    @event_listener
+    def on_event_request_status(self, wallet: 'Abstract_Wallet', key: str, status: int):
+        if wallet != self.wallet:
+            return
+        if status != PR_PAID:
+            return
+        # check if the payment was for a pending trade. Move pending trade to active trades.
+        for trade_id, trade in list(self._pending_trades.items()):
+            if trade.trade_participants.maker.funding_request_key == key:
+                self._handle_maker_funding(trade_id)
+                return
+        for trade_id, trade in self._trades.items():
+            if trade.trade_participants.taker.funding_request_key == key:
+                self._handle_taker_funding(trade_id)
+                return
+
+    def _handle_maker_funding(self, trade_id: str):
+        """Maker has paid their funding invoice. Now the trade can get persisted in the db."""
+        assert trade_id not in self._trades, trade_id
+        self._trades[trade_id] = self._pending_trades.pop(trade_id)
+        self.logger.info(f"maker funding received: {trade_id=}")
+
+    def _handle_taker_funding(self, trade_id: str):
+        """Taker has paid their funding invoice. Maker must already have paid before."""
+        trade = self._trades[trade_id]
+        assert trade.state < TradeState.ONGOING, trade.state
+        trade.state = TradeState.ONGOING
+        self.logger.info(f"taker funding received: {trade_id=}")
+        self._notify_maker_trade_funded(trade_id)
+
+    def _notify_maker_trade_funded(self, trade_id: str):
+        """
+        Notifies the maker that the taker has funded the trade contract.
+        The maker then knows that the trade state is "ONGOING" and the exchange of goods can begin.
+        """
+        trade = self._trades[trade_id]
+        maker_pubkey = trade.trade_participants.maker.pubkey
+        msg = {
+            "method": TradeRPC.TRADE_FUNDED.value,
+            "trade_id": trade_id,
+        }
+        # the event can't be ephemeral as the maker might not be online to receive it. so we set an
+        # expiration of self.DIRECT_MESSAGE_EXPIRATION_SEC which should be longer than any sane trade duration
+        self.nostr_worker.send_encrypted_direct_message(
+            cleartext_content=msg,
+            recipient_pubkey=maker_pubkey,
+            expiration_duration=self.DIRECT_MESSAGE_EXPIRATION_SEC,
+            signing_key=self.nostr_identity_private_key,
+        )
+
+    def _add_new_trade(self, trade: AgentEscrowTrade) -> str:
+        """
+        Evicts oldest unfunded trade if MAX_AMOUNT_PENDING_TRADES is exceeded.
+        Returns new trade id.
+        """
+        if len(self._pending_trades) >= self.MAX_AMOUNT_PENDING_TRADES:
+            oldest_key = min(self._pending_trades, key=lambda k: self._pending_trades[k].creation_timestamp)
+            funding_request_key = self._pending_trades[oldest_key].trade_participants.maker.funding_request_key
+            self.wallet.delete_request(funding_request_key)
+            del self._pending_trades[oldest_key]
+        trade_id = secrets.token_hex(32)
+        self._pending_trades[trade_id] = trade
+        return trade_id
+
+    def _cleanup_pending_trades(self):
+        """
+        Called on shutdown to delete all unfunded trades and their payment requests.
+        This is done to prevent funding requests from getting paid after restart when we have
+        no associated trade for it anymore.
+        """
+        for trade in self._pending_trades.values():
+            funding_request_key = trade.trade_participants.maker.funding_request_key
+            self.wallet.delete_request(funding_request_key)
+        self._pending_trades.clear()
+
+    async def _cleanup_pending_trades_funding_expired(self):
+        """
+        Delete pending trades for which the funding invoice has expired before the maker paid it.
+        Maker invoices are supposed to be very short-lived, so this should keep the dict tidy and clean.
+        """
+        while True:
+            await asyncio.sleep(30)
+            for trade_id, trade in list(self._pending_trades.items()):
+                funding_req_key = trade.trade_participants.maker.funding_request_key
+                req = self.wallet.get_request(funding_req_key)
+                if req.has_expired():
+                    self.wallet.delete_request(funding_req_key)
+                    del self._pending_trades[trade_id]
 
     async def _handle_requests(self):
         query = {
@@ -70,8 +202,10 @@ class EscrowAgent(EscrowWorker):
                     await asyncio.sleep(10)  # query job got canceled, maybe proxy changed
                     break
                 assert isinstance(event, nEvent)
+                pubkey = event.pubkey
+                id = event.id
                 try:
-                    content = privkey.decrypt_message(event.content, event.pubkey)
+                    content = privkey.decrypt_message(event.content, pubkey)
                     content = json.loads(content)
                     if not isinstance(content, dict):
                         raise Exception("malformed content, not dict")
@@ -79,41 +213,52 @@ class EscrowAgent(EscrowWorker):
                     continue
 
                 # todo: some priority queue prioritizing existing trade rpcs over new trade rpcs would be nice
-                method = content.get('method')
-                match method:
-                    case 'register_escrow':
-                        self._handle_register_escrow(content)
-                    case 'collaborative_confirm':
-                        self._handle_collaborative_confirm(content)
-                    case 'collaborative_cancel':
-                        self._handle_collaborative_cancel(content)
-                    case 'handle_mediation':
-                        self._handle_request_mediation(content)
-                    case _:
-                        continue
+                try:
+                    method = TradeRPC(content.get('method'))
+                except ValueError:
+                    continue
 
-    def _handle_register_escrow(self, request: dict):
+                match method:
+                    case TradeRPC.REGISTER_ESCROW:
+                        self._handle_register_escrow(content, pubkey, id)
+                    case TradeRPC.ACCEPT_ESCROW:
+                        self._handle_accept_escrow(content, pubkey, id)
+                    case TradeRPC.COLLABORATIVE_CONFIRM:
+                        self._handle_collaborative_confirm(content, pubkey, id)
+                    case TradeRPC.COLLABORATIVE_CANCEL:
+                        self._handle_collaborative_cancel(content, pubkey, id)
+                    case TradeRPC.REQUEST_MEDIATION:
+                        self._handle_request_mediation(content, pubkey, id)
+                    case _:
+                        raise NotImplementedError()
+
+    def _handle_register_escrow(self, request: dict, sender_pubkey: str, request_event_id: str):
         """
-        Each trade participant should call this once.
-        First call is the maker, second call is the taker.
+        The maker trade should call this to register a new escrow contract.
         """
         pass
 
-    def _handle_collaborative_confirm(self, request: dict):
+    def _handle_accept_escrow(self, request: dict, sender_pubkey: str, request_event_id: str):
+        """
+        Sent by taker to accept an escrow contract the maker has previously registered.
+        """
+        pass
+
+    def _handle_collaborative_confirm(self, request: dict, sender_pubkey: str, request_event_id: str):
         """
         Once both trade parties called this the trade is marked done. Bond and amount have
         to get paid back to the trade participants.
         """
         pass
 
-    def _handle_collaborative_cancel(self, request: dict):
+    def _handle_collaborative_cancel(self, request: dict, sender_pubkey: str, request_event_id: str):
         """
         If only one participant is registered yet the trade gets canceled.
         If both are registered already both have to request collaborative cancel to cancel the trade.
         """
         pass
 
-    def _handle_request_mediation(self, request: dict):
+    def _handle_request_mediation(self, request: dict, sender_pubkey: str, request_event_id: str):
         """
         Can be called unilaterally, if one party requests this the trade goes in mediation mode.
         Now the traders have to contact the agent out of band (e.g. Signal) and the agent has to decide
@@ -121,7 +266,7 @@ class EscrowAgent(EscrowWorker):
         """
         pass
 
-    def _register_payout_invoice(self, *, b11_invoice: str, expected_amount_sat: int):
+    def _register_payout_invoice(self, *, b11_invoice: str, expected_amount_sat: int, request_event_id: str):
         """
         Register an invoice to be paid. Will immediately try to get this invoice paid.
         WARNING: Validate before that we haven't already paid the user requesting payout.
