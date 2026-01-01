@@ -31,7 +31,7 @@ from .escrow import EscrowPlugin
 from .wizard import EscrowWizard
 from .agent import EscrowAgentProfile, EscrowAgent
 from .client import EscrowClient
-from .escrow_worker import TradePaymentProtocol
+from .escrow_worker import TradePaymentProtocol, TradePaymentDirection
 
 if TYPE_CHECKING:
     from electrum.gui.qt.main_window import ElectrumWindow
@@ -55,15 +55,11 @@ class EscrowType(Enum):
     TAKE = 2
 
 
-class PaymentDirection(Enum):
-    SENDING = 1
-    RECEIVING = 2
-
-
 class WCCreateTrade(WizardComponent):
     def __init__(self, parent, wizard: 'EscrowWizardDialog'):
         super().__init__(parent, wizard, title=_("Create Trade"))
         self.wizard = wizard
+        self.worker = self.wizard.plugin.get_escrow_worker(self.wizard.window.wallet, worker_type=EscrowClient)
 
         layout = self.layout()
         assert isinstance(layout, QVBoxLayout), type(layout)
@@ -73,6 +69,7 @@ class WCCreateTrade(WizardComponent):
         # Title
         grid.addWidget(QLabel(_("Title:")), 0, 0)
         self.title_edit = QLineEdit()
+        self.title_edit.setMaxLength(self.worker.MAX_TITLE_LEN_CHARS)
         self.title_edit.setPlaceholderText(_("Enter a short trade description..."))
         self.title_edit.textChanged.connect(self.validate)
         grid.addWidget(self.title_edit, 0, 1, 1, 3)
@@ -131,8 +128,8 @@ class WCCreateTrade(WizardComponent):
 
     def _limit_contract_length(self):
         text = self.contract_edit.toPlainText()
-        if len(text) > self.wizard.plugin.MAX_CONTRACT_LEN_CHARS:
-            self.contract_edit.setPlainText(text[:self.wizard.plugin.MAX_CONTRACT_LEN_CHARS])
+        if len(text) > self.worker.MAX_CONTRACT_LEN_CHARS:
+            self.contract_edit.setPlainText(text[:self.worker.MAX_CONTRACT_LEN_CHARS])
             cursor = self.contract_edit.textCursor()
             cursor.movePosition(cursor.MoveOperation.End)
             self.contract_edit.setTextCursor(cursor)
@@ -143,15 +140,13 @@ class WCCreateTrade(WizardComponent):
         return TradePaymentProtocol.BITCOIN_LIGHTNING
 
     @property
-    def payment_direction(self) -> PaymentDirection:
-        if self.direction_cb.currentIndex() == 0:
-            return PaymentDirection.RECEIVING
-        return PaymentDirection.SENDING
+    def payment_direction(self) -> TradePaymentDirection:
+        return TradePaymentDirection(self.direction_cb.currentIndex())
 
     @property
     def total_send_amount(self) -> int:
         trade_amount = self.amount_e.get_amount() or 0
-        if self.payment_direction == PaymentDirection.SENDING:
+        if self.payment_direction == TradePaymentDirection.SENDING:
             return trade_amount
         else:
             bond_percentage = self.bond_percentage_sb.value()
@@ -167,7 +162,8 @@ class WCCreateTrade(WizardComponent):
         else:
             liquidity_valid = True  # todo: _check_onchain_balance
 
-        is_valid = bool(title) and bool(contract) and (amount is not None and amount > 0) and liquidity_valid
+        min_amount = self.worker.MIN_TRADE_AMOUNT_SAT
+        is_valid = bool(title) and bool(contract) and (amount is not None and amount > min_amount) and liquidity_valid
         self.valid = is_valid
         self._maybe_show_warning()
 
@@ -180,12 +176,16 @@ class WCCreateTrade(WizardComponent):
             return _("You cannot send this amount with your Lightning channels. Please open a larger Lightning channel or "
                       "do a submarine swap in the 'Channels' tab to increase your outgoing liquidity. "
                       "You can send: {}").format(self.wizard.window.format_amount_and_units(can_send))
-        if self.payment_direction == PaymentDirection.RECEIVING:
+        if self.payment_direction == TradePaymentDirection.RECEIVING:
             can_receive = self.wizard.window.wallet.lnworker.num_sats_can_receive() or 0
             if can_receive < (self.amount_e.get_amount() or 0):
                 return _("You cannot receive this amount with your Lightning channels. Please do a "
                       "submarine swap in the 'Channels' tab to increase your incoming liquidity. "
                       "You can receive: {}").format(self.wizard.window.format_amount_and_units(can_receive))
+        amount = self.amount_e.get_amount()
+        min_amount = self.worker.MIN_TRADE_AMOUNT_SAT
+        if amount and amount < min_amount:
+            return _("Trade amount too small. Minimal trade amount: {}").format(self.wizard.window.format_amount_and_units(amount))
         return None
 
     def _maybe_show_warning(self):
@@ -204,7 +204,7 @@ class WCCreateTrade(WizardComponent):
     def apply(self):
         self.wizard_data['title'] = self.title_edit.text().strip()
         self.wizard_data['contract'] = self.contract_edit.toPlainText().strip()
-        self.wizard_data['amount_sat'] = self.amount_e.get_amount()
+        self.wizard_data['trade_amount_sat'] = self.amount_e.get_amount()
         self.wizard_data['bond_percent'] = self.bond_percentage_sb.value()
         self.wizard_data['payment_direction'] = self.payment_direction
         self.wizard_data['payment_protocol'] = self.trade_payment_protocol
