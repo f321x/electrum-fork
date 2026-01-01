@@ -2,23 +2,30 @@ import asyncio
 import dataclasses
 import time
 import json
+import secrets
 from collections import defaultdict
 from typing import TYPE_CHECKING, Mapping, Optional
 from types import MappingProxyType
 
 from electrum_aionostr.event import Event as nEvent
+from electrum_aionostr.key import PrivateKey
 
-from electrum.util import OldTaskGroup, is_valid_websocket_url
+from electrum.util import OldTaskGroup, is_valid_websocket_url, UserFacingException, InvoiceError
 from electrum import constants
+from electrum.i18n import _
+from electrum.invoices import PR_PAID, Invoice
 
-from .escrow_worker import EscrowWorker, EscrowAgentProfile
+from .escrow_worker import (
+    EscrowWorker, EscrowAgentProfile, TradeContract, TradePaymentDirection,
+    TradePaymentProtocol, TradeRPC, TradeState,
+)
 from .nostr_worker import EscrowNostrWorker
 from .nostr_worker import NostrJobID
 
 if TYPE_CHECKING:
     from electrum.wallet import Abstract_Wallet
 
-@dataclasses.dataclass
+@dataclasses.dataclass(kw_only=True)
 class EscrowAgentInfo:
     profile_info: Optional[EscrowAgentProfile] = None
     inbound_liquidity: Optional[int] = None
@@ -36,12 +43,37 @@ class EscrowAgentInfo:
         return age // 60
 
 
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class ClientEscrowTrade:
+    state: TradeState
+    contract: TradeContract
+    payment_direction: TradePaymentDirection
+    payment_protocol: TradePaymentProtocol
+    onchain_fallback_address: str
+    escrow_agent_pubkey: str
+    trade_protocol_version: int
+    creation_timestamp: int = dataclasses.field(default_factory=lambda: int(time.time()))
+    funding_invoice_key: Optional[str] = None
+    private_key: Optional[str] = None
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class TradeCreationResponse:
+    """Response sent by escrow agent for register_escrow"""
+    trade_id: str
+    funding_invoice: Invoice
+
+
 class EscrowClient(EscrowWorker):
 
     def __init__(self, wallet: 'Abstract_Wallet', nostr_worker: 'EscrowNostrWorker', storage: dict):
         EscrowWorker.__init__(self, wallet, nostr_worker, storage)
         self.agent_infos = defaultdict(EscrowAgentInfo)  # type: defaultdict[str, EscrowAgentInfo]
         self.fetch_job_id = None  # type: Optional[NostrJobID]
+
+        if 'trades' not in storage:
+            storage['trades'] = {}
+        self._trades = {}  # type: dict[str, Any]
 
     async def main_loop(self):
         self.logger.debug(f"escrow client started: {self.wallet.basename()}")
@@ -181,3 +213,86 @@ class EscrowClient(EscrowWorker):
         if agent_pubkey in agents:
             agents.remove(agent_pubkey)
             self.reload_agents()
+
+    def get_new_privkey_for_trade(self) -> PrivateKey:
+        """
+        Returns a new private key to be used for the next trade.
+        Key reuse can occur if trades get deleted or the user lost their db state.
+        Key reuse should only affect privacy.
+        """
+        # todo: this doesn't seem great, however it allows to access trade keys again after losing the
+        #       wallet db which is probably worth the potential privacy tradeoff?
+        key_id = len(self._trades)
+        privkey = self.nostr_worker.get_nostr_privkey_for_wallet(self.wallet, key_id=key_id)
+        return privkey
+
+    def save_new_trade(self, trade_id: str, trade: ClientEscrowTrade):
+        assert trade_id not in self._trades, "trade already saved"
+        assert trade.funding_invoice_key, "funding invoice key missing"
+        invoice = self.wallet.get_invoice(trade.funding_invoice_key)
+        assert isinstance(invoice, Invoice)
+        assert self.wallet.get_invoice_status(invoice) == PR_PAID, "Funding still unpaid"
+        self._trades[trade_id] = trade
+        self.wallet.save_db()
+
+    async def request_register_escrow(
+        self,
+        trade: ClientEscrowTrade,
+    ) -> tuple[ClientEscrowTrade, TradeCreationResponse]:
+        """
+        Returns mutated trade and the response.
+        """
+        privkey = self.get_new_privkey_for_trade()
+
+        req_payload = {
+            "method": TradeRPC.REGISTER_ESCROW.value,
+            "title": trade.contract.title,
+            "contract": trade.contract.contract,
+            "onchain_fallback_address": trade.onchain_fallback_address,
+            "payment_protocol": trade.payment_protocol.value,
+            "payment_network": constants.net.NET_NAME,
+            "trade_protocol_version": trade.trade_protocol_version,
+            "trade_amount_sat": trade.contract.trade_amount_sat,
+            "bond_amount_sat": trade.contract.bond_sat,
+            "contract_signature": trade.contract.sign(privkey_hex=privkey.hex()),
+            "payment_direction": trade.payment_direction.value,
+        }
+
+        try:
+            response = await self.nostr_worker.send_encrypted_ephemeral_message_and_await_response(
+                cleartext_content=req_payload,
+                recipient_pubkey=trade.escrow_agent_pubkey,
+                signing_key=privkey,
+                timeout_sec=30,
+            )
+        except TimeoutError:
+            raise UserFacingException(_("Timeout while waiting for agent response."))
+        except ValueError as e:
+            raise UserFacingException(f"Invalid response: {str(e)}")
+
+        error = response.get("error")
+        if error is not None:
+            raise UserFacingException(f"Received error from escrow agent: {error}")
+
+        trade_id = response.get("trade_id")
+        if not trade_id:
+            raise UserFacingException(f"Invalid response: missing trade_id")
+
+        if trade.payment_protocol == TradePaymentProtocol.BITCOIN_LIGHTNING:
+            b11_invoice = response.get("bolt11_invoice")
+            if not b11_invoice:
+                raise UserFacingException(f"Invalid response: missing funding invoice")
+        else:
+            raise NotImplementedError("Unsupported payment protocol")
+
+        try:
+            invoice = Invoice.from_bech32(b11_invoice)
+        except InvoiceError:
+            raise UserFacingException(f"Invalid lightning invoice")
+
+        if self.wallet.get_invoice(invoice.get_id()):
+            raise UserFacingException(f"Got invoice we already know")
+
+        response = TradeCreationResponse(trade_id=trade_id, funding_invoice=invoice)
+        trade = dataclasses.replace(trade, funding_invoice_key=invoice.get_id(), private_key=privkey.hex())
+        return trade, response
