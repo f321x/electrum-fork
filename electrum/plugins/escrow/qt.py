@@ -27,10 +27,11 @@ from electrum.gui.qt.wizard.wizard import QEAbstractWizard, WizardComponent
 from electrum.wizard import WizardViewState
 from electrum.keystore import MasterPublicKeyMixin
 
-from .escrow import EscrowPlugin, TradePaymentProtocol
+from .escrow import EscrowPlugin
 from .wizard import EscrowWizard
 from .agent import EscrowAgentProfile, EscrowAgent
 from .client import EscrowClient
+from .escrow_worker import TradePaymentProtocol
 
 if TYPE_CHECKING:
     from electrum.gui.qt.main_window import ElectrumWindow

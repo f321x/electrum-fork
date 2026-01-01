@@ -1,8 +1,6 @@
 from typing import Optional, TYPE_CHECKING, Dict, Type
-from dataclasses import dataclass
 from enum import Enum
 
-from electrum.i18n import _
 from electrum.plugin import BasePlugin, hook
 
 from .nostr_worker import EscrowNostrWorker
@@ -16,50 +14,9 @@ if TYPE_CHECKING:
     from .escrow_worker import EscrowWorker
 
 
-class TradeState(Enum):
-    SETUP = 0
-    ONGOING = 1
-    MEDIATION = 2
-    FINISHED = 3
-
-    def __str__(self):
-        return {
-            self.SETUP: _("Setup"),
-            self.ONGOING: _("Ongoing"),
-            self.MEDIATION: _("Mediation"),
-            self.FINISHED: _("Finished"),
-        }[self]
-
-
-class TradePaymentProtocol(Enum):
-    BITCOIN_ONCHAIN = 0
-    BITCOIN_LIGHTNING = 1
-
-
 class StoragePurpose(Enum):
     AGENT_DATA = 'agent_data'
     CLIENT_DATA = 'client_data'
-
-
-@dataclass(frozen=True)
-class TradeParticipants:
-    maker_pubkey: str
-    taker_pubkey: str
-    escrow_agent_pubkey: str
-
-
-@dataclass(frozen=True)
-class EscrowTrade:
-    trade_id: str  # random hex string as unique id
-    state: TradeState
-    trade_participants: TradeParticipants
-    title: str
-    contract: str
-    trade_amount_sat: int
-    # the bond ensures both participants have something to lose
-    bond_sat: int
-    payment_protocol: TradePaymentProtocol
-    payment_network: str  #  AbstractNet.NET_NAME
 
 
 class EscrowPlugin(BasePlugin):
