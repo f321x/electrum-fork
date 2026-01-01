@@ -16,8 +16,11 @@ from electrum.i18n import _
 from electrum.invoices import PR_PAID, Invoice
 
 from .escrow_worker import (
-    EscrowWorker, EscrowAgentProfile, TradeContract, TradePaymentDirection,
-    TradePaymentProtocol, TradeRPC, TradeState,
+    EscrowWorker, EscrowAgentProfile, TradeContract
+)
+from . import constants as escrow_constants
+from .constants import (
+    TradePaymentDirection, TradePaymentProtocol, TradeRPC, TradeState
 )
 from .nostr_worker import EscrowNostrWorker
 from .nostr_worker import NostrJobID
@@ -87,9 +90,9 @@ class EscrowClient(EscrowWorker):
 
     async def _fetch_agent_events(self):
         event_kinds = [
-            self.nostr_worker.AGENT_STATUS_EVENT_KIND,
-            self.nostr_worker.AGENT_PROFILE_EVENT_KIND,
-            self.nostr_worker.AGENT_RELAY_LIST_METADATA_KIND,
+            escrow_constants.AGENT_STATUS_EVENT_KIND,
+            escrow_constants.AGENT_PROFILE_EVENT_KIND,
+            escrow_constants.AGENT_RELAY_LIST_METADATA_KIND,
         ]
         event_queue = asyncio.Queue(maxsize=1000)
         while True:
@@ -122,11 +125,11 @@ class EscrowClient(EscrowWorker):
                             continue
 
                 match event.kind:
-                    case self.nostr_worker.AGENT_PROFILE_EVENT_KIND:
+                    case escrow_constants.AGENT_PROFILE_EVENT_KIND:
                         self._handle_escrow_agent_profile(event)
-                    case self.nostr_worker.AGENT_STATUS_EVENT_KIND:
+                    case escrow_constants.AGENT_STATUS_EVENT_KIND:
                         self._handle_escrow_agent_status(event)
-                    case self.nostr_worker.AGENT_RELAY_LIST_METADATA_KIND:
+                    case escrow_constants.AGENT_RELAY_LIST_METADATA_KIND:
                         self._handle_escrow_agent_relay_list(event)
                     case _:
                         self.logger.debug(f"got unwanted nostr event kind: {event.kind}")
@@ -230,7 +233,7 @@ class EscrowClient(EscrowWorker):
         assert trade_id not in self._trades, "trade already saved"
         assert trade.funding_invoice_key, "funding invoice key missing"
         invoice = self.wallet.get_invoice(trade.funding_invoice_key)
-        assert isinstance(invoice, Invoice)
+        assert isinstance(invoice, Invoice), type(invoice)
         assert self.wallet.get_invoice_status(invoice) == PR_PAID, "Funding still unpaid"
         self._trades[trade_id] = trade
         self.wallet.save_db()

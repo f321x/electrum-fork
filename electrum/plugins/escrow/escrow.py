@@ -26,6 +26,7 @@ class EscrowPlugin(BasePlugin):
     # todo: telegram bot notification
     # todo: onchain support (with taproot)
     # todo: verifiable 'first seen' with OTS
+    # fixme: starting plugin first time after enabling raises as wallet loaded callback isn't called
 
     def __init__(self, parent, config: 'SimpleConfig', name):
         BasePlugin.__init__(self, parent, config, name)
