@@ -274,6 +274,27 @@ class EscrowNostrWorker(Logger, EventListener):
         )
         self._broadcast_event(event)
 
+    def send_encrypted_ephemeral_message(
+        self,
+        *,
+        cleartext_content: dict,
+        recipient_pubkey: str,
+        response_to_id: Optional[str] = None,
+        signing_key: PrivateKey,
+    ):
+        cleartext_msg = json.dumps(cleartext_content)
+        encrypted_content = signing_key.encrypt_message(cleartext_msg, recipient_pubkey)
+        tags = [['p', recipient_pubkey]]
+        if response_to_id:
+            tags.append(['e', response_to_id])
+        event = self._prepare_event(
+            kind=self.EPHEMERAL_REQUEST_EVENT_KIND,
+            content=encrypted_content,
+            tags=tags,
+            signing_key=signing_key,
+        )
+        self._broadcast_event(event)
+
     def broadcast_agent_status_event(self, *, content: dict, tags: list, signing_key: PrivateKey) -> None:
         event = self._prepare_event(
             kind=self.AGENT_STATUS_EVENT_KIND,

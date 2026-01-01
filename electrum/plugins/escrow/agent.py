@@ -10,9 +10,11 @@ from electrum_aionostr.event import Event as nEvent
 from electrum.util import OldTaskGroup, InvoiceError, EventListener, event_listener
 from electrum import constants
 from electrum.invoices import Invoice, PR_PAID
+from electrum.bitcoin import is_address
 
 from .escrow_worker import (
     EscrowWorker, EscrowAgentProfile, TradeState, TradePaymentProtocol, TradeRPC, TradeContract,
+    TradePaymentDirection,
 )
 
 if TYPE_CHECKING:
@@ -51,6 +53,7 @@ class EscrowAgent(EscrowWorker, EventListener):
     PAYOUT_TIMEOUT_SEC = 7_776_000
     PAYOUT_INTERVAL_SEC = 1800  # how often we try to pay out an invoice
     MAX_AMOUNT_PENDING_TRADES = 200  # how many pending (unfunded) trades we keep in memory until evicting the oldest one
+    SUPPORTED_PAYMENT_PROTOCOLS = [TradePaymentProtocol.BITCOIN_LIGHTNING]
 
     def __init__(self, wallet: 'Abstract_Wallet', nostr_worker: 'EscrowNostrWorker', storage: dict):
         EscrowWorker.__init__(self, wallet, nostr_worker, storage)
@@ -188,7 +191,7 @@ class EscrowAgent(EscrowWorker, EventListener):
             "kinds": [self.nostr_worker.EPHEMERAL_REQUEST_EVENT_KIND],
             "#p": [self.nostr_identity_private_key.public_key.hex()],
             "#r": [f"net:{constants.net.NET_NAME}"],
-            "#d": [f"electrum-escrow-plugin-{self.NOSTR_PROTOCOL_VERSION}"],
+            "#d": [f"electrum-escrow-plugin-{self.PROTOCOL_VERSION}"],
             "limit": 0,
         }
         privkey = self.nostr_identity_private_key
@@ -236,7 +239,103 @@ class EscrowAgent(EscrowWorker, EventListener):
         """
         The maker trade should call this to register a new escrow contract.
         """
-        pass
+        try:
+            title = request.get("title")
+            if not title or len(title) > self.MAX_TITLE_LEN_CHARS:
+                raise ValueError("invalid title")
+
+            contract = request.get("contract")
+            if not contract or len(contract) > self.MAX_CONTRACT_LEN_CHARS:
+                raise ValueError("invalid contract")
+
+            onchain_fallback_address = request.get("onchain_fallback_address")
+            if not onchain_fallback_address or not is_address(onchain_fallback_address):
+                raise ValueError("invalid onchain fallback address")
+
+            payment_protocol = TradePaymentProtocol(request.get("payment_protocol"))
+            if payment_protocol not in self.SUPPORTED_PAYMENT_PROTOCOLS:
+                raise ValueError("unsupported payment_protocol")
+
+            payment_network = request.get("payment_network")
+            if payment_network != constants.net.NET_NAME:
+                raise ValueError("invalid payment_network")
+
+            trade_protocol = request.get("trade_protocol_version")
+            if trade_protocol != self.PROTOCOL_VERSION:
+                raise ValueError(f"invalid trade_protocol_version: {trade_protocol} != {self.PROTOCOL_VERSION}")
+
+            trade_amount_sat = request.get("trade_amount_sat")
+            if not trade_amount_sat or trade_amount_sat < self.MIN_TRADE_AMOUNT_SAT:
+                raise ValueError(f"no or too small trade_amount_sat: {self.MIN_TRADE_AMOUNT_SAT=}")
+
+            bond_percentage = request.get("bond_percent")
+            if bond_percentage is None:
+                raise ValueError("bond_percent is missing")
+
+            bond_amount_sat = (bond_percentage * trade_amount_sat) // 100
+
+            contract = TradeContract(
+                title=title,
+                contract=contract,
+                trade_amount_sat=trade_amount_sat,
+                bond_sat=bond_amount_sat,
+            )
+
+            signature = request.get('contract_signature')
+            if not signature or not contract.verify(sig_hex=signature, pubkey_hex=sender_pubkey):
+                raise ValueError("invalid contract_signature")
+
+            payment_direction = TradePaymentDirection(request.get('payment_direction'))
+
+            # Create funding invoice
+            message = f"Escrow funding: {contract.title}"
+            amount_sat = trade_amount_sat if payment_direction.SENDING else bond_amount_sat
+            req_key = self.wallet.create_request(
+                amount_sat=amount_sat,
+                message=message,
+                exp_delay=600,  # 10 min, the maker should pay right away in the wizard
+                address=None
+            )
+            req = self.wallet.get_request(req_key)
+            bolt11 = self.wallet.get_bolt11_invoice(req)
+
+            maker = TradeParticipant(
+                pubkey=sender_pubkey,
+                funding_request_key=req_key,
+                onchain_fallback_address=onchain_fallback_address,
+                contract_signature=signature,
+            )
+
+            trade = AgentEscrowTrade(
+                state=TradeState.WAITING_FOR_TAKER,
+                trade_participants=TradeParticipants(maker=maker),
+                contract=contract,
+                payment_protocol=payment_protocol,
+                trade_protocol_version=trade_protocol,
+            )
+
+            trade_id = self._add_new_trade(trade)
+
+            response = {
+                "trade_id": trade_id,
+                "invoice": bolt11,
+            }
+
+            self.nostr_worker.send_encrypted_ephemeral_message(
+                cleartext_content=response,
+                recipient_pubkey=sender_pubkey,
+                signing_key=self.nostr_identity_private_key,
+                response_to_id=request_event_id,
+            )
+            self.logger.info(f"Registered new trade {trade_id} for {sender_pubkey}")
+        except Exception as e:
+            self.logger.error(f"Failed to register escrow: {repr(e)}")
+            self.nostr_worker.send_encrypted_ephemeral_message(
+                cleartext_content={"error": str(e)},
+                recipient_pubkey=sender_pubkey,
+                signing_key=self.nostr_identity_private_key,
+                response_to_id=request_event_id,
+            )
 
     def _handle_accept_escrow(self, request: dict, sender_pubkey: str, request_event_id: str):
         """
@@ -334,7 +433,7 @@ class EscrowAgent(EscrowWorker, EventListener):
         if profile_data.website:
             content["website"] = profile_data.website
         tags = [
-            ['d', f'electrum-escrow-plugin-{str(self.NOSTR_PROTOCOL_VERSION)}'],
+            ['d', f'electrum-escrow-plugin-{str(self.PROTOCOL_VERSION)}'],
             ['r', 'net:' + constants.net.NET_NAME],
         ]
         self.nostr_worker.broadcast_agent_profile_event(
@@ -381,7 +480,7 @@ class EscrowAgent(EscrowWorker, EventListener):
         """
         await asyncio.sleep(30)  # wait for channel reestablish on startup, otherwise we announce 0 liquidity
         tags = [
-            ['d', f'electrum-escrow-plugin-{str(self.NOSTR_PROTOCOL_VERSION)}'],
+            ['d', f'electrum-escrow-plugin-{str(self.PROTOCOL_VERSION)}'],
             ['r', 'net:' + constants.net.NET_NAME],
         ]
         while True:

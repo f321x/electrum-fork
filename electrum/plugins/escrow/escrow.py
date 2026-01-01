@@ -20,7 +20,6 @@ class StoragePurpose(Enum):
 
 
 class EscrowPlugin(BasePlugin):
-    MAX_CONTRACT_LEN_CHARS = 2000
     ICON_FILE_NAME = "escrow-icon.png"
     # todo: check compatibility with electrum version
     # todo: check for plugin updates (nostr)
