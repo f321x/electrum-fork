@@ -13,8 +13,15 @@ from electrum.invoices import Invoice, PR_PAID
 from electrum.bitcoin import is_address
 
 from .escrow_worker import (
-    EscrowWorker, EscrowAgentProfile, TradeState, TradePaymentProtocol, TradeRPC, TradeContract,
-    TradePaymentDirection,
+    EscrowWorker, EscrowAgentProfile, TradeContract
+)
+from .constants import (
+    STATUS_EVENT_INTERVAL_SEC, PROFILE_EVENT_INTERVAL_SEC, RELAY_EVENT_INTERVAL_SEC,
+    DIRECT_MESSAGE_EXPIRATION_SEC, PAYOUT_TIMEOUT_SEC, PAYOUT_INTERVAL_SEC,
+    MAX_AMOUNT_PENDING_TRADES, SUPPORTED_PAYMENT_PROTOCOLS, PROTOCOL_VERSION,
+    TradeState, TradePaymentProtocol, TradeRPC, TradePaymentDirection,
+    MAX_TITLE_LEN_CHARS, MAX_CONTRACT_LEN_CHARS, MIN_TRADE_AMOUNT_SAT,
+    EPHEMERAL_REQUEST_EVENT_KIND,
 )
 
 if TYPE_CHECKING:
@@ -29,10 +36,16 @@ class TradeParticipant:
     onchain_fallback_address: str  # so we can refund/payout onchain in case lightning fails
     contract_signature: str  # signature over 'ESCROW'|title|contract|trade_amount|bond_amount
 
+    def to_json(self):
+        return dataclasses.asdict(self)
+
 @dataclasses.dataclass
 class TradeParticipants:
     maker: TradeParticipant
     taker: Optional[TradeParticipant] = None
+
+    def to_json(self):
+        return dataclasses.asdict(self)
 
 @dataclasses.dataclass
 class AgentEscrowTrade:
@@ -43,18 +56,11 @@ class AgentEscrowTrade:
     trade_protocol_version: int
     creation_timestamp: int = dataclasses.field(default_factory=lambda: int(time.time()))
 
+    def to_json(self):
+        return dataclasses.asdict(self)
+
 
 class EscrowAgent(EscrowWorker, EventListener):
-    STATUS_EVENT_INTERVAL_SEC = 1800  # 30 min
-    PROFILE_EVENT_INTERVAL_SEC = 1_209_600  # 2 weeks
-    RELAY_EVENT_INTERVAL_SEC = 1_209_800  # 2 weeks
-    DIRECT_MESSAGE_EXPIRATION_SEC = 15_552_000  # 6 months
-    # ~3m, time after which we give up to pay a customer and just keep their money, they can contact out of band
-    PAYOUT_TIMEOUT_SEC = 7_776_000
-    PAYOUT_INTERVAL_SEC = 1800  # how often we try to pay out an invoice
-    MAX_AMOUNT_PENDING_TRADES = 200  # how many pending (unfunded) trades we keep in memory until evicting the oldest one
-    SUPPORTED_PAYMENT_PROTOCOLS = [TradePaymentProtocol.BITCOIN_LIGHTNING]
-
     def __init__(self, wallet: 'Abstract_Wallet', nostr_worker: 'EscrowNostrWorker', storage: dict):
         EscrowWorker.__init__(self, wallet, nostr_worker, storage)
         assert wallet.has_lightning(), "Wallet needs lightning support"
@@ -139,11 +145,11 @@ class EscrowAgent(EscrowWorker, EventListener):
             "trade_id": trade_id,
         }
         # the event can't be ephemeral as the maker might not be online to receive it. so we set an
-        # expiration of self.DIRECT_MESSAGE_EXPIRATION_SEC which should be longer than any sane trade duration
+        # expiration of DIRECT_MESSAGE_EXPIRATION_SEC which should be longer than any sane trade duration
         self.nostr_worker.send_encrypted_direct_message(
             cleartext_content=msg,
             recipient_pubkey=maker_pubkey,
-            expiration_duration=self.DIRECT_MESSAGE_EXPIRATION_SEC,
+            expiration_duration=DIRECT_MESSAGE_EXPIRATION_SEC,
             signing_key=self.nostr_identity_private_key,
         )
 
@@ -152,7 +158,7 @@ class EscrowAgent(EscrowWorker, EventListener):
         Evicts oldest unfunded trade if MAX_AMOUNT_PENDING_TRADES is exceeded.
         Returns new trade id.
         """
-        if len(self._pending_trades) >= self.MAX_AMOUNT_PENDING_TRADES:
+        if len(self._pending_trades) >= MAX_AMOUNT_PENDING_TRADES:
             oldest_key = min(self._pending_trades, key=lambda k: self._pending_trades[k].creation_timestamp)
             funding_request_key = self._pending_trades[oldest_key].trade_participants.maker.funding_request_key
             self.wallet.delete_request(funding_request_key)
@@ -188,10 +194,10 @@ class EscrowAgent(EscrowWorker, EventListener):
 
     async def _handle_requests(self):
         query = {
-            "kinds": [self.nostr_worker.EPHEMERAL_REQUEST_EVENT_KIND],
+            "kinds": [EPHEMERAL_REQUEST_EVENT_KIND],
             "#p": [self.nostr_identity_private_key.public_key.hex()],
             "#r": [f"net:{constants.net.NET_NAME}"],
-            "#d": [f"electrum-escrow-plugin-{self.PROTOCOL_VERSION}"],
+            "#d": [f"electrum-escrow-plugin-{PROTOCOL_VERSION}"],
             "limit": 0,
         }
         privkey = self.nostr_identity_private_key
@@ -240,11 +246,11 @@ class EscrowAgent(EscrowWorker, EventListener):
         """
         try:
             title = request.get("title")
-            if not title or len(title) > self.MAX_TITLE_LEN_CHARS:
+            if not title or len(title) > MAX_TITLE_LEN_CHARS:
                 raise ValueError("invalid title")
 
             contract = request.get("contract")
-            if not contract or len(contract) > self.MAX_CONTRACT_LEN_CHARS:
+            if not contract or len(contract) > MAX_CONTRACT_LEN_CHARS:
                 raise ValueError("invalid contract")
 
             onchain_fallback_address = request.get("onchain_fallback_address")
@@ -252,7 +258,7 @@ class EscrowAgent(EscrowWorker, EventListener):
                 raise ValueError("invalid onchain fallback address")
 
             payment_protocol = TradePaymentProtocol(request.get("payment_protocol"))
-            if payment_protocol not in self.SUPPORTED_PAYMENT_PROTOCOLS:
+            if payment_protocol not in SUPPORTED_PAYMENT_PROTOCOLS:
                 raise ValueError("unsupported payment_protocol")
 
             payment_network = request.get("payment_network")
@@ -260,12 +266,12 @@ class EscrowAgent(EscrowWorker, EventListener):
                 raise ValueError("invalid payment_network")
 
             trade_protocol = request.get("trade_protocol_version")
-            if trade_protocol != self.PROTOCOL_VERSION:
-                raise ValueError(f"invalid trade_protocol_version: {trade_protocol} != {self.PROTOCOL_VERSION}")
+            if trade_protocol != PROTOCOL_VERSION:
+                raise ValueError(f"invalid trade_protocol_version: {trade_protocol} != {PROTOCOL_VERSION}")
 
             trade_amount_sat = request.get("trade_amount_sat")
-            if not trade_amount_sat or trade_amount_sat < self.MIN_TRADE_AMOUNT_SAT:
-                raise ValueError(f"no or too small trade_amount_sat: {self.MIN_TRADE_AMOUNT_SAT=}")
+            if not trade_amount_sat or trade_amount_sat < MIN_TRADE_AMOUNT_SAT:
+                raise ValueError(f"no or too small trade_amount_sat: {MIN_TRADE_AMOUNT_SAT=}")
 
             bond_amount_sat = request.get("bond_amount_sat")
             if bond_amount_sat is None:
@@ -286,7 +292,7 @@ class EscrowAgent(EscrowWorker, EventListener):
 
             # Create funding invoice
             message = f"Escrow funding: {contract.title}"
-            amount_sat = trade_amount_sat if payment_direction.SENDING else bond_amount_sat
+            amount_sat = trade_amount_sat if payment_direction == TradePaymentDirection.SENDING else bond_amount_sat
             req_key = self.wallet.create_request(
                 amount_sat=amount_sat,
                 message=message,
@@ -362,7 +368,7 @@ class EscrowAgent(EscrowWorker, EventListener):
         """
         pass
 
-    def _register_payout_invoice(self, *, b11_invoice: str, expected_amount_sat: int, request_event_id: str):
+    def _register_payout_invoice(self, *, b11_invoice: str, expected_amount_sat: int):
         """
         Register an invoice to be paid. Will immediately try to get this invoice paid.
         WARNING: Validate before that we haven't already paid the user requesting payout.
@@ -393,8 +399,8 @@ class EscrowAgent(EscrowWorker, EventListener):
                     del self._lightning_invoices_to_pay[key]
                     continue
 
-                if int(time.time()) - invoice.time > self.PAYOUT_TIMEOUT_SEC:
-                    self.logger.warn(f"we didn't manage to pay invoice in {self.PAYOUT_TIMEOUT_SEC=}, giving up")
+                if int(time.time()) - invoice.time > PAYOUT_TIMEOUT_SEC:
+                    self.logger.warn(f"we didn't manage to pay invoice in {PAYOUT_TIMEOUT_SEC=}, giving up")
                     del self._lightning_invoices_to_pay[key]
                     continue
 
@@ -410,8 +416,8 @@ class EscrowAgent(EscrowWorker, EventListener):
             del self._lightning_invoices_to_pay[invoice.get_id()]
             return
         if not success:
-            self.logger.info(f'failed to pay {invoice.get_id()}, will retry in {self.PAYOUT_INTERVAL_SEC=}')
-            self._lightning_invoices_to_pay[invoice.get_id()] = int(time.time()) + self.PAYOUT_INTERVAL_SEC
+            self.logger.info(f'failed to pay {invoice.get_id()}, will retry in {PAYOUT_INTERVAL_SEC=}')
+            self._lightning_invoices_to_pay[invoice.get_id()] = int(time.time()) + PAYOUT_INTERVAL_SEC
         else:
             self.logger.info(f'paid invoice {invoice.get_id()}')
             del self._lightning_invoices_to_pay[invoice.get_id()]
@@ -430,7 +436,7 @@ class EscrowAgent(EscrowWorker, EventListener):
         if profile_data.website:
             content["website"] = profile_data.website
         tags = [
-            ['d', f'electrum-escrow-plugin-{str(self.PROTOCOL_VERSION)}'],
+            ['d', f'electrum-escrow-plugin-{str(PROTOCOL_VERSION)}'],
             ['r', 'net:' + constants.net.NET_NAME],
         ]
         self.nostr_worker.broadcast_agent_profile_event(
@@ -449,7 +455,7 @@ class EscrowAgent(EscrowWorker, EventListener):
             if profile_data:
                 profile = EscrowAgentProfile(**profile_data)
                 self.broadcast_profile_event(profile)
-            await asyncio.sleep(self.PROFILE_EVENT_INTERVAL_SEC)
+            await asyncio.sleep(PROFILE_EVENT_INTERVAL_SEC)
 
     async def _broadcast_relay_event(self):
         """
@@ -462,7 +468,7 @@ class EscrowAgent(EscrowWorker, EventListener):
             relays = self.wallet.config.get_nostr_relays()
             if relays:
                 # broadcast if our relays have changed or if timeout
-                if relays != previous_relays or (int(time.time()) - last_broadcast) > self.RELAY_EVENT_INTERVAL_SEC:
+                if relays != previous_relays or (int(time.time()) - last_broadcast) > RELAY_EVENT_INTERVAL_SEC:
                     previous_relays, last_broadcast = relays, int(time.time())
                     self.nostr_worker.broadcast_agent_relay_event(
                         relays=relays,
@@ -477,20 +483,20 @@ class EscrowAgent(EscrowWorker, EventListener):
         """
         await asyncio.sleep(30)  # wait for channel reestablish on startup, otherwise we announce 0 liquidity
         tags = [
-            ['d', f'electrum-escrow-plugin-{str(self.PROTOCOL_VERSION)}'],
+            ['d', f'electrum-escrow-plugin-{str(PROTOCOL_VERSION)}'],
             ['r', 'net:' + constants.net.NET_NAME],
         ]
         while True:
             content = {
                 'inbound_liquidity_sat': self._keep_leading_digits(self.wallet.lnworker.num_sats_can_receive() or 0, 2),
-                'outbound_liquidity_sat': self._keep_leading_digits(self.wallet.lnworker.num_sats_can_receive() or 0, 2),
+                'outbound_liquidity_sat': self._keep_leading_digits(self.wallet.lnworker.num_sats_can_send() or 0, 2),
             }
             self.nostr_worker.broadcast_agent_status_event(
                 content=content,
                 tags=tags,
                 signing_key=self.nostr_identity_private_key,
             )
-            await asyncio.sleep(self.STATUS_EVENT_INTERVAL_SEC)
+            await asyncio.sleep(STATUS_EVENT_INTERVAL_SEC)
 
     @staticmethod
     def _keep_leading_digits(num: int, digits: int) -> int:

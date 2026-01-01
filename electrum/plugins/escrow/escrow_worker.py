@@ -1,56 +1,18 @@
 import asyncio
-from enum import Enum
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 from abc import ABC, abstractmethod
 from concurrent.futures import Future, CancelledError
 
-from electrum_ecc import ECPubkey, ECPrivkey
+from electrum_aionostr.key import PrivateKey, PublicKey
 
 from electrum.util import get_asyncio_loop
 from electrum.logging import Logger
-from electrum.i18n import _
 from electrum.crypto import sha256
 
 if TYPE_CHECKING:
     from .nostr_worker import EscrowNostrWorker
     from electrum.wallet import Abstract_Wallet
-
-
-class TradeState(Enum):
-    WAITING_FOR_TAKER = 0
-    ONGOING = 1
-    MEDIATION = 2
-    FINISHED = 3
-    CANCELLED = 4
-
-    def __str__(self):
-        return {
-            self.WAITING_FOR_TAKER: _("Waiting for taker"),
-            self.ONGOING: _("Ongoing"),
-            self.MEDIATION: _("Mediation"),
-            self.FINISHED: _("Finished"),
-            self.CANCELLED: _("Cancelled"),
-        }[self]
-
-
-class TradePaymentProtocol(Enum):
-    BITCOIN_ONCHAIN = 0
-    BITCOIN_LIGHTNING = 1
-
-
-class TradePaymentDirection(Enum):
-    SENDING = 1
-    RECEIVING = 2
-
-
-class TradeRPC(Enum):
-    TRADE_FUNDED = "trade_funded"  # agent -> maker: "taker has funded"
-    REGISTER_ESCROW = "register_escrow"  # maker registers trade
-    ACCEPT_ESCROW = "accept_escrow"  # taker accepts trade
-    COLLABORATIVE_CONFIRM = "collaborative_confirm"
-    COLLABORATIVE_CANCEL = "collaborative_cancel"
-    REQUEST_MEDIATION = "request_mediation"
 
 
 @dataclass(frozen=True)
@@ -67,15 +29,15 @@ class TradeContract:
 
     def verify(self, *, sig_hex: str, pubkey_hex: str) -> bool:
         msg = self.contract_hash()
-        pubkey = ECPubkey(bytes.fromhex(pubkey_hex))
-        valid = pubkey.schnorr_verify(sig64=bytes.fromhex(sig_hex), msg32=bytes.fromhex(msg))
+        pubkey = PublicKey(bytes.fromhex(pubkey_hex))
+        valid = pubkey.verify_signed_message_hash(sig=sig_hex, hash=msg)
         return valid
 
     def sign(self, *, privkey_hex: str) -> str:
         msg = self.contract_hash()
-        privkey = ECPrivkey(bytes.fromhex(privkey_hex))
-        sig = privkey.schnorr_sign(msg32=bytes.fromhex(msg))
-        return sig.hex()
+        privkey = PrivateKey(bytes.fromhex(privkey_hex))
+        sig = privkey.sign_message_hash(hash=bytes.fromhex(msg))
+        return sig
 
 
 @dataclass(frozen=True)
@@ -94,11 +56,6 @@ class EscrowAgentProfile:
 
 
 class EscrowWorker(ABC, Logger):
-    PROTOCOL_VERSION = 1
-    MIN_TRADE_AMOUNT_SAT = 1000
-    MAX_TITLE_LEN_CHARS = 100
-    MAX_CONTRACT_LEN_CHARS = 2000
-
     def __init__(self, wallet: 'Abstract_Wallet', nostr_worker: 'EscrowNostrWorker', storage: dict):
         Logger.__init__(self)
         self.wallet = wallet
