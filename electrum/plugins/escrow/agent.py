@@ -206,7 +206,6 @@ class EscrowAgent(EscrowWorker, EventListener):
                     break
                 assert isinstance(event, nEvent)
                 pubkey = event.pubkey
-                id = event.id
                 try:
                     content = privkey.decrypt_message(event.content, pubkey)
                     content = json.loads(content)
@@ -223,15 +222,15 @@ class EscrowAgent(EscrowWorker, EventListener):
 
                 match method:
                     case TradeRPC.REGISTER_ESCROW:
-                        self._handle_register_escrow(content, pubkey, id)
+                        self._handle_register_escrow(content, pubkey, event.id)
                     case TradeRPC.ACCEPT_ESCROW:
-                        self._handle_accept_escrow(content, pubkey, id)
+                        self._handle_accept_escrow(content, pubkey, event.id)
                     case TradeRPC.COLLABORATIVE_CONFIRM:
-                        self._handle_collaborative_confirm(content, pubkey, id)
+                        self._handle_collaborative_confirm(content, pubkey, event.id)
                     case TradeRPC.COLLABORATIVE_CANCEL:
-                        self._handle_collaborative_cancel(content, pubkey, id)
+                        self._handle_collaborative_cancel(content, pubkey, event.id)
                     case TradeRPC.REQUEST_MEDIATION:
-                        self._handle_request_mediation(content, pubkey, id)
+                        self._handle_request_mediation(content, pubkey, event.id)
                     case _:
                         raise NotImplementedError()
 
@@ -268,11 +267,9 @@ class EscrowAgent(EscrowWorker, EventListener):
             if not trade_amount_sat or trade_amount_sat < self.MIN_TRADE_AMOUNT_SAT:
                 raise ValueError(f"no or too small trade_amount_sat: {self.MIN_TRADE_AMOUNT_SAT=}")
 
-            bond_percentage = request.get("bond_percent")
-            if bond_percentage is None:
-                raise ValueError("bond_percent is missing")
-
-            bond_amount_sat = (bond_percentage * trade_amount_sat) // 100
+            bond_amount_sat = request.get("bond_amount_sat")
+            if bond_amount_sat is None:
+                raise ValueError("bond_amount_sat is missing")
 
             contract = TradeContract(
                 title=title,
@@ -318,7 +315,7 @@ class EscrowAgent(EscrowWorker, EventListener):
 
             response = {
                 "trade_id": trade_id,
-                "invoice": bolt11,
+                "bolt11_invoice": bolt11,
             }
 
             self.nostr_worker.send_encrypted_ephemeral_message(

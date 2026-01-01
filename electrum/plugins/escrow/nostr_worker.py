@@ -16,10 +16,11 @@ from electrum.keystore import MasterPublicKeyMixin
 from electrum.logging import Logger
 from electrum.util import (
     EventListener, make_aiohttp_proxy_connector, ca_path, event_listener, get_asyncio_loop,
-    run_sync_function_on_asyncio_thread
+    run_sync_function_on_asyncio_thread, wait_for2
 )
 from electrum.wallet import Abstract_Wallet
 from electrum.crypto import sha256
+from electrum.i18n import _
 
 if TYPE_CHECKING:
     from electrum.simple_config import SimpleConfig
@@ -166,7 +167,7 @@ class EscrowNostrWorker(Logger, EventListener):
         self.logger.debug(f"Nostr worker stopped")
 
     @staticmethod
-    def get_nostr_privkey_for_wallet(wallet: 'Abstract_Wallet') -> PrivateKey:
+    def get_nostr_privkey_for_wallet(wallet: 'Abstract_Wallet', *, key_id: int = -1) -> PrivateKey:
         """
         This should only be used to store application data on nostr but not as identity.
         Each trade should use a new keypair to prevent trades from getting linked to each other.
@@ -174,7 +175,7 @@ class EscrowNostrWorker(Logger, EventListener):
         keystore = wallet.get_keystore()
         assert isinstance(keystore, MasterPublicKeyMixin)
         xpub = keystore.get_master_public_key()
-        privkey = sha256('nostr_escrow:' + xpub)
+        privkey = sha256('nostr_escrow:' + xpub + str(key_id))
         return PrivateKey(privkey)
 
     @asynccontextmanager
@@ -260,7 +261,7 @@ class EscrowNostrWorker(Logger, EventListener):
         recipient_pubkey: str,
         expiration_duration: int,
         signing_key: PrivateKey,
-    ):
+    ) -> str:
         cleartext_msg = json.dumps(cleartext_content)
         encrypted_content = signing_key.encrypt_message(cleartext_msg, recipient_pubkey)
         expiration_ts = int(time.time()) + expiration_duration
@@ -273,15 +274,16 @@ class EscrowNostrWorker(Logger, EventListener):
             expiration_ts=expiration_ts,
         )
         self._broadcast_event(event)
+        return event.id
 
-    def send_encrypted_ephemeral_message(
+    def prepare_encrypted_ephemeral_message(
         self,
         *,
         cleartext_content: dict,
         recipient_pubkey: str,
         response_to_id: Optional[str] = None,
         signing_key: PrivateKey,
-    ):
+    ) -> nEvent:
         cleartext_msg = json.dumps(cleartext_content)
         encrypted_content = signing_key.encrypt_message(cleartext_msg, recipient_pubkey)
         tags = [['p', recipient_pubkey]]
@@ -293,7 +295,82 @@ class EscrowNostrWorker(Logger, EventListener):
             tags=tags,
             signing_key=signing_key,
         )
+        return event
+
+    def send_encrypted_ephemeral_message(
+        self,
+        *,
+        cleartext_content: dict,
+        recipient_pubkey: str,
+        response_to_id: Optional[str] = None,
+        signing_key: PrivateKey,
+    ):
+        event = self.prepare_encrypted_ephemeral_message(
+            cleartext_content=cleartext_content,
+            recipient_pubkey=recipient_pubkey,
+            response_to_id=response_to_id,
+            signing_key=signing_key,
+        )
         self._broadcast_event(event)
+
+    async def send_encrypted_ephemeral_message_and_await_response(
+        self,
+        *,
+        cleartext_content: dict,
+        recipient_pubkey: str,
+        response_to_id: Optional[str] = None,
+        signing_key: PrivateKey,
+        timeout_sec: int,
+    ) -> dict:
+        """
+        Sends an ephemeral request and awaits a response. Might raise TimeoutError.
+        """
+        event = self.prepare_encrypted_ephemeral_message(
+            cleartext_content=cleartext_content,
+            recipient_pubkey=recipient_pubkey,
+            response_to_id=response_to_id,
+            signing_key=signing_key,
+        )
+        query = {
+            "kinds": [self.EPHEMERAL_REQUEST_EVENT_KIND],
+            "#p": [signing_key.public_key.hex()],
+            "#e": [event.id],
+            "since": int(time.time()) - 1,
+            "limit": 1,
+        }
+
+        job_id = None
+        query_start = int(time.time())
+        response_queue = asyncio.Queue()
+        while True:
+            try:
+                job_id = self.fetch_events(query, response_queue)
+                while True:
+                    try:
+                        resp_event = await wait_for2(response_queue.get(), timeout=timeout_sec)
+                    except (asyncio.TimeoutError, TimeoutError):
+                        raise TimeoutError()
+
+                    if resp_event is None:
+                        timeout_sec -= int(time.time()) - query_start
+                        timeout_sec = max(timeout_sec, 0)
+                        break
+
+                    if resp_event.pubkey != recipient_pubkey:
+                        continue
+
+                    try:
+                        response_content = signing_key.decrypt_message(resp_event.content, recipient_pubkey)
+                        response_content = json.loads(response_content)
+                        if not isinstance(response_content, dict):
+                            raise Exception("malformed content, not dict")
+                    except Exception as e:
+                        raise ValueError(e)
+
+                    return response_content
+            finally:
+                if job_id:
+                    self.cancel_job(job_id)
 
     def broadcast_agent_status_event(self, *, content: dict, tags: list, signing_key: PrivateKey) -> None:
         event = self._prepare_event(

@@ -461,8 +461,8 @@ class WCSelectEscrowAgent(WizardComponent, Logger):
 
 class WCConfirmCreate(WizardComponent):
     """
-    1. Requests the escrow from agent by sending the contract data.
-       -> Wizard is busy until we received the confirmation + invoice or error.
+    1. Requests the escrow from agent by sending the register_escrow rpc.
+       -> Wizard is set busy until we received the trade_id + invoice or error responses, or we time out.
     2. If we got an invoice, show all info to the user for review.
     3. If the user clicks 'Create', show a popup asking for confirmation.
     4. When confirming, the payment to the agent will be initiated.
