@@ -39,6 +39,11 @@ class TradePaymentProtocol(Enum):
     BITCOIN_LIGHTNING = 1
 
 
+class TradePaymentDirection(Enum):
+    SENDING = 1
+    RECEIVING = 2
+
+
 class TradeRPC(Enum):
     TRADE_FUNDED = "trade_funded"  # agent -> maker: "taker has funded"
     REGISTER_ESCROW = "register_escrow"  # maker registers trade
@@ -89,7 +94,10 @@ class EscrowAgentProfile:
 
 
 class EscrowWorker(ABC, Logger):
-    NOSTR_PROTOCOL_VERSION = 1
+    PROTOCOL_VERSION = 1
+    MIN_TRADE_AMOUNT_SAT = 1000
+    MAX_TITLE_LEN_CHARS = 100
+    MAX_CONTRACT_LEN_CHARS = 2000
 
     def __init__(self, wallet: 'Abstract_Wallet', nostr_worker: 'EscrowNostrWorker', storage: dict):
         Logger.__init__(self)
