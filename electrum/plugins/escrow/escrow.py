@@ -26,7 +26,6 @@ class EscrowPlugin(BasePlugin):
     # todo: telegram bot notification
     # todo: onchain support (with taproot)
     # todo: verifiable 'first seen' with OTS
-    # fixme: starting plugin first time after enabling raises as wallet loaded callback isn't called
 
     def __init__(self, parent, config: 'SimpleConfig', name):
         BasePlugin.__init__(self, parent, config, name)
@@ -42,10 +41,16 @@ class EscrowPlugin(BasePlugin):
         return network_available
 
     @hook
-    def daemon_wallet_loaded(self, daemon: 'Daemon', wallet: 'Abstract_Wallet'):
+    def daemon_wallet_loaded(self, _daemon: 'Daemon', wallet: 'Abstract_Wallet'):
+        self._load_wallet(wallet)
+
+    def _load_wallet(self, wallet: 'Abstract_Wallet'):
+        if wallet in self.wallets:
+            return  # already loaded
+
         if not self.nostr_worker:
             # create shared nostr worker for all wallets
-            self.nostr_worker = EscrowNostrWorker(self.config, daemon.network)
+            self.nostr_worker = EscrowNostrWorker(self.config, wallet.network)
             self.nostr_worker.start()
 
         if self.is_escrow_agent(wallet):
