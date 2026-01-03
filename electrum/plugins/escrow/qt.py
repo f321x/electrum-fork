@@ -1137,4 +1137,7 @@ class Plugin(EscrowPlugin):
         ma.setIcon(icon)
 
     def settings_dialog(self, window: 'ElectrumWindow') -> bool:
+        # when enabling the plugin the daemon_wallet_loaded hook was already called, so we need to
+        # load the wallet here as well to ensure the plugin knows about the wallet
+        self._load_wallet(window.wallet)
         return EscrowPluginDialog.run(window, self)
