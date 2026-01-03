@@ -61,6 +61,7 @@ class AgentEscrowTrade:
 
 
 class EscrowAgent(EscrowWorker, EventListener):
+
     def __init__(self, wallet: 'Abstract_Wallet', nostr_worker: 'EscrowNostrWorker', storage: dict):
         EscrowWorker.__init__(self, wallet, nostr_worker, storage)
         assert wallet.has_lightning(), "Wallet needs lightning support"
@@ -86,16 +87,16 @@ class EscrowAgent(EscrowWorker, EventListener):
     async def main_loop(self):
         self.logger.debug(f"escrow agent started: {self.wallet.basename()}")
         tasks = (
-            self._broadcast_status_event(),
-            self._maybe_rebroadcast_profile_event(),
-            self._broadcast_relay_event(),
-            self._handle_requests(),
-            self._pay_pending_lightning_invoices(),
-            self._cleanup_pending_trades_funding_expired(),
+            self._broadcast_status_event,
+            self._maybe_rebroadcast_profile_event,
+            self._broadcast_relay_event,
+            self._handle_requests,
+            self._pay_pending_lightning_invoices,
+            self._cleanup_pending_trades_funding_expired,
         )
         async with OldTaskGroup() as g:
             for task in tasks:
-                await g.spawn(task)
+                await g.spawn(task())
                 await asyncio.sleep(3)  # prevent getting rate limited by relays
 
     def stop(self):
@@ -488,8 +489,8 @@ class EscrowAgent(EscrowWorker, EventListener):
         ]
         while True:
             content = {
-                'inbound_liquidity_sat': self._keep_leading_digits(self.wallet.lnworker.num_sats_can_receive() or 0, 2),
-                'outbound_liquidity_sat': self._keep_leading_digits(self.wallet.lnworker.num_sats_can_send() or 0, 2),
+                'inbound_liquidity_sat': self._keep_leading_digits(int(self.wallet.lnworker.num_sats_can_receive() or 0), 2),
+                'outbound_liquidity_sat': self._keep_leading_digits(int(self.wallet.lnworker.num_sats_can_send() or 0), 2),
             }
             self.nostr_worker.broadcast_agent_status_event(
                 content=content,

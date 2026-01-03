@@ -66,7 +66,7 @@ class WCCreateTrade(WizardComponent):
     def __init__(self, parent, wizard: 'EscrowWizardDialog'):
         super().__init__(parent, wizard, title=_("Create Trade"))
         self.wizard = wizard
-        self.worker = self.wizard.plugin.get_escrow_worker(self.wizard.window.wallet, worker_type=EscrowClient)
+        self.worker = self.wizard.plugin.get_escrow_worker(self.wizard.main_window.wallet, worker_type=EscrowClient)
 
         layout = self.layout()
         assert isinstance(layout, QVBoxLayout), type(layout)
@@ -99,16 +99,16 @@ class WCCreateTrade(WizardComponent):
         self.direction_cb.addItems([_("I send"), _("I receive")])
         grid.addWidget(self.direction_cb, 2, 0)
 
-        self.amount_e = BTCAmountEdit(self.wizard.window.get_decimal_point)
+        self.amount_e = BTCAmountEdit(self.wizard.main_window.get_decimal_point)
         self.amount_e.textChanged.connect(self.validate)
         grid.addWidget(self.amount_e, 2, 1)
 
-        fiat_currency = self.wizard.window.fx.get_currency if self.wizard.window.fx else None
+        fiat_currency = self.wizard.main_window.fx.get_currency if self.wizard.main_window.fx else None
         self.fiat_receive_e = AmountEdit(fiat_currency)
-        if not self.wizard.window.fx or not self.wizard.window.fx.is_enabled():
+        if not self.wizard.main_window.fx or not self.wizard.main_window.fx.is_enabled():
             self.fiat_receive_e.setVisible(False)
         else:
-            self.wizard.window.connect_fields(self.amount_e, self.fiat_receive_e)
+            self.wizard.main_window.connect_fields(self.amount_e, self.fiat_receive_e)
         grid.addWidget(self.fiat_receive_e, 2, 2)
 
         # Bond Amount
@@ -175,22 +175,22 @@ class WCCreateTrade(WizardComponent):
 
     def _get_lightning_liquidity_error(self) -> Optional[str]:
         assert self.trade_payment_protocol == TradePaymentProtocol.BITCOIN_LIGHTNING
-        if not self.wizard.window.wallet.has_lightning():
+        if not self.wizard.main_window.wallet.has_lightning():
             return _("Your wallet doesn't support the Lightning Network. Please use a wallet with Lightning Network support.")
-        can_send = self.wizard.window.wallet.lnworker.num_sats_can_send() or 0
+        can_send = self.wizard.main_window.wallet.lnworker.num_sats_can_send() or 0
         if can_send < self.total_send_amount:
             return _("You cannot send this amount with your Lightning channels. Please open a larger Lightning channel or "
                       "do a submarine swap in the 'Channels' tab to increase your outgoing liquidity. "
-                      "You can send: {}").format(self.wizard.window.format_amount_and_units(can_send))
+                      "You can send: {}").format(self.wizard.main_window.format_amount_and_units(can_send))
         if self.payment_direction == TradePaymentDirection.RECEIVING:
-            can_receive = self.wizard.window.wallet.lnworker.num_sats_can_receive() or 0
+            can_receive = self.wizard.main_window.wallet.lnworker.num_sats_can_receive() or 0
             if can_receive < (self.amount_e.get_amount() or 0):
                 return _("You cannot receive this amount with your Lightning channels. Please do a "
                       "submarine swap in the 'Channels' tab to increase your incoming liquidity. "
-                      "You can receive: {}").format(self.wizard.window.format_amount_and_units(can_receive))
+                      "You can receive: {}").format(self.wizard.main_window.format_amount_and_units(can_receive))
         amount = self.amount_e.get_amount()
         if amount and amount < MIN_TRADE_AMOUNT_SAT:
-            return _("Trade amount too small. Minimal trade amount: {}").format(self.wizard.window.format_amount_and_units(amount))
+            return _("Trade amount too small. Minimal trade amount: {}").format(self.wizard.main_window.format_amount_and_units(amount))
         return None
 
     def _maybe_show_warning(self):
@@ -223,9 +223,10 @@ class WCSelectEscrowAgent(WizardComponent, Logger):
     """
     def __init__(self, parent, wizard: 'EscrowWizardDialog'):
         super().__init__(parent, wizard, title=_("Escrow Agent"))
+        assert isinstance(self.wizard, EscrowWizardDialog)
         Logger.__init__(self)
         self.plugin = wizard.plugin
-        self.wallet = wizard.window.wallet
+        self.wallet = wizard.main_window.wallet
         self.thread = TaskThread(self, self.on_error)
 
         layout = self.layout()
@@ -402,9 +403,9 @@ class WCSelectEscrowAgent(WizardComponent, Logger):
         lines.append(f"<b>{_('Fee')}:</b> {profile.service_fee_ppm/10000}%")
 
         if info.inbound_liquidity is not None:
-            lines.append(f"<b>{_('Inbound Liquidity')}:</b> {self.wizard.window.format_amount_and_units(info.inbound_liquidity)}")
+            lines.append(f"<b>{_('Inbound Liquidity')}:</b> {self.wizard.main_window.format_amount_and_units(info.inbound_liquidity)}")
         if info.outbound_liquidity is not None:
-            lines.append(f"<b>{_('Outbound Liquidity')}:</b> {self.wizard.window.format_amount_and_units(info.outbound_liquidity)}")
+            lines.append(f"<b>{_('Outbound Liquidity')}:</b> {self.wizard.main_window.format_amount_and_units(info.outbound_liquidity)}")
 
         last_seen = info.last_seen_minutes()
         if last_seen is not None:
@@ -479,8 +480,8 @@ class WCConfirmCreate(WizardComponent, Logger):
         Logger.__init__(self)
         self.wizard = wizard
         self.plugin = wizard.plugin
-        self.wallet = wizard.window.wallet
-        self.network = wizard.window.network
+        self.wallet = wizard.main_window.wallet
+        self.network = wizard.main_window.network
 
         layout = self.layout()
 
@@ -578,7 +579,7 @@ class WCConfirmCreate(WizardComponent, Logger):
         details = [
             f"<b>{_('Trade ID')}:</b> {self.response.trade_id}",
             f"<b>{_('Agent')}:</b> {self.trade.escrow_agent_pubkey[:12]}...",
-            f"<b>{_('Amount to pay')}:</b> {self.wizard.window.format_amount_and_units(amount_sat)}",
+            f"<b>{_('Amount to pay')}:</b> {self.wizard.main_window.format_amount_and_units(amount_sat)}",
             f"<b>{_('Description')}:</b> {invoice.message}",
         ]
 
@@ -599,7 +600,7 @@ class WCConfirmCreate(WizardComponent, Logger):
         invoice = self.response.funding_invoice
         amount_sat = invoice.get_amount_sat()
         msg = _("Do you want to pay {} to create this trade?").format(
-            self.wizard.window.format_amount_and_units(amount_sat)
+            self.wizard.main_window.format_amount_and_units(amount_sat)
         )
         if not self.wizard.question(msg):
             return
@@ -679,7 +680,7 @@ class EscrowWizardDialog(QEAbstractWizard, QtEventListener, EscrowWizard):
         start_viewstate = WizardViewState(start_view, {}, {})
 
         QEAbstractWizard.__init__(self, window.config, window.app, start_viewstate=start_viewstate)
-        self.window: 'ElectrumWindow' = window
+        self.main_window: 'ElectrumWindow' = window
         self.window_title = _("Escrow Wizard")
         self._set_logo()
         self.setWindowModality(Qt.WindowModality.ApplicationModal)
@@ -707,7 +708,7 @@ class EscrowWizardDialog(QEAbstractWizard, QtEventListener, EscrowWizard):
 
     @qt_event_listener
     def on_event_channel(self, wallet: 'Abstract_Wallet', _channel):
-        if wallet != self.window.wallet:
+        if wallet != self.main_window.wallet:
             return
         current_widget = self.main_widget.currentWidget()
         if hasattr(current_widget, 'on_event_channel'):
@@ -922,7 +923,7 @@ class EscrowAgentProfileDialog(WindowModalDialog, Logger):
 class EscrowPluginDialog(WindowModalDialog):
     def __init__(self, window: 'ElectrumWindow'):
         WindowModalDialog.__init__(self, window, _("Trade Escrow Plugin"))
-        self.window = window
+        self.main_window = window
         self._plugin = None  # type: Optional['Plugin']
         self._wallet = None  # type: Optional['Abstract_Wallet']
         self._main_layout = None  # type: Optional[QHBoxLayout]
@@ -1109,19 +1110,19 @@ class EscrowPluginDialog(WindowModalDialog):
     def _configure_profile(self):
         worker = self._plugin.get_escrow_worker(self._wallet, worker_type=EscrowAgent)
         profile = worker.get_profile()
-        d = EscrowAgentProfileDialog(self.window, self._plugin, profile)
+        d = EscrowAgentProfileDialog(self.main_window, self._plugin, profile)
         if d.exec():
             new_profile = d.get_profile()
             worker.save_profile(new_profile)
             self._trigger_update()
 
     def _create_trade(self):
-        d = EscrowWizardDialog(self.window, self._plugin, EscrowType.MAKE)
+        d = EscrowWizardDialog(self.main_window, self._plugin, EscrowType.MAKE)
         if d.exec():
             self._trigger_update()
 
     def _accept_trade(self):
-        d = EscrowWizardDialog(self.window, self._plugin, EscrowType.TAKE)
+        d = EscrowWizardDialog(self.main_window, self._plugin, EscrowType.TAKE)
         if d.exec():
             self._trigger_update()
 

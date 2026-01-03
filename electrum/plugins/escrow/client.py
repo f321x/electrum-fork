@@ -2,7 +2,6 @@ import asyncio
 import dataclasses
 import time
 import json
-import secrets
 from collections import defaultdict
 from typing import TYPE_CHECKING, Mapping, Optional
 from types import MappingProxyType
@@ -82,10 +81,10 @@ class EscrowClient(EscrowWorker):
         self.logger.debug(f"escrow client started: {self.wallet.basename()}")
         async with OldTaskGroup() as g:
             tasks = (
-                self._fetch_agent_events(),
+                self._fetch_agent_events,
             )
             for task in tasks:
-                await g.spawn(task)
+                await g.spawn(task())
                 await asyncio.sleep(1)  # prevent rate limiting, however not as critical as we don't broadcast much
 
     async def _fetch_agent_events(self):
