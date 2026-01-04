@@ -13,6 +13,7 @@ from electrum.util import OldTaskGroup, is_valid_websocket_url, UserFacingExcept
 from electrum import constants
 from electrum.i18n import _
 from electrum.invoices import PR_PAID, Invoice
+from electrum.json_db import stored_in
 
 from .escrow_worker import (
     EscrowWorker, EscrowAgentProfile, TradeContract
@@ -44,8 +45,8 @@ class EscrowAgentInfo:
         age = now - self.status_ts
         return age // 60
 
-
-@dataclasses.dataclass(frozen=True, kw_only=True)
+@stored_in('escrow_client_trades')
+@dataclasses.dataclass(kw_only=True)
 class ClientEscrowTrade:
     state: TradeState
     contract: TradeContract
@@ -57,6 +58,15 @@ class ClientEscrowTrade:
     creation_timestamp: int = dataclasses.field(default_factory=lambda: int(time.time()))
     funding_invoice_key: Optional[str] = None
     private_key: Optional[str] = None
+
+    def __post_init__(self):
+        """Needed for loading from db"""
+        if type(self.state) == int:
+            self.state = TradeState(self.state)
+        if isinstance(self.contract, dict):
+            self.contract = TradeContract(**self.contract)
+        if type(self.payment_protocol) == int:
+            self.payment_protocol = TradePaymentProtocol(self.payment_protocol)
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -73,9 +83,9 @@ class EscrowClient(EscrowWorker):
         self.agent_infos = defaultdict(EscrowAgentInfo)  # type: defaultdict[str, EscrowAgentInfo]
         self.fetch_job_id = None  # type: Optional[NostrJobID]
 
-        if 'trades' not in storage:
-            storage['trades'] = {}
-        self._trades = {}  # type: dict[str, Any]
+        if 'escrow_client_trades' not in storage:
+            storage['escrow_client_trades'] = {}
+        self._trades = storage['escrow_client_trades']  # type: dict[str, ClientEscrowTrade]
 
     async def main_loop(self):
         self.logger.debug(f"escrow client started: {self.wallet.basename()}")
