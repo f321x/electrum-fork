@@ -4,12 +4,13 @@ import concurrent.futures
 from typing import TYPE_CHECKING, Optional
 from functools import partial
 from enum import Enum
+from datetime import datetime
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTreeWidget,
     QTextEdit, QSpinBox, QLineEdit, QToolButton, QGridLayout, QComboBox,
-    QInputDialog,
+    QInputDialog, QTreeWidgetItem,
 )
 
 from electrum import constants
@@ -32,7 +33,7 @@ from electrum.keystore import MasterPublicKeyMixin
 
 from .escrow import EscrowPlugin
 from .wizard import EscrowWizard
-from .agent import EscrowAgentProfile, EscrowAgent
+from .agent import EscrowAgentProfile, EscrowAgent, AgentEscrowTrade
 from .client import EscrowClient, ClientEscrowTrade
 from .escrow_worker import TradeContract
 from .constants import (
@@ -631,10 +632,71 @@ class WCConfirmCreate(WizardComponent, Logger):
         WaitingDialog(self, _("Paying funding invoice..."), pay_task, on_success, on_failure)
 
     def apply(self):
+        self.wizard_data['trade_id'] = self.response.trade_id
+
+
+class WCShowPostbox(WizardComponent, Logger):
+    def __init__(self, parent, wizard):
+        super().__init__(parent, wizard, title=_("Trade Postbox"))
+        Logger.__init__(self)
+        self.wizard = wizard
+        self.plugin = wizard.plugin
+        self.wallet = wizard.main_window.wallet
+        self.thread = TaskThread(self, self.on_error)
+
+        layout = self.layout()
+        assert isinstance(layout, QVBoxLayout)
+
+        layout.addWidget(HelpLabel(
+            text=_("Trade Postbox Key:"),
+            help_text=_("Share this key with the trade taker. They need it to fetch the trade contract and accept the trade.")
+        ))
+
+        self.key_edit = QTextEdit()
+        self.key_edit.setReadOnly(True)
+        self.key_edit.setMaximumHeight(100)
+        layout.addWidget(self.key_edit)
+
+        self.info_label = QLabel(_("Creating postbox..."))
+        layout.addWidget(self.info_label)
+
+        layout.addWidget(QLabel(_("Send this key to your trading partner.")))
+
+        layout.addStretch(1)
+
+        self.valid = False
+        self.busy = True
+
+        self.create_postbox()
+
+    def create_postbox(self):
+        trade_id = self.wizard_data['trade_id']
+        worker = self.plugin.get_escrow_worker(self.wallet, worker_type=EscrowClient)
+
+        def do_create():
+            return worker.create_trade_postbox(trade_id)
+
+        self.thread.add(do_create, on_success=self.on_success)
+
+    def on_success(self, key):
+        self.key_edit.setText(key)
+        self.info_label.setText("")
+        self.valid = True
+        self.busy = False
+
+    def on_error(self, exc_info):
+        self.info_label.setText(_("Error creating postbox: {}").format(exc_info[1]))
+        self.logger.exception("Error creating postbox", exc_info=exc_info)
+        self.busy = False
+
+    def apply(self):
         pass
 
+    def stop(self):
+        self.thread.stop()
 
-class WCFetchTrade(WizardComponent):
+
+class WCFetchTrade(WizardComponent, Logger):
     """
     1. Taker enters ID of the trade they got from maker out of band.
     2. We request trade info from (where?).
@@ -646,25 +708,169 @@ class WCFetchTrade(WizardComponent):
     """
     def __init__(self, parent, wizard):
         super().__init__(parent, wizard, title=_("Fetch Trade"))
+        Logger.__init__(self)
+        self.wizard = wizard
+        self.plugin = wizard.plugin
+        self.wallet = wizard.main_window.wallet
+
         layout = self.layout()
-        layout.addWidget(QLabel("Fetch Trade (TODO)"))
-        # Taker enters id of the trade they got from the maker, fetches trade conditions.
+        assert isinstance(layout, QVBoxLayout)
+
+        layout.addWidget(HelpLabel(
+            text=_("Trade Code:"),
+            help_text=_("Enter the trade code you received from the trade maker.")
+        ))
+
+        self.code_edit = QLineEdit()
+        self.code_edit.setPlaceholderText("trade1...")
+        self.code_edit.textChanged.connect(self.validate)
+        layout.addWidget(self.code_edit)
+
+        self.fetch_button = QPushButton(_("Fetch Trade Details"))
+        self.fetch_button.clicked.connect(self.fetch_trade)
+        layout.addWidget(self.fetch_button, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        self.info_label = QLabel()
+        self.info_label.setWordWrap(True)
+        layout.addWidget(self.info_label)
+
+        layout.addStretch(1)
+        self.valid = False
+        self.trade = None
+        self.trade_id = None
+
+        self.thread = TaskThread(self, self.on_error)
+
+    def validate(self):
+        code = self.code_edit.text().strip()
+        self.fetch_button.setEnabled(bool(code))
+
+    def fetch_trade(self):
+        code = self.code_edit.text().strip()
+        if not code:
+            return
+
+        self.info_label.setText(_("Fetching trade details..."))
+        self.fetch_button.setEnabled(False)
+        self.code_edit.setEnabled(False)
+
+        worker = self.plugin.get_escrow_worker(self.wallet, worker_type=EscrowClient)
+
+        def do_fetch():
+            coro = worker.create_trade_from_postbox(code)
+            fut = asyncio.run_coroutine_threadsafe(coro, get_asyncio_loop())
+            return fut.result()
+
+        self.thread.add(do_fetch, on_success=self.on_success)
+
+    def on_success(self, result):
+        if not result:
+            self.info_label.setText(_("Could not find trade or invalid code."))
+            self.code_edit.setEnabled(True)
+            self.fetch_button.setEnabled(True)
+            return
+
+        self.trade, self.trade_id = result
+        self.info_label.setText(_("Trade found! Click Next to review details."))
         self.valid = True
+        self.wizard.next_button.setEnabled(True)
+
+    def on_error(self, exc_info):
+        self.info_label.setText(_("Error fetching trade: {}").format(exc_info[1]))
+        self.code_edit.setEnabled(True)
+        self.fetch_button.setEnabled(True)
+        self.logger.exception("Error fetching trade", exc_info=exc_info)
 
     def apply(self):
-        pass
+        self.wizard_data['trade'] = self.trade
+        self.wizard_data['trade_id'] = self.trade_id
+
+    def stop(self):
+        self.thread.stop()
 
 
-class WCAcceptTrade(WizardComponent):
+class WCAcceptTrade(WizardComponent, Logger):
     def __init__(self, parent, wizard):
         super().__init__(parent, wizard, title=_("Accept Trade"))
+        Logger.__init__(self)
+        self.wizard = wizard
+        self.plugin = wizard.plugin
+        self.wallet = wizard.main_window.wallet
+
+        self.trade = self.wizard_data['trade']
+        self.trade_id = self.wizard_data['trade_id']
+        assert isinstance(self.trade, ClientEscrowTrade)
+
         layout = self.layout()
-        layout.addWidget(QLabel("Accept Trade (TODO)"))
-        # Taker reviews the trade conditions and escrow agent profile.
-        self.valid = True
+        assert isinstance(layout, QVBoxLayout)
+
+        # Show trade details
+        details = [
+            f"<b>{_('Title')}:</b> {self.trade.contract.title}",
+            f"<b>{_('Amount')}:</b> {self.wizard.main_window.format_amount_and_units(self.trade.contract.trade_amount_sat)}",
+            f"<b>{_('Bond')}:</b> {self.wizard.main_window.format_amount_and_units(self.trade.contract.bond_sat)}",
+            f"<b>{_('Contract')}:</b><br>{self.trade.contract.contract}",
+        ]
+
+        info_label = QLabel("<br>".join(details))
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+
+        self.accept_button = QPushButton(_("Accept and Pay Bond/Amount"))
+        self.accept_button.clicked.connect(self.accept_trade)
+        layout.addWidget(self.accept_button, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        layout.addStretch(1)
+        self.valid = False
+        self.thread = TaskThread(self, self.on_error)
+
+    def accept_trade(self):
+        msg = _("Do you want to accept this trade and pay the required amount?")
+        if not self.wizard.question(msg):
+            return
+
+        self.accept_button.setEnabled(False)
+        worker = self.plugin.get_escrow_worker(self.wallet, worker_type=EscrowClient)
+
+        def do_accept():
+            # 1. Request accept from agent
+            coro = worker.request_accept_escrow(self.trade, self.trade_id)
+            fut = asyncio.run_coroutine_threadsafe(coro, get_asyncio_loop())
+            trade, response = fut.result()
+
+            # 2. Pay invoice
+            invoice = response.funding_invoice
+            run_sync_function_on_asyncio_thread(lambda: self.wallet.save_invoice(invoice), block=True)
+            coro_pay = self.wallet.lnworker.pay_invoice(invoice)
+            fut_pay = asyncio.run_coroutine_threadsafe(coro_pay, get_asyncio_loop())
+            payment_success, log = fut_pay.result()
+
+            if not payment_success:
+                raise Exception(_("Payment failed"))
+
+            return trade, response
+
+        def on_success(result):
+            trade, response = result
+            worker.save_new_trade(self.trade_id, trade)
+            self.wizard.show_message(_("Trade accepted and funded successfully!"))
+            self.valid = True
+            self.wizard.close()
+
+        def on_failure(exc_info):
+            self.wizard.show_error(str(exc_info[1]))
+            self.accept_button.setEnabled(True)
+
+        WaitingDialog(self, _("Accepting trade..."), do_accept, on_success, on_failure)
+
+    def on_error(self, exc_info):
+        self.logger.exception("Error accepting trade", exc_info=exc_info)
 
     def apply(self):
         pass
+
+    def stop(self):
+        self.thread.stop()
 
 
 class EscrowWizardDialog(QEAbstractWizard, QtEventListener, EscrowWizard):
@@ -691,6 +897,7 @@ class EscrowWizardDialog(QEAbstractWizard, QtEventListener, EscrowWizard):
             'create_trade': {'gui': WCCreateTrade},
             'select_escrow_agent': {'gui': WCSelectEscrowAgent},
             'confirm_create': {'gui': WCConfirmCreate},
+            'show_postbox': {'gui': WCShowPostbox},
             'fetch_trade': {'gui': WCFetchTrade},
             'accept_trade': {'gui': WCAcceptTrade},
         })
@@ -1010,13 +1217,14 @@ class EscrowPluginDialog(WindowModalDialog):
     def _plugin_dialog_content_vbox(self, window: 'ElectrumWindow') -> QVBoxLayout:
         content_vbox = QVBoxLayout()
         # trades list: date, name, state
-        trades_list = QTreeWidget()
-        trades_list.setHeaderLabels([_("Date"), _("Name"), _("State")])
-        header = trades_list.header()
+        self.trades_list = QTreeWidget()
+        self.trades_list.setHeaderLabels([_("Date"), _("Name"), _("State")])
+        header = self.trades_list.header()
         header.setMinimumSectionSize(80)
         header.setSectionResizeMode(0, header.ResizeMode.ResizeToContents)  # Date
         header.setSectionResizeMode(1, header.ResizeMode.Stretch)           # Name fills remaining space
         header.setSectionResizeMode(2, header.ResizeMode.ResizeToContents)  # State
+        self.trades_list.itemDoubleClicked.connect(self._show_trade_details)
         content_vbox.addLayout(self._plugin_dialog_title_hbox(window))
 
         # notification label for urgent user infos
@@ -1031,7 +1239,7 @@ class EscrowPluginDialog(WindowModalDialog):
 
         content_vbox.addWidget(self._notification_label)
         content_vbox.addWidget(self._agent_pubkey_label)
-        content_vbox.addWidget(trades_list)
+        content_vbox.addWidget(self.trades_list)
         return content_vbox
 
     @staticmethod
@@ -1096,6 +1304,7 @@ class EscrowPluginDialog(WindowModalDialog):
     def _trigger_update(self):
         self._update_visibility()
         self._maybe_show_warning()
+        self._update_trades_list()
 
     def _update_visibility(self):
         is_agent = self._plugin.is_escrow_agent(self._wallet)
@@ -1107,6 +1316,49 @@ class EscrowPluginDialog(WindowModalDialog):
             self._configure_profile_action.setVisible(is_agent)
         if self._agent_pubkey_label:
             self._agent_pubkey_label.setVisible(is_agent)
+
+    def _update_trades_list(self):
+        self.trades_list.clear()
+        is_agent = self._plugin.is_escrow_agent(self._wallet)
+        if is_agent:
+            worker = self._plugin.get_escrow_worker(self._wallet, worker_type=EscrowAgent)
+        else:
+            worker = self._plugin.get_escrow_worker(self._wallet, worker_type=EscrowClient)
+
+        trades = worker.get_trades()
+        trades.sort(key=lambda t: t.creation_timestamp, reverse=True)
+
+        for trade in trades:
+            date_str = datetime.fromtimestamp(trade.creation_timestamp).strftime('%Y-%m-%d %H:%M')
+            item = QTreeWidgetItem([date_str, trade.contract.title, str(trade.state.name)])
+            item.setData(0, Qt.ItemDataRole.UserRole, trade)
+            self.trades_list.addTopLevelItem(item)
+
+    def _show_trade_details(self, item: QTreeWidgetItem, column: int):
+        trade = item.data(0, Qt.ItemDataRole.UserRole)
+        if not trade:
+            return
+
+        details = []
+        details.append(f"<b>{_('Title')}:</b> {trade.contract.title}")
+        details.append(f"<b>{_('State')}:</b> {trade.state.name}")
+        details.append(f"<b>{_('Date')}:</b> {datetime.fromtimestamp(trade.creation_timestamp).strftime('%Y-%m-%d %H:%M')}")
+        details.append(f"<b>{_('Amount')}:</b> {self.main_window.format_amount_and_units(trade.contract.trade_amount_sat)}")
+        details.append(f"<b>{_('Bond')}:</b> {self.main_window.format_amount_and_units(trade.contract.bond_sat)}")
+        details.append(f"<b>{_('Contract')}:</b><br>{trade.contract.contract}")
+
+        if isinstance(trade, ClientEscrowTrade):
+            details.append(f"<b>{_('Agent')}:</b> {trade.escrow_agent_pubkey}")
+            details.append(f"<b>{_('Direction')}:</b> {trade.payment_direction.name}")
+            if trade.postbox_key:
+                 details.append(f"<b>{_('Postbox Key')}:</b> {trade.postbox_key}")
+
+        elif isinstance(trade, AgentEscrowTrade):
+             details.append(f"<b>{_('Maker')}:</b> {trade.trade_participants.maker.pubkey}")
+             if trade.trade_participants.taker:
+                 details.append(f"<b>{_('Taker')}:</b> {trade.trade_participants.taker.pubkey}")
+
+        self.main_window.show_message("<br><br>".join(details), title=_("Trade Details"))
 
     def _configure_profile(self):
         worker = self._plugin.get_escrow_worker(self._wallet, worker_type=EscrowAgent)

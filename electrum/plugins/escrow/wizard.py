@@ -16,6 +16,9 @@ class EscrowWizard(AbstractWizard):
                 'next': 'confirm_create',
             },
             'confirm_create': {
+                'next': 'show_postbox',
+            },
+            'show_postbox': {
                 'last': True,
             },
             'fetch_trade': {
