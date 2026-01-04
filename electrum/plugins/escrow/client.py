@@ -9,11 +9,14 @@ from types import MappingProxyType
 from electrum_aionostr.event import Event as nEvent
 from electrum_aionostr.key import PrivateKey
 
-from electrum.util import OldTaskGroup, is_valid_websocket_url, UserFacingException, InvoiceError
+from electrum.util import (
+    OldTaskGroup, is_valid_websocket_url, UserFacingException, InvoiceError, is_hex_str
+)
 from electrum import constants
 from electrum.i18n import _
 from electrum.invoices import PR_PAID, Invoice
 from electrum.json_db import stored_in
+from electrum.segwit_addr import convertbits, bech32_encode, bech32_decode, Encoding
 
 from .escrow_worker import (
     EscrowWorker, EscrowAgentProfile, TradeContract
@@ -57,7 +60,14 @@ class ClientEscrowTrade:
     trade_protocol_version: int
     creation_timestamp: int = dataclasses.field(default_factory=lambda: int(time.time()))
     funding_invoice_key: Optional[str] = None
-    private_key: Optional[str] = None
+    postbox_key: Optional[str] = None
+    _private_key: Optional[str] = None
+
+    @property
+    def private_key(self) -> Optional[PrivateKey]:
+        if not self._private_key:
+            return None
+        return PrivateKey(bytes.fromhex(self._private_key))
 
     def __post_init__(self):
         """Needed for loading from db"""
@@ -308,3 +318,125 @@ class EscrowClient(EscrowWorker):
         response = TradeCreationResponse(trade_id=trade_id, funding_invoice=invoice)
         trade = dataclasses.replace(trade, funding_invoice_key=invoice.get_id(), private_key=privkey.hex())
         return trade, response
+
+    def create_trade_postbox(self, trade_id: str) -> str:
+        """
+        After locking a trade the maker creates a 'postbox', the trade contract is broadcast as
+        encrypted nostr event to a new, random key. The maker can then give the random private key
+        to the taker out of band. The taker can fetch the contract, review it and accept it.
+        """
+        trade = self._trades[trade_id]
+        trade_key = trade.private_key
+        postbox_private_key = PrivateKey()
+        assert trade_key and postbox_private_key and trade
+        if trade.payment_direction == TradePaymentDirection.SENDING:
+            taker_payment_direction = TradePaymentDirection.RECEIVING.value
+        else:
+            taker_payment_direction = TradePaymentDirection.SENDING.value
+        postbox_content = {
+            "contract": dataclasses.asdict(trade.contract),
+            "maker_contract_sig": trade.contract.sign(privkey_hex=trade_key.hex()),
+            "taker_payment_direction": taker_payment_direction,
+            "escrow_agent_pubkey": trade.escrow_agent_pubkey,
+            "trade_protocol_version": trade.trade_protocol_version,
+            "payment_protocol": trade.payment_protocol.value,
+            "payment_network": constants.net.NET_NAME,
+        }
+        self.nostr_worker.send_encrypted_direct_message(
+            cleartext_content=postbox_content,
+            recipient_pubkey=postbox_private_key.public_key.hex(),
+            signing_key=trade_key,
+            expiration_duration=escrow_constants.DIRECT_MESSAGE_EXPIRATION_SEC,
+        )
+        data5 = convertbits(
+            data=postbox_private_key.raw_secret,
+            frombits=8,
+            tobits=5,
+            pad=True,
+        )
+        postbox_key = bech32_encode(encoding=Encoding.BECH32, hrp='trade', data=data5)
+        trade.postbox_key = postbox_key
+        return postbox_key
+
+    async def create_trade_from_postbox(self, postbox_key: str) -> Optional[ClientEscrowTrade]:
+        """
+        Fetches a trade postbox from nostr relays and creates a new ClientEscrowTrade for the taker.
+        """
+        assert postbox_key.startswith('trade')
+        decoded_bech32 = bech32_decode(bech=postbox_key, ignore_long_length=True)
+        if decoded_bech32.encoding is None:
+            raise ValueError("Bad bech32 checksum")
+        if decoded_bech32.encoding != Encoding.BECH32:
+            raise ValueError("Bad bech32 encoding: must be using vanilla BECH32")
+        if not decoded_bech32.hrp.startswith("trade"):
+            raise ValueError("Does not start with 'trade'")
+        if not decoded_bech32.data:
+            return None
+        postbox_privkey = PrivateKey(
+            bytes(convertbits(data=decoded_bech32.data, frombits=5, tobits=8, pad=False))
+        )
+
+        query = {
+            "kinds": [escrow_constants.ENCRYPTED_DIRECT_MESSAGE_KIND],
+            "#p": [postbox_privkey.public_key.hex()],
+            "limit": 1,
+        }
+
+        event_queue = asyncio.Queue()
+        job_id = self.nostr_worker.fetch_events(query, event_queue)
+
+        try:
+            event = await asyncio.wait_for(event_queue.get(), timeout=30)
+        except asyncio.TimeoutError:
+            self.logger.warn("Timeout fetching postbox event")
+            return None
+        finally:
+            self.nostr_worker.cancel_job(job_id)
+
+        if event is None:
+            self.logger.info("No postbox event found")
+            return None
+
+        assert isinstance(event, nEvent)
+
+        try:
+            content_json = postbox_privkey.decrypt_message(event.content, event.pubkey)
+            content = json.loads(content_json)
+            assert isinstance(content, dict), type(content)
+        except Exception:
+            self.logger.exception("Failed to decrypt postbox message")
+            return None
+
+        try:
+            contract = TradeContract(**content['contract'])
+
+            maker_sig = content['maker_contract_sig']
+            if not contract.verify(sig_hex=maker_sig, pubkey_hex=event.pubkey):
+                raise ValueError("Invalid maker signature")
+
+            payment_direction = TradePaymentDirection(content['taker_payment_direction'])
+            escrow_agent_pubkey = content['escrow_agent_pubkey']
+            assert is_hex_str(escrow_agent_pubkey) and len(escrow_agent_pubkey) == 64
+            trade_protocol_version = content['trade_protocol_version']
+            assert isinstance(trade_protocol_version, int)
+            payment_protocol = TradePaymentProtocol(content['payment_protocol'])
+            if not content['payment_network'] == constants.net.NET_NAME:
+                raise ValueError(f"unsupported network: {content['payment_network']}")
+
+            onchain_fallback_address = self.wallet.get_unused_address() or self.wallet.get_receiving_address()
+
+            trade = ClientEscrowTrade(
+                state=TradeState.ONGOING,
+                contract=contract,
+                payment_direction=payment_direction,
+                payment_protocol=payment_protocol,
+                onchain_fallback_address=onchain_fallback_address,
+                escrow_agent_pubkey=escrow_agent_pubkey,
+                trade_protocol_version=trade_protocol_version,
+            )
+            # now the taker can request to accept the trade, pay the funding, then the trade can begin
+            return trade
+
+        except Exception:
+            self.logger.exception("Failed to parse postbox content")
+            return None
