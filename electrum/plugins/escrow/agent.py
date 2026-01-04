@@ -11,6 +11,7 @@ from electrum.util import OldTaskGroup, InvoiceError, EventListener, event_liste
 from electrum import constants
 from electrum.invoices import Invoice, PR_PAID
 from electrum.bitcoin import is_address
+from electrum.json_db import stored_in
 
 from .escrow_worker import (
     EscrowWorker, EscrowAgentProfile, TradeContract
@@ -34,7 +35,7 @@ class TradeParticipant:
     pubkey: str
     funding_request_key: str
     onchain_fallback_address: str  # so we can refund/payout onchain in case lightning fails
-    contract_signature: str  # signature over 'ESCROW'|title|contract|trade_amount|bond_amount
+    contract_signature: str  # signature over sha256('ESCROW'|title|contract|trade_amount|bond_amount)
 
     def to_json(self):
         return dataclasses.asdict(self)
@@ -44,10 +45,17 @@ class TradeParticipants:
     maker: TradeParticipant
     taker: Optional[TradeParticipant] = None
 
+    def __post_init__(self):
+        if isinstance(self.maker, dict):
+            self.maker = TradeParticipant(**self.maker)
+        if isinstance(self.taker, dict):
+            self.taker = TradeParticipant(**self.taker)
+
     def to_json(self):
         return dataclasses.asdict(self)
 
-@dataclasses.dataclass
+@stored_in('escrow_agent_trades')
+@dataclasses.dataclass(kw_only=True)
 class AgentEscrowTrade:
     state: TradeState
     trade_participants: TradeParticipants
@@ -55,6 +63,17 @@ class AgentEscrowTrade:
     payment_protocol: TradePaymentProtocol
     trade_protocol_version: int
     creation_timestamp: int = dataclasses.field(default_factory=lambda: int(time.time()))
+
+    def __post_init__(self):
+        """After loading from db"""
+        if type(self.state) == int:
+            self.state = TradeState(self.state)
+        if isinstance(self.trade_participants, dict):
+            self.trade_participants = TradeParticipants(**self.trade_participants)
+        if isinstance(self.contract, dict):
+            self.contract = TradeContract(**self.contract)
+        if type(self.payment_protocol) == int:
+            self.payment_protocol = TradePaymentProtocol(self.payment_protocol)
 
     def to_json(self):
         return dataclasses.asdict(self)
@@ -74,9 +93,9 @@ class EscrowAgent(EscrowWorker, EventListener):
         # we derive a persistent nostr identity from the wallet
         self.nostr_identity_private_key = nostr_worker.get_nostr_privkey_for_wallet(wallet)
 
-        if 'trades' not in storage:
-            storage['trades'] = {}
-        self._trades = storage['trades']  # type: dict[str, AgentEscrowTrade]
+        if 'escrow_agent_trades' not in storage:
+            storage['escrow_agent_trades'] = {}
+        self._trades = storage['escrow_agent_trades']  # type: dict[str, AgentEscrowTrade]
 
         # newly registered trades, waiting for the maker to send us the funds. We only persist the
         # trade once the invoice is paid to avoid writing every request to the db, or when shutting down.
