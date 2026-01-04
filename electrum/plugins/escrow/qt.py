@@ -634,7 +634,7 @@ class WCConfirmCreate(WizardComponent, Logger):
         pass
 
 
-class WCFetchTrade(WizardComponent):
+class WCFetchTrade(WizardComponent, Logger):
     """
     1. Taker enters ID of the trade they got from maker out of band.
     2. We request trade info from (where?).
@@ -646,25 +646,169 @@ class WCFetchTrade(WizardComponent):
     """
     def __init__(self, parent, wizard):
         super().__init__(parent, wizard, title=_("Fetch Trade"))
+        Logger.__init__(self)
+        self.wizard = wizard
+        self.plugin = wizard.plugin
+        self.wallet = wizard.main_window.wallet
+
         layout = self.layout()
-        layout.addWidget(QLabel("Fetch Trade (TODO)"))
-        # Taker enters id of the trade they got from the maker, fetches trade conditions.
+        assert isinstance(layout, QVBoxLayout)
+
+        layout.addWidget(HelpLabel(
+            text=_("Trade Code:"),
+            help_text=_("Enter the trade code you received from the trade maker.")
+        ))
+
+        self.code_edit = QLineEdit()
+        self.code_edit.setPlaceholderText("trade1...")
+        self.code_edit.textChanged.connect(self.validate)
+        layout.addWidget(self.code_edit)
+
+        self.fetch_button = QPushButton(_("Fetch Trade Details"))
+        self.fetch_button.clicked.connect(self.fetch_trade)
+        layout.addWidget(self.fetch_button, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        self.info_label = QLabel()
+        self.info_label.setWordWrap(True)
+        layout.addWidget(self.info_label)
+
+        layout.addStretch(1)
+        self.valid = False
+        self.trade = None
+        self.trade_id = None
+
+        self.thread = TaskThread(self, self.on_error)
+
+    def validate(self):
+        code = self.code_edit.text().strip()
+        self.fetch_button.setEnabled(bool(code))
+
+    def fetch_trade(self):
+        code = self.code_edit.text().strip()
+        if not code:
+            return
+
+        self.info_label.setText(_("Fetching trade details..."))
+        self.fetch_button.setEnabled(False)
+        self.code_edit.setEnabled(False)
+
+        worker = self.plugin.get_escrow_worker(self.wallet, worker_type=EscrowClient)
+
+        def do_fetch():
+            coro = worker.create_trade_from_postbox(code)
+            fut = asyncio.run_coroutine_threadsafe(coro, get_asyncio_loop())
+            return fut.result()
+
+        self.thread.add(do_fetch, on_success=self.on_success)
+
+    def on_success(self, result):
+        if not result:
+            self.info_label.setText(_("Could not find trade or invalid code."))
+            self.code_edit.setEnabled(True)
+            self.fetch_button.setEnabled(True)
+            return
+
+        self.trade, self.trade_id = result
+        self.info_label.setText(_("Trade found! Click Next to review details."))
         self.valid = True
+        self.wizard.next_button.setEnabled(True)
+
+    def on_error(self, exc_info):
+        self.info_label.setText(_("Error fetching trade: {}").format(exc_info[1]))
+        self.code_edit.setEnabled(True)
+        self.fetch_button.setEnabled(True)
+        self.logger.exception("Error fetching trade", exc_info=exc_info)
 
     def apply(self):
-        pass
+        self.wizard_data['trade'] = self.trade
+        self.wizard_data['trade_id'] = self.trade_id
+
+    def stop(self):
+        self.thread.stop()
 
 
-class WCAcceptTrade(WizardComponent):
+class WCAcceptTrade(WizardComponent, Logger):
     def __init__(self, parent, wizard):
         super().__init__(parent, wizard, title=_("Accept Trade"))
+        Logger.__init__(self)
+        self.wizard = wizard
+        self.plugin = wizard.plugin
+        self.wallet = wizard.main_window.wallet
+
+        self.trade = self.wizard_data['trade']
+        self.trade_id = self.wizard_data['trade_id']
+        assert isinstance(self.trade, ClientEscrowTrade)
+
         layout = self.layout()
-        layout.addWidget(QLabel("Accept Trade (TODO)"))
-        # Taker reviews the trade conditions and escrow agent profile.
-        self.valid = True
+        assert isinstance(layout, QVBoxLayout)
+
+        # Show trade details
+        details = [
+            f"<b>{_('Title')}:</b> {self.trade.contract.title}",
+            f"<b>{_('Amount')}:</b> {self.wizard.main_window.format_amount_and_units(self.trade.contract.trade_amount_sat)}",
+            f"<b>{_('Bond')}:</b> {self.wizard.main_window.format_amount_and_units(self.trade.contract.bond_sat)}",
+            f"<b>{_('Contract')}:</b><br>{self.trade.contract.contract}",
+        ]
+
+        info_label = QLabel("<br>".join(details))
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+
+        self.accept_button = QPushButton(_("Accept and Pay Bond/Amount"))
+        self.accept_button.clicked.connect(self.accept_trade)
+        layout.addWidget(self.accept_button, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        layout.addStretch(1)
+        self.valid = False
+        self.thread = TaskThread(self, self.on_error)
+
+    def accept_trade(self):
+        msg = _("Do you want to accept this trade and pay the required amount?")
+        if not self.wizard.question(msg):
+            return
+
+        self.accept_button.setEnabled(False)
+        worker = self.plugin.get_escrow_worker(self.wallet, worker_type=EscrowClient)
+
+        def do_accept():
+            # 1. Request accept from agent
+            coro = worker.request_accept_escrow(self.trade, self.trade_id)
+            fut = asyncio.run_coroutine_threadsafe(coro, get_asyncio_loop())
+            trade, response = fut.result()
+
+            # 2. Pay invoice
+            invoice = response.funding_invoice
+            run_sync_function_on_asyncio_thread(lambda: self.wallet.save_invoice(invoice), block=True)
+            coro_pay = self.wallet.lnworker.pay_invoice(invoice)
+            fut_pay = asyncio.run_coroutine_threadsafe(coro_pay, get_asyncio_loop())
+            payment_success, log = fut_pay.result()
+
+            if not payment_success:
+                raise Exception(_("Payment failed"))
+
+            return trade, response
+
+        def on_success(result):
+            trade, response = result
+            worker.save_new_trade(self.trade_id, trade)
+            self.wizard.show_message(_("Trade accepted and funded successfully!"))
+            self.valid = True
+            self.wizard.close()
+
+        def on_failure(exc_info):
+            self.wizard.show_error(str(exc_info[1]))
+            self.accept_button.setEnabled(True)
+
+        WaitingDialog(self, _("Accepting trade..."), do_accept, on_success, on_failure)
+
+    def on_error(self, exc_info):
+        self.logger.exception("Error accepting trade", exc_info=exc_info)
 
     def apply(self):
         pass
+
+    def stop(self):
+        self.thread.stop()
 
 
 class EscrowWizardDialog(QEAbstractWizard, QtEventListener, EscrowWizard):
