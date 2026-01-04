@@ -625,6 +625,7 @@ class WCConfirmCreate(WizardComponent, Logger):
             self.wizard.back_button.setEnabled(False)
 
         def on_failure(exc_info):
+            run_sync_function_on_asyncio_thread(lambda: self.wallet.delete_invoice(invoice.get_id()), block=True)
             self.wizard.show_error(str(exc_info[1]))
 
         WaitingDialog(self, _("Paying funding invoice..."), pay_task, on_success, on_failure)
