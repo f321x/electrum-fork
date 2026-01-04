@@ -36,6 +36,8 @@ class TradeParticipant:
     funding_request_key: str
     onchain_fallback_address: str  # so we can refund/payout onchain in case lightning fails
     contract_signature: str  # signature over sha256('ESCROW'|title|contract|trade_amount|bond_amount)
+    confirmed: bool = False
+    payout_invoice: Optional[str] = None
 
     def to_json(self):
         return dataclasses.asdict(self)
@@ -62,6 +64,7 @@ class AgentEscrowTrade:
     contract: TradeContract
     payment_protocol: TradePaymentProtocol
     trade_protocol_version: int
+    maker_payment_direction: TradePaymentDirection
     creation_timestamp: int = dataclasses.field(default_factory=lambda: int(time.time()))
 
     def __post_init__(self):
@@ -74,8 +77,10 @@ class AgentEscrowTrade:
             self.contract = TradeContract(**self.contract)
         if type(self.payment_protocol) == int:
             self.payment_protocol = TradePaymentProtocol(self.payment_protocol)
+        if type(self.maker_payment_direction) == int:
+            self.maker_payment_direction = TradePaymentDirection(self.maker_payment_direction)
 
-    def to_json(self):
+    def to_json(self) -> dict:
         return dataclasses.asdict(self)
 
 
@@ -118,6 +123,9 @@ class EscrowAgent(EscrowWorker, EventListener):
                 await g.spawn(task())
                 await asyncio.sleep(3)  # prevent getting rate limited by relays
 
+    def get_trades(self) -> list[AgentEscrowTrade]:
+        return list(self._trades.values())
+
     def stop(self):
         self._cleanup_pending_trades()
         self.unregister_callbacks()
@@ -135,7 +143,7 @@ class EscrowAgent(EscrowWorker, EventListener):
                 self._handle_maker_funding(trade_id)
                 return
         for trade_id, trade in self._trades.items():
-            if trade.trade_participants.taker.funding_request_key == key:
+            if trade.trade_participants.taker and trade.trade_participants.taker.funding_request_key == key:
                 self._handle_taker_funding(trade_id)
                 return
 
@@ -143,6 +151,7 @@ class EscrowAgent(EscrowWorker, EventListener):
         """Maker has paid their funding invoice. Now the trade can get persisted in the db."""
         assert trade_id not in self._trades, trade_id
         self._trades[trade_id] = self._pending_trades.pop(trade_id)
+        self.wallet.save_db()
         self.logger.info(f"maker funding received: {trade_id=}")
 
     def _handle_taker_funding(self, trade_id: str):
@@ -150,6 +159,7 @@ class EscrowAgent(EscrowWorker, EventListener):
         trade = self._trades[trade_id]
         assert trade.state < TradeState.ONGOING, trade.state
         trade.state = TradeState.ONGOING
+        self.wallet.save_db()
         self.logger.info(f"taker funding received: {trade_id=}")
         self._notify_maker_trade_funded(trade_id)
 
@@ -308,7 +318,7 @@ class EscrowAgent(EscrowWorker, EventListener):
             if not signature or not contract.verify(sig_hex=signature, pubkey_hex=sender_pubkey):
                 raise ValueError("invalid contract_signature")
 
-            payment_direction = TradePaymentDirection(request.get('payment_direction'))
+            payment_direction = TradePaymentDirection(request['payment_direction'])
 
             # Create funding invoice
             message = f"Escrow funding: {contract.title}"
@@ -335,6 +345,7 @@ class EscrowAgent(EscrowWorker, EventListener):
                 contract=contract,
                 payment_protocol=payment_protocol,
                 trade_protocol_version=trade_protocol,
+                maker_payment_direction=payment_direction,
             )
 
             trade_id = self._add_new_trade(trade)
@@ -364,14 +375,163 @@ class EscrowAgent(EscrowWorker, EventListener):
         """
         Sent by taker to accept an escrow contract the maker has previously registered.
         """
-        pass
+        try:
+            trade_id = request.get("trade_id")
+            if not trade_id:
+                raise ValueError("missing trade_id")
+
+            trade = self._trades.get(trade_id)
+            if not trade:
+                raise ValueError("trade not found")
+
+            if trade.state != TradeState.WAITING_FOR_TAKER:
+                raise ValueError(f"trade not in waiting state: {trade.state}")
+
+            if trade.trade_participants.taker:
+                raise ValueError("taker already registered")
+
+            signature = request.get('contract_signature')
+            if not signature or not trade.contract.verify(sig_hex=signature, pubkey_hex=sender_pubkey):
+                raise ValueError("invalid contract_signature")
+
+            onchain_fallback_address = request.get("onchain_fallback_address")
+            if not onchain_fallback_address or not is_address(onchain_fallback_address):
+                raise ValueError("invalid onchain fallback address")
+
+            # Determine amount to pay for taker
+            # If maker is SENDING, maker paid trade_amount. Taker (receiver) pays bond.
+            # If maker is RECEIVING, maker paid bond. Taker (sender) pays trade_amount.
+            if trade.maker_payment_direction == TradePaymentDirection.SENDING:
+                amount_sat = trade.contract.bond_sat
+            else:
+                amount_sat = trade.contract.trade_amount_sat
+
+            message = f"Escrow funding: {trade.contract.title}"
+            req_key = self.wallet.create_request(
+                amount_sat=amount_sat,
+                message=message,
+                exp_delay=600,
+                address=None
+            )
+            req = self.wallet.get_request(req_key)
+            bolt11 = self.wallet.get_bolt11_invoice(req)
+
+            taker = TradeParticipant(
+                pubkey=sender_pubkey,
+                funding_request_key=req_key,
+                onchain_fallback_address=onchain_fallback_address,
+                contract_signature=signature,
+            )
+            trade.trade_participants.taker = taker
+            self.wallet.save_db()
+
+            response = {
+                "trade_id": trade_id,
+                "bolt11_invoice": bolt11,
+            }
+
+            self.nostr_worker.send_encrypted_ephemeral_message(
+                cleartext_content=response,
+                recipient_pubkey=sender_pubkey,
+                signing_key=self.nostr_identity_private_key,
+                response_to_id=request_event_id,
+            )
+
+            self.logger.info(f"Accepted trade {trade_id} by {sender_pubkey}")
+
+        except Exception as e:
+            self.logger.error(f"Failed to accept escrow: {repr(e)}")
+            self.nostr_worker.send_encrypted_ephemeral_message(
+                cleartext_content={"error": str(e)},
+                recipient_pubkey=sender_pubkey,
+                signing_key=self.nostr_identity_private_key,
+                response_to_id=request_event_id,
+            )
 
     def _handle_collaborative_confirm(self, request: dict, sender_pubkey: str, request_event_id: str):
         """
         Once both trade parties called this the trade is marked done. Bond and amount have
         to get paid back to the trade participants.
         """
-        pass
+        try:
+            trade_id = request.get("trade_id")
+            if not trade_id:
+                raise ValueError("missing trade_id")
+
+            trade = self._trades.get(trade_id)
+            if not trade:
+                raise ValueError("trade not found")
+
+            if trade.state != TradeState.ONGOING:
+                raise ValueError(f"trade not in ongoing state: {trade.state}")
+
+            payout_invoice = request['payout_invoice']
+
+            participants = trade.trade_participants
+            if sender_pubkey == participants.maker.pubkey:
+                participants.maker.confirmed = True
+                participants.maker.payout_invoice = payout_invoice
+            elif participants.taker and sender_pubkey == participants.taker.pubkey:
+                participants.taker.confirmed = True
+                participants.taker.payout_invoice = payout_invoice
+            else:
+                raise ValueError("sender is not a participant")
+
+            self.wallet.save_db()
+
+            response = {"status": "ok"}
+            self.nostr_worker.send_encrypted_ephemeral_message(
+                cleartext_content=response,
+                recipient_pubkey=sender_pubkey,
+                signing_key=self.nostr_identity_private_key,
+                response_to_id=request_event_id,
+            )
+
+            if participants.maker.confirmed and participants.taker.confirmed:
+                self._settle_trade(trade_id)
+
+        except Exception as e:
+            self.logger.error(f"Failed to confirm trade: {repr(e)}")
+            self.nostr_worker.send_encrypted_ephemeral_message(
+                cleartext_content={"error": str(e)},
+                recipient_pubkey=sender_pubkey,
+                signing_key=self.nostr_identity_private_key,
+                response_to_id=request_event_id,
+            )
+
+    def _settle_trade(self, trade_id: str):
+        trade = self._trades[trade_id]
+        trade.state = TradeState.FINISHED
+        self.wallet.save_db()
+
+        # Calculate payouts
+        # Sender pays Trade Amount.
+        # Receiver pays Bond.
+        # Receiver gets (Trade Amount - Fee) + Bond.
+        # Sender gets nothing.
+
+        profile = self.get_profile()
+        fee_ppm = profile.service_fee_ppm if profile else 0
+        fee_sat = (trade.contract.trade_amount_sat * fee_ppm) // 1_000_000
+        payout_amount = trade.contract.trade_amount_sat - fee_sat + trade.contract.bond_sat
+
+        if trade.payment_direction == TradePaymentDirection.SENDING:
+            # Maker is Sender. Taker is Receiver.
+            # Taker gets payout.
+            recipient = trade.trade_participants.taker
+        else:
+            # Maker is Receiver. Taker is Sender.
+            # Maker gets payout.
+            recipient = trade.trade_participants.maker
+
+        if not recipient:
+            self.logger.error(f"Recipient missing for trade {trade_id}")
+            return
+
+        if recipient.payout_invoice:
+            self._register_payout_invoice(b11_invoice=recipient.payout_invoice, expected_amount_sat=payout_amount)
+        else:
+            self.logger.warn(f"No payout invoice for trade {trade_id}, recipient {recipient.pubkey}")
 
     def _handle_collaborative_cancel(self, request: dict, sender_pubkey: str, request_event_id: str):
         """

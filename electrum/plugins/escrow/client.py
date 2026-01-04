@@ -78,6 +78,8 @@ class ClientEscrowTrade:
         if type(self.payment_protocol) == int:
             self.payment_protocol = TradePaymentProtocol(self.payment_protocol)
 
+    def to_json(self) -> dict:
+        return dataclasses.asdict(self)
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class TradeCreationResponse:
@@ -236,6 +238,9 @@ class EscrowClient(EscrowWorker):
             agents.remove(agent_pubkey)
             self.reload_agents()
 
+    def get_trades(self) -> list[ClientEscrowTrade]:
+        return list(self._trades.values())
+
     def get_new_privkey_for_trade(self) -> PrivateKey:
         """
         Returns a new private key to be used for the next trade.
@@ -316,8 +321,84 @@ class EscrowClient(EscrowWorker):
             raise UserFacingException(f"Got invoice we already know")
 
         response = TradeCreationResponse(trade_id=trade_id, funding_invoice=invoice)
-        trade = dataclasses.replace(trade, funding_invoice_key=invoice.get_id(), private_key=privkey.hex())
+        trade = dataclasses.replace(trade, funding_invoice_key=invoice.get_id(), _private_key=privkey.hex())
         return trade, response
+
+    async def request_accept_escrow(
+        self,
+        trade: ClientEscrowTrade,
+        trade_id: str,
+    ) -> tuple[ClientEscrowTrade, TradeCreationResponse]:
+        privkey = self.get_new_privkey_for_trade()
+
+        req_payload = {
+            "method": TradeRPC.ACCEPT_ESCROW.value,
+            "trade_id": trade_id,
+            "contract_signature": trade.contract.sign(privkey_hex=privkey.hex()),
+            "onchain_fallback_address": trade.onchain_fallback_address,
+        }
+
+        try:
+            response = await self.nostr_worker.send_encrypted_ephemeral_message_and_await_response(
+                cleartext_content=req_payload,
+                recipient_pubkey=trade.escrow_agent_pubkey,
+                signing_key=privkey,
+                timeout_sec=30,
+            )
+        except TimeoutError:
+            raise UserFacingException(_("Timeout while waiting for agent response."))
+        except ValueError as e:
+            raise UserFacingException(f"Invalid response: {str(e)}")
+
+        error = response.get("error")
+        if error is not None:
+            raise UserFacingException(f"Received error from escrow agent: {error}")
+
+        if trade.payment_protocol == TradePaymentProtocol.BITCOIN_LIGHTNING:
+            b11_invoice = response.get("bolt11_invoice")
+            if not b11_invoice:
+                raise UserFacingException(f"Invalid response: missing funding invoice")
+        else:
+            raise NotImplementedError("Unsupported payment protocol")
+
+        try:
+            invoice = Invoice.from_bech32(b11_invoice)
+        except InvoiceError:
+            raise UserFacingException(f"Invalid lightning invoice")
+
+        if self.wallet.get_invoice(invoice.get_id()):
+            raise UserFacingException(f"Got invoice we already know")
+
+        response_obj = TradeCreationResponse(trade_id=trade_id, funding_invoice=invoice)
+        trade = dataclasses.replace(trade, funding_invoice_key=invoice.get_id(), _private_key=privkey.hex())
+        return trade, response_obj
+
+    async def request_collaborative_confirm(self, trade_id: str, payout_invoice: Optional[str] = None):
+        trade = self._trades[trade_id]
+        privkey = trade.private_key
+        if not privkey:
+            raise UserFacingException("Trade private key missing")
+
+        req_payload = {
+            "method": TradeRPC.COLLABORATIVE_CONFIRM.value,
+            "trade_id": trade_id,
+        }
+        if payout_invoice:
+            req_payload['payout_invoice'] = payout_invoice
+
+        try:
+            response = await self.nostr_worker.send_encrypted_ephemeral_message_and_await_response(
+                cleartext_content=req_payload,
+                recipient_pubkey=trade.escrow_agent_pubkey,
+                signing_key=privkey,
+                timeout_sec=30,
+            )
+        except TimeoutError:
+            raise UserFacingException(_("Timeout while waiting for agent response."))
+
+        error = response.get("error")
+        if error is not None:
+            raise UserFacingException(f"Received error from escrow agent: {error}")
 
     def create_trade_postbox(self, trade_id: str) -> str:
         """
@@ -334,6 +415,7 @@ class EscrowClient(EscrowWorker):
         else:
             taker_payment_direction = TradePaymentDirection.SENDING.value
         postbox_content = {
+            "trade_id": trade_id,
             "contract": dataclasses.asdict(trade.contract),
             "maker_contract_sig": trade.contract.sign(privkey_hex=trade_key.hex()),
             "taker_payment_direction": taker_payment_direction,
@@ -358,7 +440,7 @@ class EscrowClient(EscrowWorker):
         trade.postbox_key = postbox_key
         return postbox_key
 
-    async def create_trade_from_postbox(self, postbox_key: str) -> Optional[ClientEscrowTrade]:
+    async def create_trade_from_postbox(self, postbox_key: str) -> Optional[tuple[ClientEscrowTrade, str]]:
         """
         Fetches a trade postbox from nostr relays and creates a new ClientEscrowTrade for the taker.
         """
@@ -423,6 +505,10 @@ class EscrowClient(EscrowWorker):
             if not content['payment_network'] == constants.net.NET_NAME:
                 raise ValueError(f"unsupported network: {content['payment_network']}")
 
+            trade_id = content.get('trade_id')
+            if not trade_id:
+                raise ValueError("Missing trade_id in postbox")
+
             onchain_fallback_address = self.wallet.get_unused_address() or self.wallet.get_receiving_address()
 
             trade = ClientEscrowTrade(
@@ -435,8 +521,8 @@ class EscrowClient(EscrowWorker):
                 trade_protocol_version=trade_protocol_version,
             )
             # now the taker can request to accept the trade, pay the funding, then the trade can begin
-            return trade
+            return trade, trade_id
 
-        except Exception:
+        except Exception as e:
             self.logger.exception("Failed to parse postbox content")
             return None
