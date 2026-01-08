@@ -120,7 +120,8 @@ ElDialog {
                                 dialog.onFoundText.connect(function(data) {
                                     if (verifyPrivateKey(data))
                                         addPrivateKey(data)
-                                    dialog.close()
+                                    if (dialog.close)
+                                        dialog.close()
                                 })
                                 dialog.open()
                             }

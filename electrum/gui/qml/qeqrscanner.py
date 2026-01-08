@@ -26,10 +26,19 @@ class QEQRScanner(QObject):
 
     finished = pyqtSignal()
 
+    # helper signals for thread safety between android qr scanner activity and qt gui thread
+    _foundTextHelper = pyqtSignal(str)
+    _foundBinaryHelper = pyqtSignal(bytes)
+    _finishedHelper = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._hint = _("Scan a QR code.")
         self.finished.connect(self._unbind, Qt.ConnectionType.QueuedConnection)
+
+        self._foundTextHelper.connect(self.foundText, Qt.ConnectionType.QueuedConnection)
+        self._foundBinaryHelper.connect(self._emitFoundBinary, Qt.ConnectionType.QueuedConnection)
+        self._finishedHelper.connect(self.finished, Qt.ConnectionType.QueuedConnection)
 
         self.destroyed.connect(lambda: self.on_destroy())
 
@@ -43,6 +52,12 @@ class QEQRScanner(QObject):
     @hint.setter
     def hint(self, v: str):
         self._hint = v
+
+    @pyqtSlot(bytes)
+    def _emitFoundBinary(self, data):
+        """ constructs QEBytes on qt thread """
+        self._binary_content = QEBytes(data)
+        self.foundBinary.emit(self._binary_content)
 
     @pyqtSlot()
     def open(self):
@@ -60,14 +75,13 @@ class QEQRScanner(QObject):
         try:
             if resultCode == -1:  # RESULT_OK:
                 if (contents := intent.getStringExtra(jString("text"))) is not None:
-                    self.foundText.emit(contents)
+                    self._foundTextHelper.emit(contents)
                 if (contents := intent.getByteArrayExtra(jString("binary"))) is not None:
-                    self._binary_content = QEBytes(bytes(contents.tolist()))
-                    self.foundBinary.emit(self._binary_content)
+                    self._foundBinaryHelper.emit(bytes(contents.tolist()))
         except Exception as e:  # exc would otherwise get lost
             send_exception_to_crash_reporter(e)
         finally:
-            self.finished.emit()
+            self._finishedHelper.emit()
 
     @pyqtSlot()
     def _unbind(self):
