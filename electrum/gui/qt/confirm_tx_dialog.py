@@ -1178,9 +1178,22 @@ class ConfirmTxDialog(TxEditor):
         return grid
 
     def _update_extra_fees(self):
-        x_fee = run_hook('get_tx_extra_fee', self.wallet, self.tx)
-        if x_fee:
-            x_fee_address, x_fee_amount = x_fee
-            self.extra_fee_label.setVisible(True)
-            self.extra_fee_value.setVisible(True)
-            self.extra_fee_value.setText(self.main_window.format_amount_and_units(x_fee_amount))
+        x_fee_total = 0
+
+        # fetch plugin extra fees
+        x_fee_plugin = run_hook('get_tx_extra_fee', self.wallet, self.tx)
+        if x_fee_plugin:
+            _x_fee_address_plugin, x_fee_amount_plugin = x_fee_plugin
+            x_fee_total += x_fee_amount_plugin
+
+        # this is a forward swap (send change to lightning)
+        sm = self.swap_manager
+        if (dummy_output := self.tx.get_dummy_output(DummyAddress.SWAP)) and sm and sm.is_initialized.is_set():
+            ln_amount_we_recv = sm.get_recv_amount(send_amount=dummy_output.value, is_reverse=False)
+            if ln_amount_we_recv is not None:
+                x_fee_total += dummy_output.value - ln_amount_we_recv
+
+        self.extra_fee_label.setVisible(x_fee_total > 0)
+        self.extra_fee_value.setVisible(x_fee_total > 0)
+        if x_fee_total > 0:
+            self.extra_fee_value.setText(self.main_window.format_amount_and_units(x_fee_total))
