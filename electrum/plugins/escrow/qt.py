@@ -21,7 +21,7 @@ from electrum.network import Network
 from electrum.util import make_aiohttp_session, UserFacingException, get_asyncio_loop, \
     run_sync_function_on_asyncio_thread
 from electrum.gui.qt.util import (
-    WindowModalDialog, Buttons, OkButton, CancelButton,
+    WindowModalDialog, Buttons, OkButton, CancelButton, CloseButton,
     read_QIcon_from_bytes, read_QPixmap_from_bytes, read_QIcon, HelpLabel,
     icon_path, WWLabel, TaskThread, QtEventListener, qt_event_listener, WaitingDialog
 )
@@ -1128,6 +1128,77 @@ class EscrowAgentProfileDialog(WindowModalDialog, Logger):
         self.logger.exception("TaskThread error", exc_info=exc_info)
 
 
+class TradeDetailsDialog(WindowModalDialog):
+    def __init__(self, window: 'ElectrumWindow', plugin: 'Plugin', trade: Union[ClientEscrowTrade, AgentEscrowTrade], trade_id: str):
+        WindowModalDialog.__init__(self, window, _("Trade Details"))
+        self.window = window
+        self.plugin = plugin
+        self.trade = trade
+        self.trade_id = trade_id
+
+        vbox = QVBoxLayout(self)
+
+        details = []
+        details.append(f"<b>{_('Title')}:</b> {trade.contract.title}")
+        details.append(f"<b>{_('State')}:</b> {trade.state.name}")
+        details.append(f"<b>{_('Date')}:</b> {datetime.fromtimestamp(trade.creation_timestamp).strftime('%Y-%m-%d %H:%M')}")
+        details.append(f"<b>{_('Amount')}:</b> {self.window.format_amount_and_units(trade.contract.trade_amount_sat)}")
+        details.append(f"<b>{_('Bond')}:</b> {self.window.format_amount_and_units(trade.contract.bond_sat)}")
+        details.append(f"<b>{_('Contract')}:</b><br>{trade.contract.contract}")
+
+        if isinstance(trade, ClientEscrowTrade):
+            details.append(f"<b>{_('Agent')}:</b> {trade.escrow_agent_pubkey}")
+            details.append(f"<b>{_('Direction')}:</b> {trade.payment_direction.name}")
+            if trade.postbox_key:
+                 details.append(f"<b>{_('Postbox Key')}:</b> {trade.postbox_key}")
+            if trade_id:
+                 details.append(f"<b>{_('Trade ID')}:</b> {trade_id}")
+
+        elif isinstance(trade, AgentEscrowTrade):
+             details.append(f"<b>{_('Maker')}:</b> {trade.trade_participants.maker.pubkey}")
+             if trade.trade_participants.taker:
+                 details.append(f"<b>{_('Taker')}:</b> {trade.trade_participants.taker.pubkey}")
+             details.append(f"<b>{_('Trade ID')}:</b> {trade_id}")
+
+        self.detail_label = QLabel("<br><br>".join(details))
+        self.detail_label.setWordWrap(True)
+        self.detail_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        vbox.addWidget(self.detail_label)
+
+        self.buttons_layout = QHBoxLayout()
+        self.buttons_layout.addStretch(1)
+
+        close_btn = CloseButton(self)
+        self.buttons_layout.addWidget(close_btn)
+
+        if isinstance(trade, ClientEscrowTrade) and trade.state == TradeState.ONGOING:
+             self.confirm_btn = QPushButton(_("Request Collaborative Confirmation"))
+             self.confirm_btn.clicked.connect(self.request_collaborative_confirm)
+             self.buttons_layout.addWidget(self.confirm_btn)
+
+        vbox.addLayout(self.buttons_layout)
+
+    def request_collaborative_confirm(self):
+        if not self.window.question(_("Are you sure you want to request collaborative confirmation? This signals that the trade is complete.")):
+            return
+
+        worker = self.plugin.get_escrow_worker(self.window.wallet, worker_type=EscrowClient)
+
+        def do_request():
+            coro = worker.request_collaborative_confirm(self.trade_id)
+            fut = asyncio.run_coroutine_threadsafe(coro, get_asyncio_loop())
+            return fut.result()
+
+        def on_success(result):
+            self.window.show_message(_("Request sent successfully."))
+            self.confirm_btn.setEnabled(False)
+
+        def on_failure(exc_info):
+            self.window.show_error(str(exc_info[1]))
+
+        WaitingDialog(self, _("Requesting confirmation..."), do_request, on_success, on_failure)
+
+
 class EscrowPluginDialog(WindowModalDialog):
     def __init__(self, window: 'ElectrumWindow'):
         WindowModalDialog.__init__(self, window, _("Trade Escrow Plugin"))
@@ -1325,40 +1396,24 @@ class EscrowPluginDialog(WindowModalDialog):
         else:
             worker = self._plugin.get_escrow_worker(self._wallet, worker_type=EscrowClient)
 
-        trades = worker.get_trades()
-        trades.sort(key=lambda t: t.creation_timestamp, reverse=True)
+        trades = list(worker._trades.items())
+        trades.sort(key=lambda t: t[1].creation_timestamp, reverse=True)
 
-        for trade in trades:
+        for trade_id, trade in trades:
             date_str = datetime.fromtimestamp(trade.creation_timestamp).strftime('%Y-%m-%d %H:%M')
             item = QTreeWidgetItem([date_str, trade.contract.title, str(trade.state.name)])
             item.setData(0, Qt.ItemDataRole.UserRole, trade)
+            item.setData(0, Qt.ItemDataRole.UserRole + 1, trade_id)
             self.trades_list.addTopLevelItem(item)
 
     def _show_trade_details(self, item: QTreeWidgetItem, column: int):
         trade = item.data(0, Qt.ItemDataRole.UserRole)
+        trade_id = item.data(0, Qt.ItemDataRole.UserRole + 1)
         if not trade:
             return
 
-        details = []
-        details.append(f"<b>{_('Title')}:</b> {trade.contract.title}")
-        details.append(f"<b>{_('State')}:</b> {trade.state.name}")
-        details.append(f"<b>{_('Date')}:</b> {datetime.fromtimestamp(trade.creation_timestamp).strftime('%Y-%m-%d %H:%M')}")
-        details.append(f"<b>{_('Amount')}:</b> {self.main_window.format_amount_and_units(trade.contract.trade_amount_sat)}")
-        details.append(f"<b>{_('Bond')}:</b> {self.main_window.format_amount_and_units(trade.contract.bond_sat)}")
-        details.append(f"<b>{_('Contract')}:</b><br>{trade.contract.contract}")
-
-        if isinstance(trade, ClientEscrowTrade):
-            details.append(f"<b>{_('Agent')}:</b> {trade.escrow_agent_pubkey}")
-            details.append(f"<b>{_('Direction')}:</b> {trade.payment_direction.name}")
-            if trade.postbox_key:
-                 details.append(f"<b>{_('Postbox Key')}:</b> {trade.postbox_key}")
-
-        elif isinstance(trade, AgentEscrowTrade):
-             details.append(f"<b>{_('Maker')}:</b> {trade.trade_participants.maker.pubkey}")
-             if trade.trade_participants.taker:
-                 details.append(f"<b>{_('Taker')}:</b> {trade.trade_participants.taker.pubkey}")
-
-        self.main_window.show_message("<br><br>".join(details), title=_("Trade Details"))
+        d = TradeDetailsDialog(self.main_window, self._plugin, trade, trade_id)
+        d.exec()
 
     def _configure_profile(self):
         worker = self._plugin.get_escrow_worker(self._wallet, worker_type=EscrowAgent)
