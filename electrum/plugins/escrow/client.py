@@ -379,12 +379,31 @@ class EscrowClient(EscrowWorker):
         if not privkey:
             raise UserFacingException("Trade private key missing")
 
+        if payout_invoice is None:
+            if trade.payment_direction == TradePaymentDirection.RECEIVING:
+                agent_info = self.agent_infos.get(trade.escrow_agent_pubkey)
+                if not agent_info or not agent_info.profile_info:
+                    raise UserFacingException(_("Cannot calculate payout amount: Agent profile not found."))
+
+                fee_ppm = agent_info.profile_info.service_fee_ppm
+                fee_sat = (trade.contract.trade_amount_sat * fee_ppm) // 1_000_000
+                payout_amount = trade.contract.trade_amount_sat - fee_sat + trade.contract.bond_sat
+
+                message = f"Escrow payout: {trade.contract.title}"
+                req_key = self.wallet.create_request(
+                    amount_sat=payout_amount,
+                    message=message,
+                    exp_delay=60 * 60 * 24,
+                    address=None
+                )
+                req = self.wallet.get_request(req_key)
+                payout_invoice = self.wallet.get_bolt11_invoice(req)
+
         req_payload = {
             "method": TradeRPC.COLLABORATIVE_CONFIRM.value,
             "trade_id": trade_id,
+            "payout_invoice": payout_invoice,
         }
-        if payout_invoice:
-            req_payload['payout_invoice'] = payout_invoice
 
         try:
             response = await self.nostr_worker.send_encrypted_ephemeral_message_and_await_response(
