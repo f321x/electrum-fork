@@ -632,7 +632,8 @@ class WCConfirmCreate(WizardComponent, Logger):
         WaitingDialog(self, _("Paying funding invoice..."), pay_task, on_success, on_failure)
 
     def apply(self):
-        self.wizard_data['trade_id'] = self.response.trade_id
+        if self.response:
+            self.wizard_data['trade_id'] = self.response.trade_id
 
 
 class WCShowPostbox(WizardComponent, Logger):
@@ -667,6 +668,7 @@ class WCShowPostbox(WizardComponent, Logger):
         self.valid = False
         self.busy = True
 
+    def on_ready(self):
         self.create_postbox()
 
     def create_postbox(self):
@@ -796,11 +798,16 @@ class WCAcceptTrade(WizardComponent, Logger):
         self.wizard = wizard
         self.plugin = wizard.plugin
         self.wallet = wizard.main_window.wallet
+        self.thread = TaskThread(self, self.on_error)
+        self.valid = False
 
+    def on_ready(self):
         self.trade = self.wizard_data['trade']
         self.trade_id = self.wizard_data['trade_id']
         assert isinstance(self.trade, ClientEscrowTrade)
+        self.init_ui()
 
+    def init_ui(self):
         layout = self.layout()
         assert isinstance(layout, QVBoxLayout)
 
@@ -821,8 +828,6 @@ class WCAcceptTrade(WizardComponent, Logger):
         layout.addWidget(self.accept_button, alignment=Qt.AlignmentFlag.AlignCenter)
 
         layout.addStretch(1)
-        self.valid = False
-        self.thread = TaskThread(self, self.on_error)
 
     def accept_trade(self):
         msg = _("Do you want to accept this trade and pay the required amount?")
