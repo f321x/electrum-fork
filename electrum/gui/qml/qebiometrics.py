@@ -44,6 +44,7 @@ class QEBiometrics(QObject):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._current_action: Optional[BiometricAction] = None
 
     @pyqtProperty(bool, constant=True)
     def isAvailable(self) -> bool:
@@ -74,6 +75,8 @@ class QEBiometrics(QObject):
         self._start_activity(BiometricAction.DECRYPT, data=encrypted_bundle)
 
     def _start_activity(self, action: BiometricAction, data: str):
+        self._current_action = action
+
         _logger.debug(f"_start_activity: {action.value}, {len(data)=}")
         intent = jIntent(jPythonActivity, jBiometricActivity)
         intent.putExtra(jString("action"), jString(action.value))
@@ -94,7 +97,8 @@ class QEBiometrics(QObject):
         if requestCode != self.REQUEST_CODE_BIOMETRIC_ACTIVITY:
             return
 
-        action = BiometricAction(intent.getStringExtra(jString("action")))
+        action = self._current_action
+        self._current_action = None
 
         try:
             activity.unbind(on_activity_result=self._on_activity_result)

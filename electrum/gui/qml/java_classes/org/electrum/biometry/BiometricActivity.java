@@ -118,7 +118,6 @@ public class BiometricActivity extends Activity {
             Intent intent = getIntent();
             String action = intent.getStringExtra("action");
             Intent resultIntent = new Intent();
-            resultIntent.putExtra("action", action);
 
             if ("ENCRYPT".equals(action)) {
                 String data = intent.getStringExtra("data"); // Wallet password to encrypt
