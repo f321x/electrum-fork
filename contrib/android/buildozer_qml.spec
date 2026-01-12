@@ -171,7 +171,7 @@ android.gradle_dependencies =
     com.android.support:support-compat:28.0.0,
     org.jetbrains.kotlin:kotlin-stdlib:1.8.22
 
-android.add_activities = org.electrum.qr.SimpleScannerActivity, org.electrum.biometry.BiometricActivity
+android.add_activities = org.electrum.qr.SimpleScannerActivity
 
 # (list) Put these files or directories in the apk res directory.
 # The option may be used in three ways, the value may contain one or zero ':'
@@ -246,7 +246,7 @@ p4a.source_dir = /opt/python-for-android
 p4a.local_recipes = %(source.dir)s/contrib/android/p4a_recipes/
 
 # (str) Filename to the hook for p4a
-#p4a.hook =
+p4a.hook = contrib/android/manifest_hook.py
 
 # (str) Bootstrap to use for android builds
 p4a.bootstrap = qt6
