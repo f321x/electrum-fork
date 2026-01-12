@@ -171,7 +171,9 @@ android.gradle_dependencies =
     com.android.support:support-compat:28.0.0,
     org.jetbrains.kotlin:kotlin-stdlib:1.8.22
 
-android.add_activities = org.electrum.qr.SimpleScannerActivity, org.electrum.biometry.BiometricActivity
+android.add_activities = org.electrum.qr.SimpleScannerActivity
+
+android.extra_manifest_xml = contrib/android/extra_activities.xml
 
 # (list) Put these files or directories in the apk res directory.
 # The option may be used in three ways, the value may contain one or zero ':'

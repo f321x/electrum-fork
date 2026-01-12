@@ -1,0 +1,3 @@
+<activity android:name="org.electrum.biometry.BiometricActivity"
+          android:exported="false" />
+
