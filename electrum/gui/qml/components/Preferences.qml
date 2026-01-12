@@ -222,13 +222,7 @@ Pane {
 
                         Connections {
                             target: Biometrics
-                            function onEncryptionSuccess(encrypted_password) {
-                                Config.biometricsEnrolled = true
-                                Config.biometricData = encrypted_password
-                            }
-                            function onEncryptionError(error) {
-                                Config.biometricsEnrolled = false
-                                Config.biometricData = ''
+                            function onEnablingFailed(error) {
                                 useBiometrics.checked = false
                                 if (error === 'CANCELLED') {
                                     return // don't show error popup
@@ -242,12 +236,12 @@ Pane {
 
                         Switch {
                             id: useBiometrics
-                            checked: Config.biometricsEnrolled
+                            checked: Biometrics.isEnabled
                             onToggled: {
                                 if (activeFocus) {
                                     if (checked) {
                                         if (Daemon.singlePasswordEnabled) {
-                                            Biometrics.encrypt(Daemon.singlePassword)
+                                            Biometrics.enable(Daemon.singlePassword)
                                         } else {
                                             useBiometrics.checked = false
                                             var err = app.messageDialog.createObject(app, {
@@ -260,9 +254,7 @@ Pane {
                                             err.open()
                                         }
                                     } else {
-                                        // Disable
-                                        Config.biometricsEnrolled = false
-                                        Config.biometricData = ''
+                                        Biometrics.disable()
                                     }
                                 }
                             }

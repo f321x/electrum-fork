@@ -679,8 +679,10 @@ class SimpleConfig(Logger):
     # TODO: consider removing WALLET_DID_USE_SINGLE_PASSWORD once encrypted wallet file headers are available
     WALLET_DID_USE_SINGLE_PASSWORD = ConfigVar('did_use_single_password', default=False, type_=bool)
     WALLET_ANDROID_USE_BIOMETRIC_AUTHENTICATION = ConfigVar('android_use_biometrics', default=False, type_=bool)
-    # this is the "unified wallet password", encrypted with a random token (token stored in AndroidKeyStore)
-    WALLET_ANDROID_BIOMETRIC_ENCRYPTED_DATA = ConfigVar('android_biometric_data', default='', type_=str)
+    # this is the wrap key encrypted with a secret stored in AndroidKeyStore
+    WALLET_ANDROID_BIOMETRIC_AUTH_ENCRYPTED_WRAP_KEY = ConfigVar('android_biometrics_encrypted_wrap_key', default='', type_=str)
+    # this is the "unified wallet password", encrypted with a the wrap key
+    WALLET_ANDROID_BIOMETRIC_AUTH_WRAPPED_WALLET_PASSWORD = ConfigVar('android_biometrics_wrapped_wallet_password', default='', type_=str)
     # note: 'use_change' and 'multiple_change' are per-wallet settings
     WALLET_SEND_CHANGE_TO_LIGHTNING = ConfigVar(
         'send_change_to_lightning', default=False, type_=bool,

@@ -462,18 +462,6 @@ Pane {
     }
 
     Connections {
-        target: Biometrics
-        function onEncryptionSuccess(encrypted_password) {
-            // update the encrypted password in the config
-            Config.biometricData = encrypted_password
-        }
-        function onEncryptionError(error) {
-            Config.biometricsEnrolled = false
-            Config.biometricData = ''
-        }
-    }
-
-    Connections {
         target: Daemon
         function onWalletLoaded() {
             Daemon.availableWallets.reload()
@@ -487,14 +475,13 @@ Pane {
             })
             dialog.accepted.connect(function() {
                 var success = Daemon.setPassword(dialog.password)
-                if (success && Config.biometricsEnrolled) {
+                if (success && Biometrics.isEnabled) {
                     if (Biometrics.isAvailable) {
                         // also update the biometric authentication
-                        Biometrics.encrypt(dialog.password)
+                        Biometrics.enable(dialog.password)
                     } else {
                         // disable biometric authentication as it is not available
-                        Config.biometricsEnrolled = false
-                        Config.biometricData = ''
+                        Biometrics.disable()
                     }
                 }
                 var done_dialog = app.messageDialog.createObject(app, {
@@ -568,11 +555,10 @@ Pane {
                     }
                     var error_msg = qsTr('Password change failed')
                 }
-                if (success && Config.biometricsEnrolled) {
+                if (success && Biometrics.isEnabled) {
                     // unlikely to happen as this means the user somehow moved from
                     // a unified password to differing passwords
-                    Config.biometricsEnrolled = false
-                    Config.biometricData = ''
+                    Biometrics.disable()
                 }
                 var done_dialog = app.messageDialog.createObject(app, {
                     title: success ? qsTr('Success') : qsTr('Error'),

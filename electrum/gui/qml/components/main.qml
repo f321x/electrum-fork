@@ -638,7 +638,7 @@ ApplicationWindow
 
     Connections {
         target: Biometrics
-        function onDecryptionSuccess(password) {
+        function onUnlockSuccess(password) {
             if (_pendingBiometricAuth) {
                 if (_pendingBiometricAuth.action === 'load_wallet') {
                     _loadingWalletContext = _pendingBiometricAuth
@@ -659,17 +659,11 @@ ApplicationWindow
                 _pendingBiometricAuth = null
             }
         }
-        function onDecryptionError(error) {
+        function onUnlockError(error) {
             console.log("Biometric auth failed: " + error)
             // we end up here if android fails to give us the decrypted password. The user might
             // have cancelled the biometric auth popup or the key got invalidated.
             if (_pendingBiometricAuth) {
-                if (error === 'INVALIDATE') {
-                    console.log("deactivated biometric authentication")
-                    Config.biometricsEnrolled = false
-                    Config.biometricData = ''
-                }
-
                 // try manual auth
                 if (_pendingBiometricAuth.action === 'load_wallet') {
                     // set loadingWalletContext to disable biometric auth until the OpenWalletDialog is closed
@@ -706,13 +700,13 @@ ApplicationWindow
         target: Daemon
         function onWalletRequiresPassword(name, path) {
             console.log('wallet requires password')
-            if (Config.biometricsEnrolled && Biometrics.isAvailable && !_loadingWalletContext) {
+            if (Biometrics.isAvailable && Biometrics.isEnabled && !_loadingWalletContext) {
                 _pendingBiometricAuth = {
                     action: 'load_wallet',
                     name: name,
                     path: path
                 }
-                Biometrics.decrypt(Config.biometricData)
+                Biometrics.unlock()
             } else {
                 showOpenWalletDialog(name, path)
             }
@@ -848,9 +842,9 @@ ApplicationWindow
             }
         }
 
-        if (Config.biometricsEnrolled && Biometrics.isAvailable) {
+        if (Biometrics.isAvailable && Biometrics.isEnabled) {
              _pendingBiometricAuth = { qtobject: qtobject, method: method, authMessage: authMessage }
-             Biometrics.decrypt(Config.biometricData)
+             Biometrics.unlock()
              return
         }
 

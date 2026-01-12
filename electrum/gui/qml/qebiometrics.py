@@ -1,11 +1,16 @@
 import os
+import secrets
 from enum import Enum
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from electrum.logging import get_logger
 from electrum.base_crash_reporter import send_exception_to_crash_reporter
+from electrum.crypto import chacha20_poly1305_encrypt, chacha20_poly1305_decrypt
 
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, pyqtProperty
+
+if TYPE_CHECKING:
+    from electrum.simple_config import SimpleConfig
 
 
 _logger = get_logger(__name__)
@@ -37,13 +42,13 @@ class QEBiometrics(QObject):
     RESULT_CODE_SETUP_FAILED = 101  # codes duplicated from BiometricActivity.java
     RESULT_CODE_POPUP_CANCELLED = 102
 
-    encryptionSuccess = pyqtSignal(str, arguments=['encrypted_password'])
-    encryptionError = pyqtSignal(str, arguments=['error'])
-    decryptionSuccess = pyqtSignal(str, arguments=['password'])
-    decryptionError = pyqtSignal(str, arguments=['error'])
+    enablingFailed = pyqtSignal(str, arguments=['error'])
+    unlockSuccess = pyqtSignal(str, arguments=['password'])
+    unlockError = pyqtSignal(str, arguments=['error'])
 
-    def __init__(self, parent=None):
+    def __init__(self, *, config: 'SimpleConfig', parent=None):
         super().__init__(parent)
+        self.config = config
         self._current_action: Optional[BiometricAction] = None
 
     @pyqtProperty(bool, constant=True)
@@ -56,23 +61,44 @@ class QEBiometrics(QObject):
             send_exception_to_crash_reporter(e)
             return False
 
-    @pyqtSlot(str)
-    def encrypt(self, password: str):
-        """
-        This is done when enabling biometric authentication.
-        Encrypts the password. We get the encrypted, base64 encoded password and have to store it.
-        The encryption key is handled by the OS (secure element).
-        """
-        self._start_activity(BiometricAction.ENCRYPT, data=password)
+    @pyqtProperty(bool)
+    def isEnabled(self) -> bool:
+        return self.config.WALLET_ANDROID_USE_BIOMETRIC_AUTHENTICATION
 
     @pyqtSlot(str)
-    def decrypt(self, encrypted_bundle: str):
+    def enable(self, unified_wallet_password: str):
         """
-        Called when the user needs to authenticate. We pass the encrypted password, it will get
-        decrypted on java side with the decryption key from the OS.
-        encrypted_bundle format: "iv:ciphertext"
+        We encrypt (`wrap`) the wallet password with a random key 'wrap_key' and encrypt the random key
+        with the AndroidKeyStore.
+        Both the encrypted wrap_key and the encrypted wallet password are stored in the config.
+        The encryption secret for the wrap_key is stored in the AndroidKeyStore.
+        This way the wallet password doesn't have to leave the process.
         """
-        self._start_activity(BiometricAction.DECRYPT, data=encrypted_bundle)
+        wrap_key, encryption_nonce = secrets.token_bytes(32), secrets.token_bytes(12)
+        wrapped_wallet_password = chacha20_poly1305_encrypt(
+            key=wrap_key,
+            nonce=encryption_nonce,
+            data=unified_wallet_password.encode('utf-8'),
+        )
+        encrypted_password_bundle = f"{wrapped_wallet_password.hex()}:{encryption_nonce.hex()}"
+        self.config.WALLET_ANDROID_BIOMETRIC_AUTH_WRAPPED_WALLET_PASSWORD = encrypted_password_bundle
+        self._start_activity(BiometricAction.ENCRYPT, data=wrap_key.hex())
+
+    @pyqtSlot()
+    def disable(self):
+        self.config.WALLET_ANDROID_USE_BIOMETRIC_AUTHENTICATION = False
+        self.config.WALLET_ANDROID_BIOMETRIC_AUTH_WRAPPED_WALLET_PASSWORD = ''
+        self.config.WALLET_ANDROID_BIOMETRIC_AUTH_ENCRYPTED_WRAP_KEY = ''
+        _logger.info("Android biometric authentication disabled")
+
+    @pyqtSlot()
+    def unlock(self):
+        """
+        Called when the user needs to authenticate.
+        """
+        encrypted_wrap_key = self.config.WALLET_ANDROID_BIOMETRIC_AUTH_ENCRYPTED_WRAP_KEY
+        assert encrypted_wrap_key, "shouldn't unlock if biometric auth is disabled"
+        self._start_activity(BiometricAction.DECRYPT, data=encrypted_wrap_key)
 
     def _start_activity(self, action: BiometricAction, data: str):
         self._current_action = action
@@ -81,12 +107,12 @@ class QEBiometrics(QObject):
         intent = jIntent(jPythonActivity, jBiometricActivity)
         intent.putExtra(jString("action"), jString(action.value))
         if action == BiometricAction.ENCRYPT:
-            intent.putExtra(jString("data"), jString(data))  # password
+            intent.putExtra(jString("data"), jString(data))  # wrap_key
         elif action == BiometricAction.DECRYPT:
             assert ':' in data, f"malformed encrypted_bundle: {data=}"
-            iv, encrypted_password = data.split(':')
+            iv, encrypted_wrap_key = data.split(':')
             intent.putExtra(jString("iv"), jString(iv))
-            intent.putExtra(jString("data"), jString(encrypted_password))
+            intent.putExtra(jString("data"), jString(encrypted_wrap_key))
         else:
             raise ValueError(f"unsupported {action=}")
 
@@ -107,9 +133,9 @@ class QEBiometrics(QObject):
                 if action == BiometricAction.ENCRYPT:
                     iv = intent.getStringExtra(jString("iv"))
                     encrypted_bundle = f"{iv}:{data}"
-                    self.encryptionSuccess.emit(encrypted_bundle)
+                    self._on_wrap_key_encrypted(encrypted_bundle=encrypted_bundle)
                 else:
-                    self.decryptionSuccess.emit(data)  # password
+                    self._on_wrap_key_decrypted(wrap_key=data)
                 return
         except Exception as e:  # prevent exc from getting lost
             send_exception_to_crash_reporter(e)
@@ -118,7 +144,8 @@ class QEBiometrics(QObject):
         if resultCode == self.RESULT_CODE_SETUP_FAILED and action == BiometricAction.DECRYPT:
             # setup failed, we need to delete the encrypted password, it cannot be decrypted anymore
             _logger.debug(f"biometric decryption failed, probably invalidated key")
-            error = 'INVALIDATE'
+            error = 'INVALIDATED'
+            self.disable()
         elif resultCode == self.RESULT_CODE_POPUP_CANCELLED:  # user clicked cancel on auth popup
             _logger.debug(f"biometric auth cancelled by user")
             error = 'CANCELLED'
@@ -127,7 +154,23 @@ class QEBiometrics(QObject):
             error = f"{resultCode=}"
 
         if action == BiometricAction.DECRYPT:
-            self.decryptionError.emit(error)
+            self.unlockError.emit(error)
         else:
-            self.encryptionError.emit(error)
+            self.disable()
+            self.enablingFailed.emit(error)
+
+    def _on_wrap_key_decrypted(self, *, wrap_key: str):
+        encrypted_password_bundle = self.config.WALLET_ANDROID_BIOMETRIC_AUTH_WRAPPED_WALLET_PASSWORD
+        assert encrypted_password_bundle and ':' in encrypted_password_bundle
+        encrypted_password, encryption_nonce = encrypted_password_bundle.split(':')
+        decrypted_password = chacha20_poly1305_decrypt(
+            key=bytes.fromhex(wrap_key),
+            nonce=bytes.fromhex(encryption_nonce),
+            data=bytes.fromhex(encrypted_password),
+        )
+        self.unlockSuccess.emit(decrypted_password.decode('utf-8'))
+
+    def _on_wrap_key_encrypted(self, *, encrypted_bundle: str):
+        self.config.WALLET_ANDROID_BIOMETRIC_AUTH_ENCRYPTED_WRAP_KEY = encrypted_bundle
+        self.config.WALLET_ANDROID_USE_BIOMETRIC_AUTHENTICATION = True
 

@@ -538,7 +538,7 @@ class ElectrumQmlApplication(QGuiApplication):
         self.daemon = QEDaemon(daemon, self.plugins)
         self.appController = QEAppController(self, self.plugins)
         self.maxAmount = QEAmount(is_max=True)
-        self.biometrics = QEBiometrics(self)
+        self.biometrics = QEBiometrics(config=config, parent=self)
         self.context.setContextProperty('AppController', self.appController)
         self.context.setContextProperty('Config', self.config)
         self.context.setContextProperty('Network', self.network)
