@@ -49,6 +49,7 @@ class ElectrumGui(BaseElectrumGui, Logger):
         # os.environ['QT_DEBUG_PLUGINS'] = '1'
 
         os.environ['QT_ANDROID_DISABLE_ACCESSIBILITY'] = '1'
+        os.environ['QT_LOGGING_RULES'] = '*.debug=true;qt.qml.binding.removal.info=true'
 
         # set default locale to en_GB. This is for l10n (e.g. number formatting, number input etc),
         # but not for i18n, which is handled by the Translator
