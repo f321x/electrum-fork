@@ -419,14 +419,6 @@ ApplicationWindow
         }
     }
 
-    property alias pinDialog: _pinDialog
-    Component {
-        id: _pinDialog
-        Pin {
-            onClosed: destroy()
-        }
-    }
-
     property alias genericShareDialog: _genericShareDialog
     Component {
         id: _genericShareDialog
@@ -818,28 +810,20 @@ ApplicationWindow
     function handleAuthRequired(qtobject, method, authMessage) {
         console.log('auth using method ' + method)
 
-        if (method == 'wallet_else_pin') {
-            // if there is a loaded wallet and all wallets use the same password, use that
-            // else delegate to pin auth
-            if (Daemon.currentWallet && Daemon.singlePasswordEnabled) {
-                method = 'wallet'
+        if (method === 'if_config_enabled') {
+            if (Config.paymentAuthentication) {
+                method = 'wallet'  // treat like a wallet auth request
             } else {
-                method = 'pin'
-            }
-        }
-
-        if (method === 'wallet') {
-            if (Daemon.currentWallet.verifyPassword('')) {
-                // wallet has no password
-                qtobject.authProceed()
-                return
-            }
-        } else if (method === 'pin') {
-            if (Config.pinCode === '') {
-                // no PIN configured
                 handleAuthConfirmationOnly(qtobject, authMessage)
                 return
             }
+        }
+
+        console.assert(method === 'wallet', 'unsupported method')
+        if (Daemon.currentWallet.verifyPassword('')) {
+            // wallet has no password
+            qtobject.authProceed()
+            return
         }
 
         if (Biometrics.isAvailable && Biometrics.isEnabled) {
@@ -852,7 +836,7 @@ ApplicationWindow
     }
 
     function handleManualAuth(qtobject, method, authMessage) {
-        if (method == 'wallet') {
+        if (method === 'wallet') {  // 'if_config_enabled' should have been converted to 'wallet' at this point
             var dialog = app.passwordDialog.createObject(app, {'title': qsTr('Enter current password')})
             dialog.accepted.connect(function() {
                 if (Daemon.currentWallet.verifyPassword(dialog.password)) {
@@ -860,20 +844,6 @@ ApplicationWindow
                 } else {
                     qtobject.authCancel()
                 }
-            })
-            dialog.rejected.connect(function() {
-                qtobject.authCancel()
-            })
-            dialog.open()
-        } else if (method == 'pin') {
-            var dialog = app.pinDialog.createObject(app, {
-                mode: 'check',
-                pincode: Config.pinCode,
-                authMessage: authMessage
-            })
-            dialog.accepted.connect(function() {
-                qtobject.authProceed()
-                dialog.close()
             })
             dialog.rejected.connect(function() {
                 qtobject.authCancel()

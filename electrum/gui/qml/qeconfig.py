@@ -153,23 +153,25 @@ class QEConfig(AuthMixin, QObject):
         self.config.WALLET_PAYREQ_EXPIRY_SECONDS = expiry
         self.requestExpiryChanged.emit()
 
-    pinCodeChanged = pyqtSignal()
-    @pyqtProperty(str, notify=pinCodeChanged)
-    def pinCode(self):
-        return self.config.CONFIG_PIN_CODE or ""
+    paymentAuthenticationChanged = pyqtSignal()
+    @pyqtProperty(bool, notify=paymentAuthenticationChanged)
+    def paymentAuthentication(self):
+        return self.config.GUI_QML_PAYMENT_AUTHENTICATION
 
-    @pinCode.setter
-    def pinCode(self, pin_code):
-        if pin_code == '':
-            self.pinCodeRemoveAuth()
+    @paymentAuthentication.setter
+    def paymentAuthentication(self, enabled: bool):
+        if enabled:
+            self.config.GUI_QML_PAYMENT_AUTHENTICATION = True
         else:
-            self.config.CONFIG_PIN_CODE = pin_code
-            self.pinCodeChanged.emit()
+            self._disable_payment_authentication()
+        self.paymentAuthenticationChanged.emit()
 
-    @auth_protect(method='wallet_else_pin')
-    def pinCodeRemoveAuth(self):
-        self.config.CONFIG_PIN_CODE = ""
-        self.pinCodeChanged.emit()
+    @auth_protect(method='wallet')
+    def _disable_payment_authentication(self):
+        """
+        NOTE: if the user has a wallet without password it is possible to disable this without auth.
+        """
+        self.config.GUI_QML_PAYMENT_AUTHENTICATION = False
 
     useGossipChanged = pyqtSignal()
     @pyqtProperty(bool, notify=useGossipChanged)
