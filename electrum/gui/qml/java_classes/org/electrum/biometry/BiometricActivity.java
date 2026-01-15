@@ -49,6 +49,7 @@ public class BiometricActivity extends Activity {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return;
 
         Intent intent = getIntent();
+        String action = intent.getStringExtra("action");
         String authMessage = intent.getStringExtra("auth_message");
 
         Executor executor = getMainExecutor();
@@ -93,7 +94,21 @@ public class BiometricActivity extends Activity {
         };
 
         try {
-            biometricPrompt.authenticate(cancellationSignal, executor, callback);
+            if ("ENCRYPT".equals(action)) {
+                Cipher cipher = getCipher();
+                SecretKey secretKey = genSecretKey();
+                cipher.init(Cipher.ENCRYPT_MODE, secretKey);
+                biometricPrompt.authenticate(new BiometricPrompt.CryptoObject(cipher), cancellationSignal, executor, callback);
+            } else if ("DECRYPT".equals(action)) {
+                String ivStr = intent.getStringExtra("iv");
+                byte[] iv = Base64.decode(ivStr, Base64.NO_WRAP);
+                Cipher cipher = getCipher();
+                SecretKey secretKey = getSecretKey();
+                cipher.init(Cipher.DECRYPT_MODE, secretKey, new IvParameterSpec(iv));
+                biometricPrompt.authenticate(new BiometricPrompt.CryptoObject(cipher), cancellationSignal, executor, callback);
+            } else {
+                finish();
+            }
         } catch (Exception e) {
             Log.e(TAG, "Setup error", e);
             Toast.makeText(this, "Biometric setup failed: " + e.getMessage(), Toast.LENGTH_SHORT).show();
@@ -105,27 +120,18 @@ public class BiometricActivity extends Activity {
     private void handleAuthenticationSuccess(BiometricPrompt.AuthenticationResult result) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return;
         try {
+            BiometricPrompt.CryptoObject cryptoObject = result.getCryptoObject();
+            Cipher cipher = cryptoObject.getCipher();
             Intent intent = getIntent();
             String action = intent.getStringExtra("action");
             Intent resultIntent = new Intent();
 
             if ("ENCRYPT".equals(action)) {
-                Cipher cipher = getCipher();
-                SecretKey secretKey = genSecretKey();
-                cipher.init(Cipher.ENCRYPT_MODE, secretKey);
-
                 String data = intent.getStringExtra("data"); // wrap_key string to encrypt
                 byte[] encrypted = cipher.doFinal(data.getBytes(Charset.forName("UTF-8")));
                 resultIntent.putExtra("data", Base64.encodeToString(encrypted, Base64.NO_WRAP));
                 resultIntent.putExtra("iv", Base64.encodeToString(cipher.getIV(), Base64.NO_WRAP));
             } else {
-                String ivStr = intent.getStringExtra("iv");
-                byte[] iv = Base64.decode(ivStr, Base64.NO_WRAP);
-
-                Cipher cipher = getCipher();
-                SecretKey secretKey = getSecretKey();
-                cipher.init(Cipher.DECRYPT_MODE, secretKey, new IvParameterSpec(iv));
-
                 String dataStr = intent.getStringExtra("data"); // Encrypted blob
                 byte[] encrypted = Base64.decode(dataStr, Base64.NO_WRAP);
                 byte[] decrypted = cipher.doFinal(encrypted);
@@ -153,7 +159,7 @@ public class BiometricActivity extends Activity {
                 .setBlockModes(KeyProperties.BLOCK_MODE_CBC)
                 .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_PKCS7)
                 .setUserAuthenticationRequired(true)
-                .setUserAuthenticationParameters(5, KeyProperties.AUTH_BIOMETRIC_STRONG | KeyProperties.AUTH_DEVICE_CREDENTIAL);
+                .setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG | KeyProperties.AUTH_DEVICE_CREDENTIAL);
 
         keyGenerator.init(builder.build());
         keyGenerator.generateKey();
