@@ -5,7 +5,7 @@ from PyQt6.QtCore import pyqtSignal, pyqtSlot
 from electrum.logging import get_logger
 
 
-def auth_protect(func=None, reject=None, method='pin', message=''):
+def auth_protect(func=None, reject=None, method='if_config_enabled', message=''):
     if func is None:
         return partial(auth_protect, reject=reject, method=method, message=message)
 
