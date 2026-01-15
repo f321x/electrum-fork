@@ -3,6 +3,7 @@ import secrets
 from enum import Enum
 from typing import Optional, TYPE_CHECKING
 
+from electrum.i18n import _
 from electrum.logging import get_logger
 from electrum.base_crash_reporter import send_exception_to_crash_reporter
 from electrum.crypto import aes_encrypt_with_iv, aes_decrypt_with_iv
@@ -94,22 +95,25 @@ class QEBiometrics(QObject):
         _logger.info("Android biometric authentication disabled")
 
     @pyqtSlot()
-    def unlock(self):
+    @pyqtSlot(str)
+    def unlock(self, auth_message: str = None):
         """
         Called when the user needs to authenticate.
         Makes the AndroidKeyStore decrypt our encrypted wrap key, we then use the decrypted wrap key
         to decrypt the encrypted wallet password.
+        auth_message is shown in the system auth popup and defaults to 'Confirm your identity'.
         """
         encrypted_wrap_key = self.config.WALLET_ANDROID_BIOMETRIC_AUTH_ENCRYPTED_WRAP_KEY
         assert encrypted_wrap_key, "shouldn't unlock if biometric auth is disabled"
-        self._start_activity(BiometricAction.DECRYPT, data=encrypted_wrap_key)
+        self._start_activity(BiometricAction.DECRYPT, data=encrypted_wrap_key, auth_message=auth_message)
 
-    def _start_activity(self, action: BiometricAction, data: str):
+    def _start_activity(self, action: BiometricAction, data: str, auth_message: str = None):
         self._current_action = action
 
         _logger.debug(f"_start_activity: {action.value}, {len(data)=}")
         intent = jIntent(jPythonActivity, jBiometricActivity)
         intent.putExtra(jString("action"), jString(action.value))
+        intent.putExtra(jString("auth_message"), jString(auth_message or _("Confirm your identity")))
         if action == BiometricAction.ENCRYPT:
             intent.putExtra(jString("data"), jString(data))  # wrap_key
         elif action == BiometricAction.DECRYPT:
@@ -178,4 +182,3 @@ class QEBiometrics(QObject):
         self.config.WALLET_ANDROID_BIOMETRIC_AUTH_ENCRYPTED_WRAP_KEY = encrypted_bundle
         self.config.WALLET_ANDROID_USE_BIOMETRIC_AUTHENTICATION = True
         self.isEnabledChanged.emit()
-

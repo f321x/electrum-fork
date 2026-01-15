@@ -534,13 +534,13 @@ class QEWallet(AuthMixin, QObject, QtEventListener):
         self.isLightningChanged.emit()
         self.dataChanged.emit()
 
-    @auth_protect(message=_('Sign and send on-chain transaction?'))
+    @auth_protect(message=_('Sign and send on-chain transaction?'), method='if_config_no_fallback')
     def sign_and_broadcast(self, tx, *,
                            on_success: Callable[[Transaction], None] = None,
                            on_failure: Callable[[Optional[Any]], None] = None) -> None:
         self.do_sign(tx, True, on_success, on_failure)
 
-    @auth_protect(message=_('Sign on-chain transaction?'))
+    @auth_protect(message=_('Sign on-chain transaction?'), method='if_config_no_fallback')
     def sign(self, tx, *,
              on_success: Callable[[Transaction], None] = None,
              on_failure: Callable[[Optional[Any]], None] = None) -> None:
@@ -656,7 +656,7 @@ class QEWallet(AuthMixin, QObject, QtEventListener):
     def ln_auth_rejected(self):
         self.paymentAuthRejected.emit()
 
-    @auth_protect(message=_('Pay lightning invoice?'), reject='ln_auth_rejected')
+    @auth_protect(message=_('Pay lightning invoice?'), reject='ln_auth_rejected', method='if_config_no_fallback')
     def pay_lightning_invoice(self, invoice: 'Invoice', amount_msat: int = None):
         # at this point, the user confirmed the payment, potentially with an override amount.
         # we save the invoice with the override amount if there was no amount defined in the invoice.
