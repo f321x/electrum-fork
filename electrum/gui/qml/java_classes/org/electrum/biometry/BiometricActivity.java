@@ -5,6 +5,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.CancellationSignal;
 import android.content.Intent;
+import android.hardware.biometrics.BiometricManager;
 import android.hardware.biometrics.BiometricPrompt;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
@@ -34,8 +35,8 @@ public class BiometricActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            Log.e(TAG, "Biometrics not supported on this Android version (requires API 29+)");
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            Log.e(TAG, "Biometrics not supported on this Android version (requires API 30+)");
             setResult(RESULT_CANCELED);
             finish();
             return;
@@ -45,20 +46,16 @@ public class BiometricActivity extends Activity {
     }
 
     private void handleIntent() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return;
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return;
 
         Intent intent = getIntent();
-        String action = intent.getStringExtra("action");
+        String authMessage = intent.getStringExtra("auth_message");
 
         Executor executor = getMainExecutor();
         BiometricPrompt biometricPrompt = new BiometricPrompt.Builder(this)
                 .setTitle("Electrum Wallet")
-                .setSubtitle("Confirm your identity")
-                .setNegativeButton("Cancel", executor, (dialog, which) -> {
-                    Log.d(TAG, "Authentication cancelled");
-                    setResult(RESULT_POPUP_CANCELLED);
-                    finish();
-                })
+                .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG | BiometricManager.Authenticators.DEVICE_CREDENTIAL)
+                .setSubtitle(authMessage)
                 .build();
 
         cancellationSignal = new CancellationSignal();
@@ -67,8 +64,17 @@ public class BiometricActivity extends Activity {
             @Override
             public void onAuthenticationError(int errorCode, CharSequence errString) {
                 super.onAuthenticationError(errorCode, errString);
-                Log.e(TAG, "Authentication error: " + errString);
-                setResult(RESULT_CANCELED);
+                Log.e(TAG, "Authentication error: " + errorCode + " " + errString);
+
+                if (
+                        errorCode == BiometricPrompt.BIOMETRIC_ERROR_CANCELED ||
+                        errorCode == BiometricPrompt.BIOMETRIC_ERROR_USER_CANCELED ||
+                        errorCode == BiometricPrompt.BIOMETRIC_ERROR_TIMEOUT
+                ) {
+                    setResult(RESULT_POPUP_CANCELLED);
+                } else {
+                    setResult(RESULT_CANCELED);
+                }
                 finish();
             }
 
@@ -87,21 +93,7 @@ public class BiometricActivity extends Activity {
         };
 
         try {
-            if ("ENCRYPT".equals(action)) {
-                Cipher cipher = getCipher();
-                SecretKey secretKey = genSecretKey();
-                cipher.init(Cipher.ENCRYPT_MODE, secretKey);
-                biometricPrompt.authenticate(new BiometricPrompt.CryptoObject(cipher), cancellationSignal, executor, callback);
-            } else if ("DECRYPT".equals(action)) {
-                String ivStr = intent.getStringExtra("iv");
-                byte[] iv = Base64.decode(ivStr, Base64.NO_WRAP);
-                Cipher cipher = getCipher();
-                SecretKey secretKey = getSecretKey();
-                cipher.init(Cipher.DECRYPT_MODE, secretKey, new IvParameterSpec(iv));
-                biometricPrompt.authenticate(new BiometricPrompt.CryptoObject(cipher), cancellationSignal, executor, callback);
-            } else {
-                finish();
-            }
+            biometricPrompt.authenticate(cancellationSignal, executor, callback);
         } catch (Exception e) {
             Log.e(TAG, "Setup error", e);
             Toast.makeText(this, "Biometric setup failed: " + e.getMessage(), Toast.LENGTH_SHORT).show();
@@ -113,18 +105,27 @@ public class BiometricActivity extends Activity {
     private void handleAuthenticationSuccess(BiometricPrompt.AuthenticationResult result) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return;
         try {
-            BiometricPrompt.CryptoObject cryptoObject = result.getCryptoObject();
-            Cipher cipher = cryptoObject.getCipher();
             Intent intent = getIntent();
             String action = intent.getStringExtra("action");
             Intent resultIntent = new Intent();
 
             if ("ENCRYPT".equals(action)) {
+                Cipher cipher = getCipher();
+                SecretKey secretKey = genSecretKey();
+                cipher.init(Cipher.ENCRYPT_MODE, secretKey);
+
                 String data = intent.getStringExtra("data"); // wrap_key string to encrypt
                 byte[] encrypted = cipher.doFinal(data.getBytes(Charset.forName("UTF-8")));
                 resultIntent.putExtra("data", Base64.encodeToString(encrypted, Base64.NO_WRAP));
                 resultIntent.putExtra("iv", Base64.encodeToString(cipher.getIV(), Base64.NO_WRAP));
             } else {
+                String ivStr = intent.getStringExtra("iv");
+                byte[] iv = Base64.decode(ivStr, Base64.NO_WRAP);
+
+                Cipher cipher = getCipher();
+                SecretKey secretKey = getSecretKey();
+                cipher.init(Cipher.DECRYPT_MODE, secretKey, new IvParameterSpec(iv));
+
                 String dataStr = intent.getStringExtra("data"); // Encrypted blob
                 byte[] encrypted = Base64.decode(dataStr, Base64.NO_WRAP);
                 byte[] decrypted = cipher.doFinal(encrypted);
@@ -152,7 +153,7 @@ public class BiometricActivity extends Activity {
                 .setBlockModes(KeyProperties.BLOCK_MODE_CBC)
                 .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_PKCS7)
                 .setUserAuthenticationRequired(true)
-                .setInvalidatedByBiometricEnrollment(true);
+                .setUserAuthenticationParameters(5, KeyProperties.AUTH_BIOMETRIC_STRONG | KeyProperties.AUTH_DEVICE_CREDENTIAL);
 
         keyGenerator.init(builder.build());
         keyGenerator.generateKey();
