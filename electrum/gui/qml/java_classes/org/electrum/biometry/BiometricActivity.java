@@ -34,8 +34,8 @@ public class BiometricActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            Log.e(TAG, "Biometrics not supported on this Android version (requires API 29+)");
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            Log.e(TAG, "Biometrics not supported on this Android version (requires API 30+)");
             setResult(RESULT_CANCELED);
             finish();
             return;
@@ -45,21 +45,24 @@ public class BiometricActivity extends Activity {
     }
 
     private void handleIntent() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return;
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return;
 
         Intent intent = getIntent();
         String action = intent.getStringExtra("action");
+        String authMessage = intent.getStringExtra("auth_message");
 
         Executor executor = getMainExecutor();
-        BiometricPrompt biometricPrompt = new BiometricPrompt.Builder(this)
+        BiometricPrompt.Builder builder = new BiometricPrompt.Builder(this)
                 .setTitle("Electrum Wallet")
-                .setSubtitle("Confirm your identity")
-                .setNegativeButton("Cancel", executor, (dialog, which) -> {
-                    Log.d(TAG, "Authentication cancelled");
-                    setResult(RESULT_POPUP_CANCELLED);
-                    finish();
-                })
-                .build();
+                .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG | BiometricManager.Authenticators.DEVICE_CREDENTIALS);
+
+        if (authMessage != null && !authMessage.isEmpty()) {
+            builder.setSubtitle(authMessage);
+        } else {
+            builder.setSubtitle("Confirm your identity");
+        }
+
+        BiometricPrompt biometricPrompt = builder.build();
 
         cancellationSignal = new CancellationSignal();
 
