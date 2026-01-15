@@ -5,7 +5,21 @@ from PyQt6.QtCore import pyqtSignal, pyqtSlot
 from electrum.logging import get_logger
 
 
-def auth_protect(func=None, reject=None, method='pin', message=''):
+def auth_protect(func=None, reject=None, method='if_config_enabled', message=''):
+    """
+    Supported methods:
+        * if_config_enabled: If the user has enabled the 'Payment authentication' config
+                             they need to authenticate using biometrics or the wallet password.
+                             If the option is disabled they will have to confirm a dialog.
+        * if_config_no_fallback: Same as if_config_enabled but if the primary authentication method
+                                 (biometry if enabled, else wallet password) fails an available fallback
+                                 will not open. So e.g. if biometry is enabled and fails, no password
+                                 dialog will open as fallback.
+        * wallet: Biometric authentication if enabled, then fallback to a wallet password dialog
+        * wallet_password_only: No biometric authentication, user has to enter wallet password.
+        * wallet_no_fallback: Same as if_config_no_fallback, but not dependent on user configuration,
+                              always requires authentication.
+    """
     if func is None:
         return partial(auth_protect, reject=reject, method=method, message=message)
 
