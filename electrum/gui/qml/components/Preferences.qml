@@ -158,62 +158,6 @@ Pane {
                     }
 
                     RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 0
-                        Switch {
-                            id: usePin
-                            checked: Config.pinCode
-                            onCheckedChanged: {
-                                if (activeFocus) {
-                                    console.log('PIN active ' + checked)
-                                    if (checked) {
-                                        var dialog = pinSetup.createObject(preferences, {mode: 'enter'})
-                                        dialog.accepted.connect(function() {
-                                            Config.pinCode = dialog.pincode
-                                            dialog.close()
-                                        })
-                                        dialog.rejected.connect(function() {
-                                            checked = false
-                                        })
-                                        dialog.open()
-                                    } else {
-                                        focus = false
-                                        Config.pinCode = ''
-                                        // re-add binding, pincode still set if auth failed
-                                        checked = Qt.binding(function () { return Config.pinCode })
-                                    }
-                                }
-
-                            }
-                        }
-                        Label {
-                            Layout.fillWidth: true
-                            text: qsTr('PIN protect payments')
-                            wrapMode: Text.Wrap
-                        }
-                    }
-
-                    Pane {
-                        background: Rectangle { color: Material.dialogColor }
-                        padding: 0
-                        visible: Config.pinCode != ''
-                        FlatButton {
-                            text: qsTr('Modify')
-                            onClicked: {
-                                var dialog = pinSetup.createObject(preferences, {
-                                    mode: 'change',
-                                    pincode: Config.pinCode
-                                })
-                                dialog.accepted.connect(function() {
-                                    Config.pinCode = dialog.pincode
-                                    dialog.close()
-                                })
-                                dialog.open()
-                            }
-                        }
-                    }
-
-                    RowLayout {
                         Layout.columnSpan: 2
                         Layout.fillWidth: true
                         spacing: 0
@@ -262,6 +206,39 @@ Pane {
                         Label {
                             Layout.fillWidth: true
                             text: qsTr('Biometric authentication')
+                            wrapMode: Text.Wrap
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 0
+
+                        property bool noWalletPassword: Daemon.currentWallet ? Daemon.currentWallet.verifyPassword('') : true
+
+                        Switch {
+                            id: paymentAuthentication
+                            // showing the toggle as checked even if the wallet has no password would be misleading
+                            checked: Config.paymentAuthentication
+                                && ((Daemon.currentWallet && !parent.noWalletPassword) || !Daemon.currentWallet)
+                            enabled: Daemon.currentWallet && !parent.noWalletPassword
+                            onCheckedChanged: {
+                                if (activeFocus) {
+                                    console.log('paymentAuthentication: ' + checked)
+                                    if (checked) {
+                                        Config.paymentAuthentication = true
+                                    } else {
+                                        focus = false
+                                        Config.paymentAuthentication = false
+                                        // re-add binding, config still enabled if auth failed
+                                        checked = Qt.binding(function () { return Config.paymentAuthentication })
+                                    }
+                                }
+                            }
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            text: qsTr('Payment authentication')
                             wrapMode: Text.Wrap
                         }
                     }
@@ -513,11 +490,6 @@ Pane {
                 }
             }
         }
-    }
-
-    Component {
-        id: pinSetup
-        Pin {}
     }
 
     Component.onCompleted: {
