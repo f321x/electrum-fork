@@ -10,7 +10,8 @@ import "controls"
 ElDialog {
     id: passworddialog
 
-    title: qsTr("Enter Password")
+    property string authMessage
+    title: authMessage ? authMessage : qsTr("Enter Password")
     iconSource: Qt.resolvedUrl('../../icons/lock.png')
 
     property bool confirmPassword: false
