@@ -419,14 +419,6 @@ ApplicationWindow
         }
     }
 
-    property alias pinDialog: _pinDialog
-    Component {
-        id: _pinDialog
-        Pin {
-            onClosed: destroy()
-        }
-    }
-
     property alias genericShareDialog: _genericShareDialog
     Component {
         id: _genericShareDialog
@@ -654,7 +646,11 @@ ApplicationWindow
                     qtobject.authProceed()
                 } else {
                     console.log("Biometric password invalid falling back to manual input")
-                    handleManualAuth(qtobject, method, _pendingBiometricAuth.authMessage)
+                    if (method === 'wallet_no_fallback') {
+                        qtobject.authCancel()  // no fallback to password dialog
+                    } else {
+                        handleManualAuth(qtobject, method, _pendingBiometricAuth.authMessage)
+                    }
                 }
                 _pendingBiometricAuth = null
             }
@@ -818,62 +814,51 @@ ApplicationWindow
     function handleAuthRequired(qtobject, method, authMessage) {
         console.log('auth using method ' + method)
 
-        if (method == 'wallet_else_pin') {
-            // if there is a loaded wallet and all wallets use the same password, use that
-            // else delegate to pin auth
-            if (Daemon.currentWallet && Daemon.singlePasswordEnabled) {
-                method = 'wallet'
+        if (method === 'if_config_enabled' || method === 'if_config_no_fallback') {
+            if (Config.paymentAuthentication) {
+                // treat like a wallet auth request
+                if (method === 'if_config_no_fallback') {
+                    method = 'wallet_no_fallback'
+                } else {
+                    method = 'wallet'
+                }
             } else {
-                method = 'pin'
-            }
-        }
-
-        if (method === 'wallet') {
-            if (Daemon.currentWallet.verifyPassword('')) {
-                // wallet has no password
-                qtobject.authProceed()
-                return
-            }
-        } else if (method === 'pin') {
-            if (Config.pinCode === '') {
-                // no PIN configured
                 handleAuthConfirmationOnly(qtobject, authMessage)
                 return
             }
         }
 
-        if (Biometrics.isAvailable && Biometrics.isEnabled) {
-             _pendingBiometricAuth = { qtobject: qtobject, method: method, authMessage: authMessage }
-             Biometrics.unlock()
-             return
+        if (Daemon.currentWallet.verifyPassword('')) {
+            // wallet has no password
+            qtobject.authProceed()
+            return
+        }
+
+        if (method !== 'wallet_password_only') {
+            if (Biometrics.isAvailable && Biometrics.isEnabled) {
+                _pendingBiometricAuth = {
+                    qtobject: qtobject,
+                    method: method,
+                    authMessage: authMessage
+                }
+                Biometrics.unlock(authMessage)
+                return
+            }
         }
 
         handleManualAuth(qtobject, method, authMessage)
     }
 
     function handleManualAuth(qtobject, method, authMessage) {
-        if (method == 'wallet') {
-            var dialog = app.passwordDialog.createObject(app, {'title': qsTr('Enter current password')})
+        // 'if_config_enabled' should have been converted to 'wallet' at this point
+        if (method === 'wallet' || method === 'wallet_password_only' || method === 'wallet_no_fallback') {
+            var dialog = app.passwordDialog.createObject(app, authMessage ? {'title': authMessage} : {})
             dialog.accepted.connect(function() {
                 if (Daemon.currentWallet.verifyPassword(dialog.password)) {
                     qtobject.authProceed()
                 } else {
                     qtobject.authCancel()
                 }
-            })
-            dialog.rejected.connect(function() {
-                qtobject.authCancel()
-            })
-            dialog.open()
-        } else if (method == 'pin') {
-            var dialog = app.pinDialog.createObject(app, {
-                mode: 'check',
-                pincode: Config.pinCode,
-                authMessage: authMessage
-            })
-            dialog.accepted.connect(function() {
-                qtobject.authProceed()
-                dialog.close()
             })
             dialog.rejected.connect(function() {
                 qtobject.authCancel()
