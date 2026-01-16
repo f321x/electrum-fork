@@ -181,7 +181,7 @@ Pane {
                         Switch {
                             id: useBiometrics
                             checked: Biometrics.isEnabled
-                            onToggled: {
+                            onCheckedChanged: {
                                 if (activeFocus) {
                                     if (checked) {
                                         if (Daemon.singlePasswordEnabled) {
@@ -222,11 +222,11 @@ Pane {
                             id: paymentAuthentication
                             // showing the toggle as checked even if the wallet has no password would be misleading
                             checked: Config.paymentAuthentication && !(Daemon.currentWallet && parent.noWalletPassword)
-                            onToggled: {
+                            onCheckedChanged: {
                                 console.log('paymentAuthentication: ' + checked)
                                 if (activeFocus) {
                                     // will request authentication when checked = false
-                                    Config.paymentAuthentication = !!checked;
+                                    Config.paymentAuthentication = checked;
                                 }
                             }
                         }
