@@ -2508,7 +2508,7 @@ def create_wallet_history_export(*, wallet: 'Abstract_Wallet', fx: Optional['FxT
                 item['bc_value'],
                 item['ln_value'],
                 item.get('fiat_value', ''),
-                fees_sat,
+                format_satoshis(fees_sat),
                 str(fees_fiat or ''),
                 item['date']
             ]
@@ -2525,7 +2525,7 @@ def create_wallet_history_export(*, wallet: 'Abstract_Wallet', fx: Optional['FxT
                                   "amount_chain_bc",
                                   "amount_lightning_bc",
                                   "fiat_value",
-                                  "network_fee_satoshi",
+                                  "network_fee_bc",
                                   "fiat_fee",
                                   "timestamp"])
             for line in lines:
