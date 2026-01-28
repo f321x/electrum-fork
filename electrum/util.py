@@ -2467,7 +2467,9 @@ class LightningHistoryItem(NamedTuple):
 def create_wallet_history_export(*, wallet: 'Abstract_Wallet', fx: Optional['FxThread'], file_path: str, is_csv: bool):
     """Create a file containing the wallet history in either json or csv format, e.g. for bookkeeping."""
     txns = wallet.get_full_history(fx=fx)
-    lines = []
+    # remove unconfirmed/local tx as their ordering is not deterministic, and they don't seem
+    # useful for a wallet export (can't do accounting on a tx that hasn't happened yet)
+    txns = {k: v for k, v in txns.items() if v['timestamp'] not in (None, 0)}
 
     def get_all_fees_paid_by_item(h_item: dict) -> Tuple[int, Optional[Fiat]]:
         # gets all fees paid in an item (or group), as the outer group doesn't contain the
@@ -2491,9 +2493,10 @@ def create_wallet_history_export(*, wallet: 'Abstract_Wallet', fx: Optional['FxT
 
         return fees_sat, fees_fiat
 
+    lines = []
     if is_csv:
         # sort by timestamp so the generated csv is more understandable on first sight
-        txns = dict(sorted(txns.items(), key=lambda h_item: h_item[1]['timestamp'] or 0))
+        txns = dict(sorted(txns.items(), key=lambda h_item: h_item[1]['timestamp']))
         for item in txns.values():
             # tx groups will are shown as single element
             fees_sat, fees_fiat = get_all_fees_paid_by_item(item)
