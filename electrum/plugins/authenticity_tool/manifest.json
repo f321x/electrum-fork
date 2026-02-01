@@ -1,0 +1,8 @@
+{
+  "name": "authenticity_tool",
+  "fullname": "File Authenticity Tool",
+  "description": "Verify that some file has been signed by an entity that you trust.",
+  "author":"f321x",
+  "icon":"trust_icon.png",
+  "available_for": ["qt"]
+}
