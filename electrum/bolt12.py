@@ -26,6 +26,7 @@
 import copy
 import io
 import os
+import re
 from decimal import Decimal
 
 from typing import TYPE_CHECKING, Union, Optional, List, Tuple
@@ -37,15 +38,19 @@ from .bitcoin import COIN
 from .lnaddr import LnAddr
 from .lnmsg import OnionWireSerializer, batched
 from .onion_message import Timeout
-from .segwit_addr import bech32_decode, convertbits, DecodedBech32
+from .segwit_addr import bech32_decode, convertbits, INVALID_BECH32, CHARSET as BECH32_CHARSET
 
 if TYPE_CHECKING:
     from .lnworker import LNWallet
 
 
 def is_offer(data: str) -> bool:
+    try:
+        data = remove_bolt12_whitespace(data)
+    except ValueError:
+        return False
     d = bech32_decode(data, ignore_long_length=True, with_checksum=False)
-    if d == DecodedBech32(None, None, None):
+    if d == INVALID_BECH32:
         return False
     return d.hrp == 'lno'
 
@@ -61,12 +66,14 @@ def matches_our_chain(chains: bytes) -> bool:
 
 
 def bolt12_bech32_to_bytes(data: str) -> bytes:
+    data = remove_bolt12_whitespace(data)
     d = bech32_decode(data, ignore_long_length=True, with_checksum=False)
-    d = bytes(convertbits(d.data, 5, 8))
-    # we bomb on trailing 0, remove
-    while d[-1] == 0:
-        d = d[:-1]
-    return d
+    if d == INVALID_BECH32:
+        raise ValueError(f"Failed to bech32 decode: {data[:64]=}...")
+    d = convertbits(d.data, 5, 8, pad=False)
+    if d is None:
+        raise ValueError(f"Invalid bech32 data: {data[:64]=}...")
+    return bytes(d)
 
 
 def decode_offer(data: Union[str, bytes]) -> dict:
@@ -248,3 +255,21 @@ def _raise_invoice_error(payload):
     with io.BytesIO(invoice_error_tlv) as fd:
         invoice_error = OnionWireSerializer.read_tlv_stream(fd=fd, tlv_stream_name='invoice_error')
     raise Bolt12InvoiceError(invoice_error.get('error', {}).get('msg'))
+
+
+def remove_bolt12_whitespace(bolt12_bech32: str) -> str:
+    """
+    Readers of a bolt12 string:
+    if it encounters a + followed by zero or more whitespace characters between two bech32 characters:
+        MUST remove the + and whitespace.
+    """
+    assert isinstance(bolt12_bech32, str)
+    res = re.sub(
+        r'(?<=[' + BECH32_CHARSET + r'])\+\s*(?=[' + BECH32_CHARSET + r'])',
+        '',
+        bolt12_bech32,
+        flags=re.IGNORECASE,
+    )
+    if '+' in res:
+        raise ValueError('Invalid bolt 12 whitespace')
+    return res
