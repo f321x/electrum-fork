@@ -191,6 +191,14 @@ def _read_primitive_field(
     if field_type == 'utf8':
         return buf.decode('utf-8')
 
+    if field_type == 'point':
+        for point in batched(buf, type_len):
+            point = bytes(point)
+            try:
+                ecc.ECPubkey(b=point)
+            except Exception as e:
+                raise MalformedMsg(f"invalid point: {point.hex()}") from e
+
     return buf
 
 
