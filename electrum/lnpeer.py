@@ -56,6 +56,7 @@ from .json_db import StoredDict
 from .invoices import PR_PAID
 from .fee_policy import FEE_LN_ETA_TARGET, FEERATE_PER_KW_MIN_RELAY_LIGHTNING
 from .channel_db import FLAG_DIRECTION
+from .bolt12 import BOLT12Invoice
 
 if TYPE_CHECKING:
     from .lnworker import LNGossip, LNWallet
@@ -1925,7 +1926,7 @@ class Peer(Logger, EventListener):
             min_final_cltv_delta: int,
             payment_secret: bytes,
             trampoline_onion: Optional[OnionPacket] = None,
-            bolt12_invoice: Optional[dict] = None,
+            bolt12_invoice: Optional[BOLT12Invoice] = None,
         ) -> UpdateAddHtlc:
 
         assert amount_msat > 0, "amount_msat is not greater zero"

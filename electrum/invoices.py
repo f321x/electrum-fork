@@ -232,18 +232,14 @@ class BaseInvoice(StoredObject):
 
     @classmethod
     def from_bolt12_invoice(cls, bolt12_invoice_bech32: str) -> 'Invoice':
-        from .bolt12 import decode_invoice
-        bolt12_invoice = decode_invoice(bolt12_invoice_bech32)
-        amount_msat = bolt12_invoice.get('invoice_amount').get('msat')
-        timestamp = bolt12_invoice.get('invoice_created_at').get('timestamp')
-        exp_delay = bolt12_invoice.get('invoice_relative_expiry', {}).get('seconds_from_creation', 0)
-        message = bolt12_invoice.get('offer_description', {}).get('description', '')
+        from .bolt12 import BOLT12Invoice
+        bolt12_invoice = BOLT12Invoice.decode(bolt12_invoice_bech32)
 
         return Invoice(
-            message=message,
-            amount_msat=amount_msat,
-            time=timestamp,
-            exp=exp_delay,
+            message=bolt12_invoice.offer_description,
+            amount_msat=bolt12_invoice.invoice_amount,
+            time=bolt12_invoice.invoice_created_at,
+            exp=bolt12_invoice.invoice_relative_expiry or 0,
             outputs=None,
             bip70=None,
             height=0,
@@ -299,10 +295,10 @@ class Invoice(BaseInvoice):
 
     @property
     def bolt12_invoice(self):
-        """Returns decoded bolt12 invoice dict, or None if this is not a bolt12 invoice."""
+        """Returns decoded BOLT12Invoice, or None if this is not a bolt12 invoice."""
         if self.is_bolt12_invoice():
-            from .bolt12 import decode_invoice
-            return decode_invoice(self.lightning_invoice)
+            from .bolt12 import BOLT12Invoice
+            return BOLT12Invoice.decode(self.lightning_invoice)
         return None
 
     @property
@@ -324,8 +320,8 @@ class Invoice(BaseInvoice):
     def _validate_invoice_str(self, attribute, value):
         if value is not None:
             if value.startswith('lni'):
-                from .bolt12 import decode_invoice, to_lnaddr
-                bolt12_invoice = decode_invoice(value)
+                from .bolt12 import BOLT12Invoice, to_lnaddr
+                bolt12_invoice = BOLT12Invoice.decode(value)
                 self.__lnaddr = to_lnaddr(bolt12_invoice)
             else:
                 lnaddr = decode_bolt11_invoice(value)  # this checks the str can be decoded

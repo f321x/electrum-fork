@@ -138,8 +138,8 @@ class PaymentIdentifier(Logger):
         self.lnurl = None  # type: Optional[str]
         self.lnurl_data = None # type: Optional[LNURLData]
         #
-        self.bolt12_offer = None
-        self.bolt12_invoice = None
+        self.bolt12_offer = None  # type: Optional[bolt12.BOLT12Offer]
+        self.bolt12_invoice = None  # type: Optional[bolt12.BOLT12Invoice]
 
         self.parse(text)
 
@@ -192,7 +192,7 @@ class PaymentIdentifier(Logger):
             return bool(self.bolt11.get_amount_sat())
         elif self._type == PaymentIdentifierType.BOLT12_OFFER:
             # if we received an invoice already, amount is locked
-            return bool(self.bolt12_offer.get('offer_amount')) if not self.is_available() else True
+            return bool(self.bolt12_offer.offer_amount) if not self.is_available() else True
         elif self._type in [PaymentIdentifierType.LNURLP, PaymentIdentifierType.LNADDR]:
             # amount limits known after resolve, might be specific amount or locked to range
             if self.need_resolve():
@@ -237,7 +237,7 @@ class PaymentIdentifier(Logger):
             elif valid_bech32_lightning_pi.startswith('lno'):
                 self.logger.debug(f'BOLT12 offer')
                 try:
-                    self.bolt12_offer = bolt12.decode_offer(valid_bech32_lightning_pi)
+                    self.bolt12_offer = bolt12.BOLT12Offer.decode(valid_bech32_lightning_pi)
                     self._type = PaymentIdentifierType.BOLT12_OFFER
                     self.set_state(PaymentIdentifierState.BOLT12_FINALIZE)
                 except Exception as e:
@@ -567,15 +567,11 @@ class PaymentIdentifier(Logger):
             recipient, amount, description = self._get_bolt11_fields()
 
         elif self.bolt12_offer:
-            offer_amount = self.bolt12_offer.get('offer_amount')
+            offer_amount = self.bolt12_offer.offer_amount
             if offer_amount:
-                amount = Decimal(offer_amount.get('amount')) / 1000  # msat->sat
-            offer_description = self.bolt12_offer.get('offer_description')
-            if offer_description:
-                description = offer_description.get('description')
-            offer_issuer = self.bolt12_offer.get('offer_issuer')
-            if offer_issuer:
-                recipient = offer_issuer.get('issuer')
+                amount = Decimal(offer_amount) / 1000  # msat->sat
+            description = self.bolt12_offer.offer_description
+            recipient = self.bolt12_offer.offer_issuer
 
         elif self.lnurl and self.lnurl_data:
             assert isinstance(self.lnurl_data, LNURL6Data), f"{self.lnurl_data=}"
@@ -641,13 +637,11 @@ class PaymentIdentifier(Logger):
         elif self.bolt12_offer or self.bolt12_invoice:
             # TODO: invoice not from offer, or original offer unavailable (e.g. saved resolved invoice from offer)
             if self.bolt12_offer:
-                offer_absolute_expiry = self.bolt12_offer.get('offer_absolute_expiry', {}).get('seconds_from_epoch', 0)
-                if offer_absolute_expiry:
+                if (offer_absolute_expiry := self.bolt12_offer.offer_absolute_expiry) is not None:
                     return now() > offer_absolute_expiry
             if self.bolt12_invoice:
-                invoice_relative_expiry = self.bolt12_invoice.get('invoice_relative_expiry', {}).get('seconds_from_creation', 0)
-                if invoice_relative_expiry:
-                    return now() > self.bolt12_invoice.get('invoice_created_at').get('timestamp') + invoice_relative_expiry
+                if (invoice_relative_expiry := self.bolt12_invoice.invoice_relative_expiry) is not None:
+                    return now() > self.bolt12_invoice.invoice_created_at + invoice_relative_expiry
         elif self.bip21:
             expires = self.bip21.get('exp') + self.bip21.get('time') if self.bip21.get('exp') else 0
             return bool(expires) and expires < time.time()

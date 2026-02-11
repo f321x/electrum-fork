@@ -29,7 +29,7 @@ import dns.asyncresolver
 import dns.exception
 from aiorpcx import run_in_thread, NetAddress, ignore_after
 
-from .bolt12 import encode_invoice, Bolt12InvoiceError, Offer, decode_offer
+from .bolt12 import Bolt12InvoiceError, Offer, BOLT12Offer, BOLT12Invoice
 from .logging import Logger
 from .i18n import _
 from .json_db import stored_in
@@ -59,7 +59,8 @@ from .crypto import (
 )
 
 from .onion_message import (
-    OnionMessageManager, send_onion_message_to, encode_blinded_path, get_blinded_reply_paths, NoOnionMessagePeers
+    OnionMessageManager, send_onion_message_to, encode_blinded_path, get_blinded_reply_paths,
+    NoOnionMessagePeers, BlindedPathInfo
 )
 from .lntransport import (
     LNTransport, LNResponderTransport, LNTransportBase, LNPeerAddr, split_host_port, extract_nodeid,
@@ -865,7 +866,7 @@ class PaySession(Logger):
             invoice_pubkey: bytes,
             uses_trampoline: bool,  # whether sender uses trampoline or gossip
             use_two_trampolines: bool,  # whether legacy payments will try to use two trampolines
-            bolt12_invoice: Optional[dict] = None,
+            bolt12_invoice: Optional[BOLT12Invoice] = None,
     ):
         assert payment_hash
         assert payment_secret
@@ -1833,7 +1834,7 @@ class LNWallet(Logger):
         if invoice.is_bolt12_invoice():
             bolt12_invoice = invoice.bolt12_invoice
             lnaddr = self._check_bolt12_invoice(bolt12_invoice, amount_msat=amount_msat)
-            min_final_cltv_delta = bolt12_invoice.get('invoice_blindedpay').get('payinfo')[0].get('cltv_expiry_delta')
+            min_final_cltv_delta = bolt12_invoice.invoice_blindedpay[0].cltv_expiry_delta
         elif bolt11 := invoice.lightning_invoice:
             lnaddr = self._check_bolt11_invoice(bolt11, amount_msat=amount_msat)
             min_final_cltv_delta = lnaddr.get_min_final_cltv_delta()
@@ -1918,7 +1919,7 @@ class LNWallet(Logger):
             budget: PaymentFeeBudget,
             channels: Optional[Sequence[Channel]] = None,
             fw_payment_key: str = None,  # for forwarding
-            bolt12_invoice: Optional[dict] = None,  # TODO: lots of unnecessary data included here, split off later
+            bolt12_invoice: Optional[BOLT12Invoice] = None,  # TODO: lots of unnecessary data included here, split off later
     ) -> None:
         """
         Can raise PaymentFailure, ChannelDBNotLoaded,
@@ -2269,7 +2270,7 @@ class LNWallet(Logger):
         addr.validate_and_compare_features(self.features)
         return addr
 
-    def _check_bolt12_invoice(self, invoice: dict, *, amount_msat: int = None) -> LnAddr:
+    def _check_bolt12_invoice(self, invoice: BOLT12Invoice, *, amount_msat: int = None) -> LnAddr:
         """Parses and validates a bolt12 invoice dict into a LnAddr.
         Includes pre-payment checks external to the parser.
         """
@@ -2528,7 +2529,7 @@ class LNWallet(Logger):
             my_sending_channels: List[Channel],
             full_path: Optional[LNPaymentPath],
             budget: PaymentFeeBudget,
-            bolt12_invoice: Optional[dict],
+            bolt12_invoice: Optional[BOLT12Invoice],
     ) -> LNPaymentRoute:
 
         my_sending_aliases = set(chan.get_local_scid_alias() for chan in my_sending_channels)
@@ -2578,8 +2579,8 @@ class LNWallet(Logger):
         # now find a route, end to end: between us and the recipient
         dest_node = invoice_pubkey
         if bolt12_invoice:
-            paths = bolt12_invoice.get('invoice_paths').get('paths')
-            dest_node = paths[0].get('first_node_id')
+            paths = bolt12_invoice.invoice_paths
+            dest_node = paths[0].first_node_id
         try:
             route = self.network.path_finder.find_route(
                 nodeA=self.node_keypair.pubkey,
@@ -4157,7 +4158,7 @@ class LNWallet(Logger):
         min_final_cltv_delta: int,
         payment_secret: bytes,
         trampoline_onion: Optional[OnionPacket] = None,
-        bolt12_invoice: Optional[dict] = None,
+        bolt12_invoice: Optional[BOLT12Invoice] = None,
     ):
         # add features learned during "init" for direct neighbour:
         route[0].node_features |= self.features
@@ -4253,7 +4254,7 @@ class LNWallet(Logger):
             offer_paths=reply_paths, node_id=self.node_keypair.pubkey, amount_msat=amount_msat,
             memo=memo, expiry=expiry, issuer=issuer)
         with self.lock:
-            o = self._offers[offer_id] = Offer(offer_id=offer_id, offer_bech32=bolt12.encode_offer(offer, as_bech32=True))
+            o = self._offers[offer_id] = Offer(offer_id=offer_id, offer_bech32=offer.encode(as_bech32=True))
             self.db.get('offers')[offer_id.hex()] = o
         return offer_id
 
@@ -4273,7 +4274,7 @@ class LNWallet(Logger):
         with self.lock:
             return self._offers.copy()
 
-    def add_path_ids_for_payment_hash(self, payment_hash, invoice_paths):
+    def add_path_ids_for_payment_hash(self, payment_hash: bytes, invoice_paths: Sequence[BlindedPathInfo]):
         """Store payment hash -> [path_id] association """
         with self.lock:
             path_ids = [x.path_id for x in invoice_paths]
@@ -4285,16 +4286,15 @@ class LNWallet(Logger):
         self.logger.debug(f'on_bolt12_invoice_request: {recipient_data=} {payload=}')
 
         invreq_tlv = payload['invoice_request']['invoice_request']
-        invreq = bolt12.decode_invoice_request(invreq_tlv)
+        invreq = bolt12.BOLT12InvoiceRequest.decode(invreq_tlv)
         self.logger.info(f'invoice_request: {invreq=}')
 
-        offer_id = invreq.get('offer_metadata', {}).get('data')
-        offer = self.get_offer(offer_id)
+        offer: Offer = self.get_offer(invreq.offer_metadata)
         if offer is None:
             self.logger.warning('no matching offer for invoice_request')
             return
-        self.logger.debug(f'invoice_request for offer_id={offer_id.hex()}')
-        offer = decode_offer(offer.offer_bech32)
+        self.logger.debug(f'invoice_request for offer_id={invreq.offer_metadata.hex()}')
+        offer: BOLT12Offer = bolt12.BOLT12Offer.decode(offer.offer_bech32)
 
         # two scenarios:
         # 1) not in response to offer (no offer_issuer_id or offer_paths)
@@ -4335,10 +4335,10 @@ class LNWallet(Logger):
             node_id_or_blinded_path = encode_blinded_path(payload['reply_path']['path'])
         else:
             # spec: MUST use invreq_paths if present, otherwise MUST use invreq_payer_id as the node id to send to.
-            if 'invreq_paths' in invreq:
-                node_id_or_blinded_path = invreq['invreq_paths']['paths'][0]  # take first
+            if invreq.invreq_paths is not None:
+                node_id_or_blinded_path = invreq.invreq_paths[0].first_node_id  # take first
             else:
-                node_id_or_blinded_path = invreq['invreq_payer_id']
+                node_id_or_blinded_path = invreq.invreq_payer_id
 
         try:
             invoice = bolt12.verify_request_and_create_invoice(self, offer, invreq)
@@ -4348,7 +4348,7 @@ class LNWallet(Logger):
             return
 
         destination_payload = {
-            'invoice': {'invoice': encode_invoice(invoice, self.node_keypair.privkey)}
+            'invoice': {'invoice': invoice.encode(signing_key=self.node_keypair.privkey)},
         }
 
         send_onion_message_to(self, node_id_or_blinded_path, destination_payload)
