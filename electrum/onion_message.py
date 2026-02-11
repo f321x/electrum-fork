@@ -423,6 +423,17 @@ class BlindedPath:
             raise ValueError(f'{len(self.path)=} != {self.hop_count=}')
         ecc.ECPubkey(b=self.first_path_key)
 
+    @classmethod
+    def from_dict(cls, d: dict) -> 'BlindedPath':
+        if isinstance(d['path'], Mapping):  # single path
+            d['path'] = [d['path']]
+        return BlindedPath(
+            first_node_id=d['first_node_id'],
+            first_path_key=d['first_path_key'],
+            num_hops=d['num_hops'],
+            path=[BlindedPathHop(**p) for p in d['path']],
+        )
+
 
 @dataclasses.dataclass(frozen=True)
 class BlindedPayInfo:
@@ -432,6 +443,39 @@ class BlindedPayInfo:
     htlc_minimum_msat: int
     htlc_maximum_msat: int
     features: LnFeatures
+
+    @property
+    def has_unknown_features(self) -> bool:
+        """
+        MUST NOT use the corresponding invoice_paths.path if payinfo.features has any unknown even bits set.
+        """
+        try:
+            validate_features(self.features)
+        except IncompatibleOrInsaneFeatures:
+            return True
+        return False
+
+    @classmethod
+    def from_dict(cls, d: dict) -> 'BlindedPayInfo':
+        return BlindedPayInfo(
+            fee_base_msat=int(d['fee_base_msat']),
+            fee_proportional_millionths=int(d['fee_proportional_millionths']),
+            cltv_expiry_delta=int(d['cltv_expiry_delta']),
+            htlc_minimum_msat=int(d['htlc_minimum_msat']),
+            htlc_maximum_msat=int(d['htlc_maximum_msat']),
+            features=LnFeatures(int.from_bytes(d['features'], byteorder="big", signed=False))
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            'fee_base_msat': self.fee_base_msat,
+            'fee_proportional_millionths': self.fee_proportional_millionths,
+            'cltv_expiry_delta': self.cltv_expiry_delta,
+            'htlc_minimum_msat': self.htlc_minimum_msat,
+            'htlc_maximum_msat': self.htlc_maximum_msat,
+            'flen': len(self.features.to_tlv_bytes()),
+            'features': self.features.to_tlv_bytes()
+        }
 
 
 class BlindedPathInfo(NamedTuple):
