@@ -45,6 +45,7 @@ import re
 import electrum_ecc as ecc
 
 from . import util, bolt12
+from .bolt12 import BOLT12Invoice, BOLT12Offer, BOLT12InvoiceRequest
 from .lnmsg import OnionWireSerializer
 from .lnworker import LN_P2P_NETWORK_TIMEOUT
 from .logging import Logger
@@ -1390,9 +1391,8 @@ class Commands(Logger):
         arg:decimal:amount:Amount to send
         """
         amount_msat = satoshis(amount) * 1000 if amount else None
-        bolt12_offer = bolt12.decode_offer(offer)
-        offer_amount = bolt12_offer.get('offer_amount')
-        offer_amount_msat = offer_amount.get('amount')
+        bolt12_offer = bolt12.BOLT12Offer.decode(offer)
+        offer_amount_msat = bolt12_offer.offer_amount
         if amount_msat and offer_amount_msat:
             assert amount_msat == offer_amount_msat
         lnworker = wallet.lnworker
@@ -2318,11 +2318,11 @@ class Commands(Logger):
         if dec == INVALID_BECH32:
             raise Exception('invalid bech32')
         d = {
-            'lni': bolt12.decode_invoice,
-            'lno': bolt12.decode_offer,
-            'lnr': bolt12.decode_invoice_request,
+            'lni': BOLT12Invoice.decode,
+            'lno': BOLT12Offer.decode,
+            'lnr': BOLT12InvoiceRequest.decode,
         }[dec.hrp](bech32)
-        return json_encode(d)
+        return json_encode(d.as_protocol_dict(with_signature=True))
 
 
 def plugin_command(s, plugin_name):

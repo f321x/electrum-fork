@@ -242,20 +242,16 @@ class BaseInvoice(StoredObject):
         #  2) asymmetry of storing bytes fields in WalletDB (returns as hex str) we cannot store bolt12_invoice
         #  in WalletDB directly without explicit conversion of each bytes field occurrence. Instead, store whole
         #  invoice TLV as hex str and re-parse when needed.
-        from .bolt12 import decode_invoice
-        bolt12_invoice = decode_invoice(bolt12_invoice_tlv)
-        amount_msat = bolt12_invoice.get('invoice_amount').get('msat')
-        timestamp = bolt12_invoice.get('invoice_created_at').get('timestamp')
-        exp_delay = bolt12_invoice.get('invoice_relative_expiry', {}).get('seconds_from_creation', 0)
-        message = bolt12_invoice.get('offer_description', {}).get('description', '')
+        from .bolt12 import BOLT12Invoice
+        bolt12_invoice = BOLT12Invoice.decode(bolt12_invoice_tlv)
 
         # TODO: check payer id?
         # check htlc minmax from invoice_blindedpay?
         return Invoice(
-            message=message,
-            amount_msat=amount_msat,
-            time=timestamp,
-            exp=exp_delay,
+            message=bolt12_invoice.offer_description,
+            amount_msat=bolt12_invoice.invoice_amount,
+            time=bolt12_invoice.invoice_created_at,
+            exp=bolt12_invoice.invoice_relative_expiry or 0,
             outputs=None,
             bip70=None,
             height=0,
@@ -331,9 +327,9 @@ class Invoice(BaseInvoice):
     def _lnaddr(self) -> LnAddr:
         if self.__lnaddr is None:
             if self._is_bolt12_invoice():
-                from .bolt12 import decode_invoice, to_lnaddr
+                from .bolt12 import BOLT12Invoice, to_lnaddr
                 invoice_tlv = bfh(self.lightning_invoice[len(BOLT12_INVOICE_PREFIX):])
-                bolt12_invoice = decode_invoice(invoice_tlv)
+                bolt12_invoice = BOLT12Invoice.decode(invoice_tlv)
                 self.__lnaddr = to_lnaddr(bolt12_invoice)
             else:
                 self.__lnaddr = lndecode(self.lightning_invoice)
@@ -348,9 +344,9 @@ class Invoice(BaseInvoice):
     def _validate_invoice_str(self, attribute, value):
         if value is not None:
             if value.startswith(BOLT12_INVOICE_PREFIX):
-                from .bolt12 import decode_invoice, to_lnaddr
+                from .bolt12 import BOLT12Invoice, to_lnaddr
                 invoice_tlv = bfh(value[len(BOLT12_INVOICE_PREFIX):])
-                bolt12_invoice = decode_invoice(invoice_tlv)
+                bolt12_invoice = BOLT12Invoice.decode(invoice_tlv)
                 self.__lnaddr = to_lnaddr(bolt12_invoice)
             else:
                 lnaddr = lndecode(value)  # this checks the str can be decoded
