@@ -48,6 +48,7 @@ _logger = get_logger(__name__)
 
 if TYPE_CHECKING:
     from .lnrouter import LNPaymentRoute
+    from .onion_message import BlindedPath, BlindedPayInfo
 
 
 HOPS_DATA_SIZE = 1300      # also sometimes called routingInfoSize in bolt-04
@@ -375,7 +376,8 @@ def calc_hops_data_for_blinded_payment(
         *,
         final_cltv_abs: int,
         total_msat: int,
-        bolt12_invoice: dict,
+        paths: tuple['BlindedPath', ...],
+        blinded_payinfos: tuple['BlindedPayInfo', ...],
 ) -> Tuple[List[OnionHopsDataSingle], List[bytes], int, int]:
     """Returns the hops_data to be used for constructing an onion packet,
     and the amount_msat and cltv_abs to be used on our immediate channel.
@@ -385,21 +387,21 @@ def calc_hops_data_for_blinded_payment(
 
     amt = amount_msat
     cltv_abs = final_cltv_abs
-    inv_path = bolt12_invoice.get('invoice_paths').get('paths')[0]
-    inv_blindedpay_info = bolt12_invoice.get('invoice_blindedpay').get('payinfo')[0]
+    inv_path = paths[0]
+    inv_blindedpay_info = blinded_payinfos[0]
     # htlc_maximum_msat for blinded path
-    if htlc_max := inv_blindedpay_info.get('htlc_maximum_msat'):
+    if htlc_max := inv_blindedpay_info.htlc_maximum_msat:
         if htlc_max < amt:
             raise Exception(f'blinded path htlc_maximum_msat {htlc_max} too low for {amt=}')
 
-    inv_hops = inv_path.get('path')
+    inv_hops = inv_path.path
     if not isinstance(inv_hops, list):
         inv_hops = [inv_hops]
     num_hops = len(inv_hops)
 
     hops_data = []
     _logger.info('inv_hops: ' + repr(inv_hops))
-    hops_pubkeys = [x.get('blinded_node_id') for x in inv_hops]
+    hops_pubkeys = [x.blinded_node_id for x in inv_hops]
     # build reversed
     for i, inv_hop in enumerate(reversed(inv_hops)):
         payload = {}
@@ -410,16 +412,16 @@ def calc_hops_data_for_blinded_payment(
                 'total_amount_msat': {'total_msat': total_msat},
             }
         if i == num_hops - 1:  # introduction point
-            payload['current_blinding_point'] = {'blinding': inv_path.get('first_path_key')}
-        payload['encrypted_recipient_data'] = {'encrypted_data': inv_hop.get('encrypted_recipient_data')}
+            payload['current_blinding_point'] = {'blinding': inv_path.first_path_key}
+        payload['encrypted_recipient_data'] = {'encrypted_data': inv_hop.encrypted_recipient_data}
 
         _logger.info(f'inv_hop[{num_hops - 1 - i}].payload: ' + repr(payload))
         hops_data.append(OnionHopsDataSingle(payload=payload))
 
     # calc amount from aggregate blinded path info to send to introduction point
-    amt = amount_msat + inv_blindedpay_info.get('fee_base_msat') + \
-        (inv_blindedpay_info.get('fee_proportional_millionths') * amount_msat) // 1000000
-    cltv_abs += inv_blindedpay_info.get('cltv_expiry_delta')
+    amt = amount_msat + inv_blindedpay_info.fee_base_msat + \
+        (inv_blindedpay_info.fee_proportional_millionths * amount_msat) // 1000000
+    cltv_abs += inv_blindedpay_info.cltv_expiry_delta
     _logger.info(f'blinded payment introduction point {amt=} for {amount_msat=}, {cltv_abs=}')
 
     # payloads, backwards from last hop (but excluding the first edges):

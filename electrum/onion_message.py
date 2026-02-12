@@ -29,9 +29,8 @@ import threading
 import time
 import dataclasses
 from random import random
-from types import MappingProxyType
 
-from typing import TYPE_CHECKING, Optional, Sequence, NamedTuple, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Sequence, NamedTuple, Union, Mapping
 
 import electrum_ecc as ecc
 
@@ -44,7 +43,8 @@ from electrum.lnonion import (get_bolt04_onion_key, OnionPacket, process_onion_p
                               OnionHopsDataSingle, decrypt_onionmsg_data_tlv, encrypt_onionmsg_data_tlv,
                               get_shared_secrets_along_route, new_onion_packet, encrypt_hops_recipient_data,
                               next_blinding_from_shared_secret)
-from electrum.lnutil import LnFeatures, MIN_FINAL_CLTV_DELTA_ACCEPTED, MAXIMUM_REMOTE_TO_SELF_DELAY_ACCEPTED
+from electrum.lnutil import (LnFeatures, MIN_FINAL_CLTV_DELTA_ACCEPTED, MAXIMUM_REMOTE_TO_SELF_DELAY_ACCEPTED,
+                             validate_features, IncompatibleOrInsaneFeatures)
 from electrum.util import OldTaskGroup, log_exceptions
 
 
@@ -85,7 +85,7 @@ def create_blinded_path(
         hop_extras: Optional[Sequence[dict]] = None,
         dummy_hops: Optional[int] = 0,
         channels: Optional[Sequence['Channel']] = None,
-) -> dict:
+) -> 'BlindedPath':
     # dummy hops could be inserted anywhere in the path, but for compatibility just add them at the end
     # because blinded paths are usually constructed towards ourselves, and we know we can handle dummy hops.
     if dummy_hops:
@@ -96,7 +96,7 @@ def create_blinded_path(
 
     blinding = ecc.ECPrivkey(session_key).get_public_key_bytes()
 
-    onionmsg_hops = []
+    onionmsg_hops: list[BlindedPathHop] = []
     shared_secrets, blinded_node_ids = get_shared_secrets_along_route(path, session_key)
     for i, node_id in enumerate(path):
         is_non_final_node = i < len(path) - 1
@@ -123,21 +123,19 @@ def create_blinded_path(
 
         encrypted_recipient_data = encrypt_onionmsg_data_tlv(shared_secret=shared_secrets[i], **recipient_data)
 
-        hopdata = {
-            'blinded_node_id': blinded_node_ids[i],
-            'enclen': len(encrypted_recipient_data),
-            'encrypted_recipient_data': encrypted_recipient_data
-        }
+        hopdata = BlindedPathHop(
+            blinded_node_id=blinded_node_ids[i],
+            enclen=len(encrypted_recipient_data),
+            encrypted_recipient_data=encrypted_recipient_data,
+        )
         onionmsg_hops.append(hopdata)
 
-    blinded_path = {
-        'first_node_id': introduction_point,
-        'first_path_key': blinding,
-        'num_hops': bytes([len(onionmsg_hops)]),
-        'path': onionmsg_hops
-    }
-
-    return blinded_path
+    return BlindedPath(
+        first_node_id=introduction_point,
+        first_path_key=blinding,
+        num_hops=bytes([len(onionmsg_hops)]),
+        path=onionmsg_hops,
+    )
 
 
 def encode_blinded_path(blinded_path: dict):
@@ -395,10 +393,56 @@ def send_onion_message_to(
     )
 
 
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class BlindedPathHop:
+    blinded_node_id: bytes
+    enclen: int
+    encrypted_recipient_data: bytes
+
+    def __post_init__(self):
+        ecc.ECPubkey(b=self.blinded_node_id)
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class BlindedPath:
+    """
+    https://github.com/lightning/bolts/blob/34455ffe28b308dd7ac7552234d565890af8605b/04-onion-routing.md?plain=1#L441
+    """
+    first_node_id: bytes
+    first_path_key: bytes
+    num_hops: bytes
+    path: list[BlindedPathHop]
+
+    @property
+    def hop_count(self) -> int:
+        return int.from_bytes(self.num_hops, byteorder='big', signed=False)
+
+    def __post_init__(self):
+        # if num_hops is 0 in any blinded_path in offer_paths: MUST NOT respond to the offer
+        assert isinstance(self.num_hops, bytes), type(self.num_hops)
+        if self.hop_count == 0:
+            raise ValueError('invalid num_hops of 0')
+        if not self.path:
+            raise ValueError('empty path')
+        if not len(self.path) == self.hop_count:
+            raise ValueError(f'{len(self.path)=} != {self.hop_count=}')
+        ecc.ECPubkey(b=self.first_path_key)
+
+
+@dataclasses.dataclass(frozen=True)
+class BlindedPayInfo:
+    fee_base_msat: int
+    fee_proportional_millionths: int
+    cltv_expiry_delta: int
+    htlc_minimum_msat: int
+    htlc_maximum_msat: int
+    features: LnFeatures
+
+
 class BlindedPathInfo(NamedTuple):
-    path: dict
+    path: BlindedPath
     path_id: bytes
-    payinfo: Optional[dict]
+    payinfo: Optional[BlindedPayInfo]
 
 
 def get_blinded_reply_paths(
@@ -489,15 +533,14 @@ def get_blinded_paths_to_me(
                         'htlc_minimum_msat': blinded_path_min_htlc_msat
                     }
                 }]
-                payinfo = {
-                    'fee_base_msat': sum_fee_base_msat,
-                    'fee_proportional_millionths': sum_fee_proportional_millionths,
-                    'cltv_expiry_delta': sum_cltv_expiry_delta + MIN_FINAL_CLTV_DELTA_ACCEPTED,
-                    'htlc_minimum_msat': blinded_path_min_htlc_msat,
-                    'htlc_maximum_msat': blinded_path_max_htlc_msat,
-                    'flen': 0,
-                    'features': bytes(0)
-                }
+                payinfo = BlindedPayInfo(
+                    fee_base_msat=sum_fee_base_msat,
+                    fee_proportional_millionths=sum_fee_proportional_millionths,
+                    cltv_expiry_delta=sum_cltv_expiry_delta + MIN_FINAL_CLTV_DELTA_ACCEPTED,
+                    htlc_minimum_msat=blinded_path_min_htlc_msat,
+                    htlc_maximum_msat=blinded_path_max_htlc_msat,
+                    features=LnFeatures(0),
+                )
             recipient_data, path_id = ensure_path_id(final_recipient_data)
             blinded_path = create_blinded_path(os.urandom(32), [chan.node_id, mynodeid], recipient_data,
                                                hop_extras=hop_extras, channels=[chan] if not onion_message else None)
@@ -731,7 +774,7 @@ class OnionMessageManager(Logger):
             # unless explicitly set in payload, generate reply_path here
             path_id = self._path_id_from_payload_and_key(payload, key)
             reply_paths = get_blinded_reply_paths(self.lnwallet, path_id, max_paths=1)
-            final_payload['reply_path'] = {'path': [x.path for x in reply_paths]}
+            final_payload['reply_path'] = {'path': [dataclasses.asdict(x.path) for x in reply_paths]}
 
         try:
             # NOTE: we could also try alternate paths to introduction point (the non-blinded part of the route)
