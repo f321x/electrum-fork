@@ -4167,7 +4167,9 @@ class LNWallet(Logger):
                 amount_msat,
                 final_cltv_abs=final_cltv_abs,
                 total_msat=total_msat,
-                bolt12_invoice=bolt12_invoice)
+                paths=bolt12_invoice.invoice_paths,
+                blinded_payinfos=bolt12_invoice.invoice_blindedpay,
+            )
             hops_data = hops_data[1:]
             blinded_node_ids = blinded_node_ids[1:]
 

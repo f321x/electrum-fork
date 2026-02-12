@@ -28,6 +28,7 @@ import io
 import os
 import time
 import attr
+from dataclasses import asdict
 import re
 from decimal import Decimal
 from typing import TYPE_CHECKING, Union, Optional, List, Tuple, Sequence
@@ -152,7 +153,7 @@ def create_offer(
     else:
         # TODO: remove adding of offer_issuer_id, once we can sign invoices properly based on invreq used blinded path
         offer.update({'offer_issuer_id': {'id': node_id}})
-        offer.update({'offer_paths': {'paths': [x.path for x in offer_paths]}})
+        offer.update({'offer_paths': {'paths': [asdict(x.path) for x in offer_paths]}})
 
     if issuer:
         offer.update({'offer_issuer': {'issuer': issuer}})
@@ -443,8 +444,8 @@ def verify_request_and_create_invoice(
         lnwallet, final_recipient_data=recipient_data, my_channels=invoice_channels)
 
     invoice.update({
-        'invoice_paths': {'paths': [x.path for x in invoice_paths]},
-        'invoice_blindedpay': {'payinfo': [x.payinfo for x in invoice_paths]}
+        'invoice_paths': {'paths': [asdict(x.path) for x in invoice_paths]},
+        'invoice_blindedpay': {'payinfo': [asdict(x.payinfo) for x in invoice_paths]}
     })
 
     lnwallet.add_path_ids_for_payment_hash(invoice_payment_hash, invoice_paths)

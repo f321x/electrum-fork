@@ -193,14 +193,14 @@ class TestOnionMessage(ElectrumTestCase):
         final_recipient_data = {'path_id': {'data': bfh('0102')}}
         rp = create_blinded_path(session_key, [pubkey], final_recipient_data)
 
-        self.assertEqual(pubkey, rp['first_node_id'])
-        self.assertEqual(bfh('022ed557f5ad336b31a49857e4e9664954ac33385aa20a93e2d64bfe7f08f51277'), rp['first_path_key'])
-        self.assertEqual(b"\x01", rp['num_hops'])
+        self.assertEqual(pubkey, rp.first_node_id)
+        self.assertEqual(bfh('022ed557f5ad336b31a49857e4e9664954ac33385aa20a93e2d64bfe7f08f51277'), rp.first_path_key)
+        self.assertEqual(b"\x01", rp.num_hops)
         self.assertEqual([{
             'blinded_node_id': bfh('031e5d91e6c417f6e8c16d1086db1887edef7be9334f5e744d04edb8da7507481e'),
             'enclen': 20,
             'encrypted_recipient_data': bfh('2dbaa54a819775aa0548ab85db68c5099e7b1180')
-        }], rp['path'])
+        }], [dataclasses.asdict(p) for p in rp.path])
 
         # TODO: serialization test to test_lnmsg.py
         with io.BytesIO() as blinded_path_fd:
@@ -208,7 +208,7 @@ class TestOnionMessage(ElectrumTestCase):
                 fd=blinded_path_fd,
                 field_type='blinded_path',
                 count=1,
-                value=rp)
+                value=dataclasses.asdict(rp))
             blinded_path = blinded_path_fd.getvalue()
         self.assertEqual(blinded_path, bfh('02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619022ed557f5ad336b31a49857e4e9664954ac33385aa20a93e2d64bfe7f08f5127701031e5d91e6c417f6e8c16d1086db1887edef7be9334f5e744d04edb8da7507481e00142dbaa54a819775aa0548ab85db68c5099e7b1180'))
 
@@ -244,10 +244,10 @@ class TestOnionMessage(ElectrumTestCase):
             hops_data[i] = dataclasses.replace(hops_data[i], payload=new_payload)
 
         blinded_path_blinded_ids = []
-        for i, x in enumerate(blinded_path_to_dave.get('path')):
-            blinded_path_blinded_ids.append(x.get('blinded_node_id'))
-            payload = {'encrypted_recipient_data': {'encrypted_recipient_data': x.get('encrypted_recipient_data')}}
-            if i == len(blinded_path_to_dave.get('path')) - 1:
+        for i, x in enumerate(blinded_path_to_dave.path):
+            blinded_path_blinded_ids.append(x.blinded_node_id)
+            payload = {'encrypted_recipient_data': {'encrypted_recipient_data': x.encrypted_recipient_data}}
+            if i == len(blinded_path_to_dave.path) - 1:
                 # add final recipient payload
                 payload['message'] = {'text': bfh(test_vectors['onionmessage']['unknown_tag_1'])}
             hops_data.append(
