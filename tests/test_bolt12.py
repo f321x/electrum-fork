@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import io
+import os
 import time
 import json
 from pathlib import Path
@@ -24,6 +25,7 @@ from electrum.segwit_addr import INVALID_BECH32, bech32_encode, Encoding, conver
 from electrum.util import bfh
 
 from . import ElectrumTestCase, test_lnpeer
+from .test_lnpeer import PeerInTests, PutIntoOthersQueueTransport
 
 
 def bech32_decode(x):
@@ -69,10 +71,10 @@ class MockChannel:
 ROUTE_BLINDING_CAPABLE_PEER_FEATURES = LnFeatures(LnFeatures.OPTION_ROUTE_BLINDING_OPT)
 
 
-class MockPeer:
-    def __init__(self, pubkey, on_send_message=None, their_features=ROUTE_BLINDING_CAPABLE_PEER_FEATURES):
-        self.pubkey = pubkey
-        self.on_send_message = on_send_message
+class MockPeer(PeerInTests):
+    def __init__(self, lnwallet, pubkey, wkp, their_features=ROUTE_BLINDING_CAPABLE_PEER_FEATURES):
+        transport = PutIntoOthersQueueTransport(name='a', keypair=wkp)
+        super().__init__(lnwallet, pubkey, transport)
         self.their_features = their_features
 
     async def wait_one_htlc_switch_iteration(self, *args):
@@ -480,88 +482,84 @@ class TestBolt12(ElectrumTestCase):
         payer_key = bfh('4343434343434343434343434343434343434343434343434343434343434343')
         pkp = lnutil.Keypair(privkey_to_pubkey(payer_key), payer_key)
 
-        lnwallet = MockLNWallet()
-        try:
-            chan = MockChannel(ckp.pubkey, 1_000_000)
-            lnwallet.channels[ckp.pubkey] = chan
-            peer = MockPeer(ckp.pubkey)
+        lnwallet = self.create_mock_lnwallet(name='alice', has_anchors=True)
 
-            # base case but without ROUTE_BLINDING capable peers
-            with self.assertRaises(NoRouteBlindingChannelPeers):
-                offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
-                invoice_data = verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+        chan = MockChannel(ckp.pubkey, 1_000_000)
+        lnwallet._channels[ckp.pubkey] = chan
+        peer = MockPeer(lnwallet, ckp.pubkey, wkp)
 
-            lnwallet.peers[ckp.pubkey] = peer
-
-            # base case
+        # base case but without ROUTE_BLINDING capable peers
+        with self.assertRaises(NoRouteBlindingChannelPeers):
             offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
             invoice_data = verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
-            del invreq_data['signature']
-            for key in invreq_data:
-                self.assertEqual(invoice_data.get(key), invreq_data.get(key))
 
-            # non matching offer fields in invreq
-            offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
-            del invreq_data['offer_metadata']
-            with self.assertRaises(InvoiceRequestException):
-                verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+        lnwallet.lnpeermgr._peers[ckp.pubkey] = peer
 
-            offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
-            invreq_data['offer_metadata'] = {'data': bfh('02')}
-            with self.assertRaises(InvoiceRequestException):
-                verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+        # base case
+        offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
+        invoice_data = verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+        del invreq_data['signature']
+        for key in invreq_data:
+            self.assertEqual(invoice_data.get(key), invreq_data.get(key))
 
-            offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
-            invreq_data['offer_amount'] = {'amount': 1001}
-            with self.assertRaises(InvoiceRequestException):
-                verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+        # non matching offer fields in invreq
+        offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
+        del invreq_data['offer_metadata']
+        with self.assertRaises(InvoiceRequestException):
+            verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
 
-            offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
-            invreq_data['offer_issuer_id'] = {'id': ckp.pubkey}
-            with self.assertRaises(InvoiceRequestException):
-                verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+        offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
+        invreq_data['offer_metadata'] = {'data': bfh('02')}
+        with self.assertRaises(InvoiceRequestException):
+            verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
 
-            # invreq_metadata mandatory
-            offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
-            del invreq_data['invreq_metadata']
-            with self.assertRaises(InvoiceRequestException):
-                verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+        offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
+        invreq_data['offer_amount'] = {'amount': 1001}
+        with self.assertRaises(InvoiceRequestException):
+            verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
 
-            # expiry
-            offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
-            invreq_data['offer_absolute_expiry'] = {'seconds_from_epoch': int(time.time()) - 5}
-            with self.assertRaises(InvoiceRequestException):
-                verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+        offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
+        invreq_data['offer_issuer_id'] = {'id': ckp.pubkey}
+        with self.assertRaises(InvoiceRequestException):
+            verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
 
-            offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp, offer_extra={
-                'offer_absolute_expiry': {'seconds_from_epoch': int(time.time()) + 5}
-            })
-            invoice_data = verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+        # invreq_metadata mandatory
+        offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
+        del invreq_data['invreq_metadata']
+        with self.assertRaises(InvoiceRequestException):
+            verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
 
-            # offer/invreq amount matching
-            offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
-            invoice_data = verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
-            self.assertEqual(invoice_data.get('invoice_amount').get('msat'), offer_data.get('offer_amount').get('amount'))
+        # expiry
+        offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
+        invreq_data['offer_absolute_expiry'] = {'seconds_from_epoch': int(time.time()) - 5}
+        with self.assertRaises(InvoiceRequestException):
+            verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
 
-            # offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
-            # del offer_data['offer_amount']
-            # del invreq_data['offer_amount']
-            # with self.assertRaises(InvoiceRequestException):
-            #     verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+        offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp, offer_extra={
+            'offer_absolute_expiry': {'seconds_from_epoch': int(time.time()) + 5}
+        })
+        invoice_data = verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
 
-            # rcv capacity check
-            offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp,
-                offer_extra={'offer_amount': {'amount': 2_000_000}},
-                invreq_extra={'invreq_amount': {'msat': 2_000_000}},
-            )
-            with self.assertRaises(InvoiceRequestException):
-                verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+        # offer/invreq amount matching
+        offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
+        invoice_data = verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+        self.assertEqual(invoice_data.get('invoice_amount').get('msat'), offer_data.get('offer_amount').get('amount'))
 
-            # invoice_node_id == offer_issuer_id
-            offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
-            invoice_data = verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
-            self.assertEqual(invoice_data.get('invoice_node_id').get('node_id'), wkp.pubkey)
+        # offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
+        # del offer_data['offer_amount']
+        # del invreq_data['offer_amount']
+        # with self.assertRaises(InvoiceRequestException):
+        #     verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
 
-        finally:
-            # end
-            await lnwallet.stop()
+        # rcv capacity check
+        offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp,
+            offer_extra={'offer_amount': {'amount': 2_000_000}},
+            invreq_extra={'invreq_amount': {'msat': 2_000_000}},
+        )
+        with self.assertRaises(InvoiceRequestException):
+            verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+
+        # invoice_node_id == offer_issuer_id
+        offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
+        invoice_data = verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+        self.assertEqual(invoice_data.get('invoice_node_id').get('node_id'), wkp.pubkey)
