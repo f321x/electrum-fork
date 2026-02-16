@@ -47,6 +47,7 @@ from .segwit_addr import (
     bech32_decode, convertbits, bech32_encode, Encoding, INVALID_BECH32,
     CHARSET as BECH32_CHARSET,
 )
+>>>>>>> d3138090d (bolt12: return more errors on invoice request)
 
 if TYPE_CHECKING:
     from .lnworker import LNWallet
