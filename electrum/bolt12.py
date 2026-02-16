@@ -42,7 +42,8 @@ from .json_db import stored_in, StoredObject
 from .lnaddr import LnAddr
 from .lnmsg import OnionWireSerializer, batched
 from .lnutil import LnFeatures, hex_to_bytes, bytes_to_hex, validate_features
-from .onion_message import Timeout, get_blinded_paths_to_me, BlindedPathInfo, BlindedPath, BlindedPayInfo
+from .onion_message import (Timeout, get_blinded_paths_to_me, BlindedPathInfo, BlindedPath, BlindedPayInfo,
+                            NoRouteBlindingChannelPeers)
 from .segwit_addr import bech32_decode, convertbits, bech32_encode, Encoding, INVALID_BECH32, CHARSET as BECH32_CHARSET
 
 if TYPE_CHECKING:
@@ -708,22 +709,28 @@ def verify_request_and_create_invoice(
         if chan.is_active() and chan.can_receive(amount_msat=invoice_amount, check_frozen=True)
     ]
     if not invoice_channels:
-        raise InvoiceRequestException('no active channels with sufficient receive capacity, ignoring invoice_request.')
+        raise Bolt12InvoiceError('no active channels with sufficient receive capacity, cannot receive this payment.')
 
-    invoice_path_info = get_blinded_paths_to_me(
-        lnwallet, final_recipient_data=recipient_data, my_channels=invoice_channels)
+    try:
+        invoice_path_info = get_blinded_paths_to_me(
+            lnwallet, final_recipient_data=recipient_data, my_channels=invoice_channels)
+    except NoRouteBlindingChannelPeers:
+        raise Bolt12InvoiceError("no peers with route blinding support")
 
-    invoice = BOLT12Invoice(
-        **bolt12_invreq.__dict__,
-        invoice_amount=invoice_amount,
-        invoice_created_at=now,
-        invoice_relative_expiry=invoice_expiry,
-        invoice_payment_hash=invoice_payment_hash,
-        invoice_features=invoice_features,
-        invoice_node_id=invoice_node_id,
-        invoice_paths=tuple(p.path for p in invoice_path_info),
-        invoice_blindedpay=tuple(p.payinfo for p in invoice_path_info),
-    )
+    try:
+        invoice = BOLT12Invoice(
+            **bolt12_invreq.__dict__,
+            invoice_amount=invoice_amount,
+            invoice_created_at=now,
+            invoice_relative_expiry=invoice_expiry,
+            invoice_payment_hash=invoice_payment_hash,
+            invoice_features=invoice_features,
+            invoice_node_id=invoice_node_id,
+            invoice_paths=tuple(p.path for p in invoice_path_info),
+            invoice_blindedpay=tuple(p.payinfo for p in invoice_path_info),
+        )
+    except Exception as e:
+        raise Bolt12InvoiceError(str(e)) from e
 
     lnwallet.add_path_ids_for_payment_hash(invoice_payment_hash, invoice_path_info)
 
