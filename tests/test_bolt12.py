@@ -10,8 +10,8 @@ from electrum_ecc import ECPrivkey
 
 from electrum import segwit_addr, lnutil
 from electrum.bolt12 import (
-    is_offer, verify_request_and_create_invoice, InvoiceRequestException,
-    bolt12_bech32_to_bytes, BOLT12Offer, BOLT12InvoiceRequest, BOLT12Invoice
+    is_offer, verify_request_and_create_invoice, Bolt12InvoiceError,
+    bolt12_bech32_to_bytes, BOLT12Offer, BOLT12InvoiceRequest, BOLT12Invoice,
 )
 from electrum.crypto import privkey_to_pubkey
 from electrum.invoices import LN_EXPIRY_NEVER
@@ -533,9 +533,10 @@ class TestBolt12(ElectrumTestCase):
         peer = MockPeer(lnwallet, ckp.pubkey, wkp)
 
         # base case but without ROUTE_BLINDING capable peers
-        with self.assertRaises(NoRouteBlindingChannelPeers):
+        with self.assertRaises(Bolt12InvoiceError) as i_err:
             offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
             invoice_data = verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+            self.assertIsInstance(i_err.exception.__cause__, NoRouteBlindingChannelPeers)
 
         lnwallet.lnpeermgr._peers[ckp.pubkey] = peer
 
@@ -548,34 +549,34 @@ class TestBolt12(ElectrumTestCase):
         # non matching offer fields in invreq
         offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
         invreq_data.__dict__['offer_metadata'] = None
-        with self.assertRaises(InvoiceRequestException):
+        with self.assertRaises(Bolt12InvoiceError):
             verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
 
         offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
         invreq_data.__dict__['offer_metadata'] = bfh('02')
-        with self.assertRaises(InvoiceRequestException):
+        with self.assertRaises(Bolt12InvoiceError):
             verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
 
         offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
         invreq_data.__dict__['offer_amount'] = 1001
-        with self.assertRaises(InvoiceRequestException):
+        with self.assertRaises(Bolt12InvoiceError):
             verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
 
         offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
         invreq_data.__dict__['offer_issuer_id'] = ckp.pubkey
-        with self.assertRaises(InvoiceRequestException):
+        with self.assertRaises(Bolt12InvoiceError):
             verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
 
         # invreq_metadata mandatory
         offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
         invreq_data.__dict__['invreq_metadata'] = None
-        with self.assertRaises(ValueError):
+        with self.assertRaises(Bolt12InvoiceError):
             verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
 
         # expiry
         offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
         invreq_data.__dict__['offer_absolute_expiry'] = int(time.time()) - 5
-        with self.assertRaises(InvoiceRequestException):
+        with self.assertRaises(Bolt12InvoiceError):
             verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
 
         offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp, offer_extra={
@@ -591,7 +592,7 @@ class TestBolt12(ElectrumTestCase):
         # offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
         # del offer_data['offer_amount']
         # del invreq_data['offer_amount']
-        # with self.assertRaises(InvoiceRequestException):
+        # with self.assertRaises(Bolt12InvoiceError):
         #     verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
 
         # rcv capacity check
@@ -599,7 +600,7 @@ class TestBolt12(ElectrumTestCase):
             offer_extra={'offer_amount': 2_000_000},
             invreq_extra={'invreq_amount': 2_000_000},
         )
-        with self.assertRaises(InvoiceRequestException):
+        with self.assertRaises(Bolt12InvoiceError):
             verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
 
         # invoice_node_id == offer_issuer_id

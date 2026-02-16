@@ -4334,6 +4334,7 @@ class LNWallet(Logger):
         try:
             invoice = bolt12.verify_request_and_create_invoice(self, offer, invreq)
         except Bolt12InvoiceError as e:
+            self.logger.debug(f"failed to create bolt12 invoice, sending invoice_error: {str(e)}")
             error_payload = {'invoice_error': {'invoice_error': e.to_tlv()}}
             send_onion_message_to(self, node_id_or_blinded_path, error_payload)
             return
