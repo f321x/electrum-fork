@@ -437,7 +437,7 @@ class PaymentIdentifier(Logger):
                     self.error = _('Timeout requesting invoice')
                     self.set_state(PaymentIdentifierState.NOT_FOUND)
         except UserFacingException as e:
-            self.error = str(e)
+            self.error = str(e) or repr(e)
             self.logger.error(f"_do_finalize() got error: {e!r}")
             self.set_state(PaymentIdentifierState.ERROR)
             if not isinstance(e, UserFacingException):
