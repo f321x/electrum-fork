@@ -539,12 +539,9 @@ async def request_invoice(
 
     if paths := bolt12_offer.offer_paths:
         assert len(paths)
-        path = paths[0]  # TODO: round robin all
-        with io.BytesIO() as fd:
-            OnionWireSerializer.write_field(fd=fd, field_type='blinded_path', count=1, value=asdict(path))
-            node_id_or_blinded_path = fd.getvalue()
+        node_id_or_blinded_paths = paths
     else:
-        node_id_or_blinded_path = bolt12_offer.offer_issuer_id
+        node_id_or_blinded_paths = bolt12_offer.offer_issuer_id
 
     # spec: MUST set invreq_payer_id to a transient public key.
     # spec: MUST remember the secret key corresponding to invreq_payer_id.
@@ -577,7 +574,7 @@ async def request_invoice(
     try:
         lnwallet.logger.info(f'requesting bolt12 invoice')
         rcpt_data, payload = await lnwallet.onion_message_manager.submit_send(
-            payload=req_payload, node_id_or_blinded_path=node_id_or_blinded_path
+            payload=req_payload, node_id_or_blinded_paths=node_id_or_blinded_paths
         )
         lnwallet.logger.debug(f'{rcpt_data=} {payload=}')
         if 'invoice_error' in payload:
