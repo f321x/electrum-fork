@@ -648,8 +648,6 @@ class OnionMessageManager(Logger):
                 self.logger.debug(f'error while sending {key=}: ', exc_info=True)
                 req.future.set_exception(copy.copy(e))
                 # NOTE: above, when passing the caught exception instance e directly it leads to GeneratorExit() in
-                if isinstance(e, NoRouteFound) and e.peer_address:
-                    await self.lnwallet.lnpeermgr.add_peer(str(e.peer_address))
             else:
                 self.logger.debug(f'resubmit {key=}')
                 self.send_queue.put_nowait((now() + self.REQUEST_REPLY_RETRY_DELAY, expires, key))
@@ -726,6 +724,7 @@ class OnionMessageManager(Logger):
             req.route_not_found_for[current_index] = True
             if all(req.route_not_found_for) and self.send_direct_connect_fallback and e.peer_address:
                 # we have a peer address hint and we've tried all blinded paths: try direct peer connection
+                # TODO: this will only attempt direct connection to the last blinded path ip node, we could try the others too.
                 self.logger.info(f'No route to destination, attempting direct peer connection to {str(e.peer_address)}')
                 await self.lnwallet.lnpeermgr.add_peer(str(e.peer_address))
             else:
