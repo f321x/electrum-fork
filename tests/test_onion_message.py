@@ -401,7 +401,7 @@ class TestOnionMessageManager(ElectrumTestCase):
         # mock add_peer for direct connection fallback
         async def mock__add_peer(host, port, node_id):
             mock_peer = MockPeer(pubkey=node_id)
-            # lnw.lnpeermgr._peers[node_id] = mock_peer
+            lnw.lnpeermgr._peers[node_id] = mock_peer
             return mock_peer
         lnw.lnpeermgr._add_peer = mock__add_peer
 
