@@ -623,8 +623,6 @@ class OnionMessageManager(Logger):
                 self.logger.debug(f'error while sending {key=} {e!r}')
                 req.future.set_exception(copy.copy(e))
                 # NOTE: above, when passing the caught exception instance e directly it leads to GeneratorExit() in
-                if isinstance(e, NoRouteFound) and e.peer_address:
-                    await self.lnwallet.lnpeermgr.add_peer(str(e.peer_address))
             else:
                 self.logger.debug(f'resubmit {key=}')
                 self.send_queue.put_nowait((now() + self.REQUEST_REPLY_RETRY_DELAY, expires, key))
