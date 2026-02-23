@@ -589,6 +589,9 @@ async def request_invoice(
     session_key = os.urandom(32)
     blinding = ecc.ECPrivkey(session_key).get_public_key_bytes()
 
+    if bolt12_offer.offer_amount is not None:
+        assert amount_msat >= bolt12_offer.offer_amount, "cannot request less than offer amount, sat->msat rounding issue?"
+
     # One is a response to an offer; this contains the `offer_issuer_id` or `offer_paths` and
     # all other offer details, and is generally received over an onion
     # message: if it's valid and refers to a known offer, the response is
