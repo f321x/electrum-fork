@@ -11,7 +11,7 @@ from electrum.logging import get_logger
 from electrum.util import InvoiceError, bfh
 from electrum.invoices import (
     Invoice, PR_UNPAID, PR_EXPIRED, PR_UNKNOWN, PR_PAID, PR_INFLIGHT, PR_FAILED, PR_ROUTING, PR_UNCONFIRMED,
-    PR_BROADCASTING, PR_BROADCAST, LN_EXPIRY_NEVER, BOLT12_INVOICE_PREFIX
+    PR_BROADCASTING, PR_BROADCAST, LN_EXPIRY_NEVER,
 )
 from electrum.transaction import PartialTxOutput, TxOutput
 from electrum.lnutil import format_short_channel_id
@@ -248,19 +248,17 @@ class QEInvoice(QObject, QtEventListener):
         if not self.invoiceType == QEInvoice.Type.LightningInvoice:
             return
 
-        lnaddr = self._effectiveInvoice._lnaddr
-
-        invoice_str = self._effectiveInvoice.lightning_invoice
-        is_bolt12 = invoice_str.startswith(BOLT12_INVOICE_PREFIX)
+        lnaddr = self._effectiveInvoice
 
         lnprops = {
-            'is_bolt12': is_bolt12,
-            'pubkey': lnaddr.pubkey.serialize().hex(),
-            'payment_hash': lnaddr.paymenthash.hex(),
+            'is_bolt12': bool(lnaddr.bolt12_invoice),
+            'payment_hash': lnaddr.rhash,
         }
 
-        if is_bolt12:
-            b12i = BOLT12Invoice.decode(bfh(invoice_str[len(BOLT12_INVOICE_PREFIX):]))
+        if pubkey := lnaddr.issuer_pubkey:
+            lnprops['pubkey'] = pubkey
+
+        if b12i := lnaddr.bolt12_invoice:
             paths = b12i.invoice_paths
             issuer = b12i.offer_issuer
             lnprops.update({
@@ -271,7 +269,7 @@ class QEInvoice(QObject, QtEventListener):
                 'issuer': issuer
             })
         else:
-            ln_routing_info = lnaddr.get_routing_info('r')
+            ln_routing_info = lnaddr.bolt11_invoice.get_routing_info('r')
             self._logger.debug(str(ln_routing_info))
             lnprops.update({
                 'r': [{
@@ -386,8 +384,8 @@ class QEInvoice(QObject, QtEventListener):
         assert self.status in [PR_UNPAID, PR_FAILED]
         if self.invoiceType == QEInvoice.Type.LightningInvoice:
             if self.get_max_spendable_lightning() * 1000 >= amount.msatsInt:
-                lnaddr = self._effectiveInvoice._lnaddr
-                if lnaddr.amount and amount.msatsInt < lnaddr.amount * COIN * 1000:
+                invoice_amount_msat = self._effectiveInvoice.amount_msat
+                if invoice_amount_msat and amount.msatsInt < invoice_amount_msat:
                     return False, _('Cannot pay less than the amount specified in the invoice')
                 else:
                     return True, None
@@ -728,15 +726,14 @@ class QEInvoiceParser(QEInvoice):
 
         self._pi.finalize(amount_sat=amount, comment=note, on_finished=on_finished)
 
-    def on_bolt12_invoice(self, orig_amount, bolt12_invoice):
+    def on_bolt12_invoice(self, orig_amount, bolt12_invoice: Invoice):
         self._logger.debug(f'on_bolt12_invoice {bolt12_invoice!r}')
 
-        invoice = Invoice.from_bolt12_invoice_tlv(self._pi.bolt12_invoice_tlv)
         # # assure no shenanigans with the invoice we get back
-        if orig_amount * 1000 != invoice.amount_msat:  # TODO msat precision can cause trouble here
+        if orig_amount * 1000 != bolt12_invoice.amount_msat:  # TODO msat precision can cause trouble here
             raise Exception('Unexpected amount in invoice, differs from invoice_request specified amount')
 
-        self.set_effective_invoice(invoice)
+        self.set_effective_invoice(bolt12_invoice)
         self.bolt12Invoice.emit()
 
     @pyqtSlot(result=bool)

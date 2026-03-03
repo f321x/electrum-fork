@@ -25,6 +25,7 @@ from electrum.onion_message import (
     create_blinded_path, OnionMessageManager, NoRouteFound, Timeout, NoOnionMessagePeers,
     create_route_to_introduction_point, decrypt_onionmsg_data_tlv,
 )
+from electrum.lnonion import BlindedPath
 from electrum.util import bfh, read_json_file, OldTaskGroup, get_asyncio_loop
 from electrum.logging import console_stderr_handler
 
@@ -285,7 +286,7 @@ class MockPeer:
     def is_initialized(self):
         return True
 
-    def send_message(self, *args, **kwargs):
+    def send_onion_message(self, *args, **kwargs):
         if self.on_send_message:
             self.on_send_message(*args, **kwargs)
 
@@ -541,9 +542,13 @@ class TestOnionMessageRouteConstruction(TestPeer):
         session_key = os.urandom(32)
         introduction_point = edward.node_keypair.pubkey
         first_path_key = ecc.ECPrivkey.generate_random_key().get_public_key_bytes()
-        blinded_path = {
-            'first_path_key': first_path_key,
-        }
+        BlindedPath.__post_init__ = lambda _: None
+        blinded_path = BlindedPath(
+            first_path_key=first_path_key,
+            first_node_id=None,
+            num_hops=None,
+            path=None,
+        )
         with self.assertRaises(NoRouteFound):
             create_route_to_introduction_point(alice, blinded_path, introduction_point, session_key)
 

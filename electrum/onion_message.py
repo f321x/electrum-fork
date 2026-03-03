@@ -27,8 +27,8 @@ import io
 import os
 import threading
 import time
+import random
 import dataclasses
-from random import random
 
 from typing import TYPE_CHECKING, Optional, Sequence, NamedTuple, Union, Mapping
 
@@ -42,7 +42,8 @@ from electrum.lnmsg import OnionWireSerializer
 from electrum.lnonion import (get_bolt04_onion_key, OnionPacket, process_onion_packet, blinding_privkey,
                               OnionHopsDataSingle, decrypt_onionmsg_data_tlv, encrypt_onionmsg_data_tlv,
                               get_shared_secrets_along_route, new_onion_packet, encrypt_hops_recipient_data,
-                              next_path_key_from_shared_secret)
+                              next_path_key_from_shared_secret, BlindedPathInfo, BlindedPath, BlindedPayInfo,
+                              BlindedPathHop)
 from electrum.lnutil import (LnFeatures, MIN_FINAL_CLTV_DELTA_ACCEPTED, MAXIMUM_REMOTE_TO_SELF_DELAY_ACCEPTED,
                              validate_features, IncompatibleOrInsaneFeatures)
 from electrum.util import OldTaskGroup, log_exceptions
@@ -138,16 +139,6 @@ def create_blinded_path(
     )
 
 
-def encode_blinded_path(blinded_path: dict):
-    with io.BytesIO() as blinded_path_fd:
-        OnionWireSerializer.write_field(
-            fd=blinded_path_fd,
-            field_type='blinded_path',
-            count=1,
-            value=blinded_path)
-        return blinded_path_fd.getvalue()
-
-
 def is_onion_message_node(node_id: bytes, node_info: Optional['NodeInfo']) -> bool:
     if not node_info:
         return False
@@ -159,14 +150,19 @@ def create_onion_message_route_to(lnwallet: 'LNWallet', node_id: bytes) -> Seque
        and if no route found, raise a NoRouteFound with a node network address hint if node_id is found with
        an address in channel_db.
     """
-    my_active_channels = [chan for chan in lnwallet.channels.values() if chan.is_active()]
-    my_sending_channels = {
-        chan.short_channel_id: chan for chan in my_active_channels
-        if chan.short_channel_id is not None
-    }
+    # dest is existing peer?
+    if lnwallet.lnpeermgr.get_peer_by_pubkey(node_id):
+        return [PathEdge(short_channel_id=None, start_node=None, end_node=node_id)]
+
     # find route to introduction point over existing channel mesh
     # NOTE: nodes that are in channel_db but are offline are not removed from the set
-    if lnwallet.network.path_finder:
+    if not lnwallet.uses_trampoline():
+        my_active_channels = [chan for chan in lnwallet.channels.values() if chan.is_active()]
+        my_sending_channels = {
+            chan.short_channel_id: chan for chan in my_active_channels
+            if chan.short_channel_id is not None
+        }
+
         if path := lnwallet.network.path_finder.find_path_for_payment(
             nodeA=lnwallet.node_keypair.pubkey,
             nodeB=node_id,
@@ -178,22 +174,26 @@ def create_onion_message_route_to(lnwallet: 'LNWallet', node_id: bytes) -> Seque
             peer = lnwallet.lnpeermgr.get_peer_by_pubkey(path[0].end_node)
             assert peer, 'first hop not a peer'
             return path
-
-    # alt: dest is existing peer?
-    if lnwallet.lnpeermgr.get_peer_by_pubkey(node_id):
-        return [PathEdge(short_channel_id=None, start_node=None, end_node=node_id)]
-
-    # if we have an address, pass it.
-    if lnwallet.channel_db:
-        if peer_addr := lnwallet.channel_db.get_last_good_address(node_id):
+        elif peer_addr := lnwallet.channel_db.get_last_good_address(node_id):
+            # if we have an address, pass it.
             raise NoRouteFound('no path found, peer_addr available', peer_address=peer_addr)
+    else:
+        # if we use trampoline just assume the trampoline will open a direct connection to the next_node_id
+        # NOTE: Eclair only does this with the relay-policy config set to relay-all!
+        trampoline_peers = [p for p in lnwallet.lnpeermgr.peers.values() if lnwallet.is_trampoline_peer(p.pubkey)]
+        if trampoline_peers:
+            random_trampoline_peer = random.choice(trampoline_peers)
+            return [
+                PathEdge(short_channel_id=None, start_node=None, end_node=random_trampoline_peer.pubkey),
+                PathEdge(short_channel_id=None, start_node=random_trampoline_peer.pubkey, end_node=node_id),
+            ]
 
     raise NoRouteFound('no path found')
 
 
 def create_route_to_introduction_point(
     lnwallet: 'LNWallet',
-    blinded_path: dict,
+    blinded_path: BlindedPath,
     introduction_point: bytes,
     session_key: bytes
 ):
@@ -204,7 +204,7 @@ def create_route_to_introduction_point(
     # if blinded path introduction point is our direct peer, no need to route-find
     if peer:
         # start of blinded path is our peer
-        path_key = blinded_path['first_path_key']
+        path_key = blinded_path.first_path_key
         return peer, path_key, hops_data, blinded_node_ids
 
     path = create_onion_message_route_to(lnwallet, introduction_point)
@@ -238,7 +238,7 @@ def create_route_to_introduction_point(
         tlv_stream_name='onionmsg_tlv',
         blind_fields={
             'next_node_id': {'node_id': introduction_point},
-            'next_path_key_override': {'path_key': blinded_path['first_path_key']},
+            'next_path_key_override': {'path_key': blinded_path.first_path_key},
         },
     )
     hops_data.append(final_hop_pre_ip)
@@ -261,89 +261,77 @@ def create_route_to_introduction_point(
 
 def send_onion_message_to(
         lnwallet: 'LNWallet',
-        node_id_or_blinded_path: bytes,
+        node_id_or_blinded_path: bytes | BlindedPath,
         destination_payload: dict,
         session_key: bytes = None
 ) -> None:
     if session_key is None:
         session_key = os.urandom(32)
 
-    if len(node_id_or_blinded_path) > 33:  # assume blinded path
-        with io.BytesIO(node_id_or_blinded_path) as blinded_path_fd:
-            try:
-                blinded_path = OnionWireSerializer.read_field(
-                    fd=blinded_path_fd,
-                    field_type='blinded_path',
-                    count=1)
-                logger.debug(f'blinded path: {blinded_path!r}')
-            except Exception as e:
-                logger.error(f'e!r')
-                raise
+    if isinstance(node_id_or_blinded_path, BlindedPath):
+        blinded_path = node_id_or_blinded_path
+        introduction_point = blinded_path.first_node_id
+        if len(introduction_point) != 33:
+            raise Exception('first_node_id not a nodeid but a sciddir, which is not supported')
+            # Note: blinded_path specifies type sciddir_or_nodeid for first_node_id
+            # but only nodeid is supported in onion_message context;
+            # https://github.com/lightning/bolts/blob/master/04-onion-routing.md
+            # "MUST set first_node_id to N0"
 
-            introduction_point = blinded_path['first_node_id']
-            if len(introduction_point) != 33:
-                raise Exception('first_node_id not a nodeid but a sciddir, which is not supported')
-                # Note: blinded_path specifies type sciddir_or_nodeid for first_node_id
-                # but only nodeid is supported in onion_message context;
-                # https://github.com/lightning/bolts/blob/master/04-onion-routing.md
-                # "MUST set first_node_id to N0"
+        if lnwallet.node_keypair.pubkey == introduction_point:
+            hops_data = []
+            blinded_node_ids = []
 
-            if lnwallet.node_keypair.pubkey == introduction_point:
-                hops_data = []
-                blinded_node_ids = []
+            # blinded path introduction point is me
+            our_blinding = blinded_path.first_path_key
+            our_payload = blinded_path.path[0]
+            remaining_blinded_path = blinded_path.path[1:]
+            assert len(remaining_blinded_path) > 0, 'sending to myself?'
 
-                # blinded path introduction point is me
-                our_blinding = blinded_path['first_path_key']
-                our_payload = blinded_path['path'][0]
-                remaining_blinded_path = blinded_path['path'][1:]
-                assert len(remaining_blinded_path) > 0, 'sending to myself?'
+            # decrypt
+            shared_secret = get_ecdh(lnwallet.node_keypair.privkey, our_blinding)
+            recipient_data = decrypt_onionmsg_data_tlv(
+                shared_secret=shared_secret,
+                encrypted_recipient_data=our_payload.encrypted_recipient_data,
+            )
 
-                # decrypt
-                shared_secret = get_ecdh(lnwallet.node_keypair.privkey, our_blinding)
-                recipient_data = decrypt_onionmsg_data_tlv(
-                    shared_secret=shared_secret,
-                    encrypted_recipient_data=our_payload['encrypted_recipient_data']
-                )
+            peer = lnwallet.lnpeermgr.get_peer_by_pubkey(recipient_data['next_node_id']['node_id'])
+            assert peer, 'next_node_id not a peer'
 
-                peer = lnwallet.lnpeermgr.get_peer_by_pubkey(recipient_data['next_node_id']['node_id'])
-                assert peer, 'next_node_id not a peer'
-
-                # blinding override?
-                next_path_key_override = recipient_data.get('next_path_key_override')
-                if next_path_key_override:
-                    next_path_key = next_path_key_override.get('path_key')
-                else:
-                    next_path_key = next_path_key_from_shared_secret(our_blinding, shared_secret)
-                path_key = next_path_key
-
+            # blinding override?
+            next_path_key_override = recipient_data.get('next_path_key_override')
+            if next_path_key_override:
+                next_path_key = next_path_key_override.get('path_key')
             else:
-                # we need a route to introduction point
-                r = create_route_to_introduction_point(lnwallet, blinded_path, introduction_point, session_key)
-                peer, path_key, hops_data, blinded_node_ids = r
+                next_path_key = next_path_key_from_shared_secret(our_blinding, shared_secret)
+            path_key = next_path_key
 
-                remaining_blinded_path = blinded_path['path']
-                if not isinstance(remaining_blinded_path, list):  # doesn't return list when num items == 1
-                    remaining_blinded_path = [remaining_blinded_path]
+        else:
+            # we need a route to introduction point
+            r = create_route_to_introduction_point(lnwallet, blinded_path, introduction_point, session_key)
+            peer, path_key, hops_data, blinded_node_ids = r
+            remaining_blinded_path = blinded_path.path
 
-            # append (remaining) blinded path and payload
-            blinded_path_blinded_ids = []
-            for i, onionmsg_hop in enumerate(remaining_blinded_path):
-                blinded_path_blinded_ids.append(onionmsg_hop.get('blinded_node_id'))
-                payload = {
-                    'encrypted_recipient_data': {'encrypted_recipient_data': onionmsg_hop['encrypted_recipient_data']}
-                }
-                if i == len(remaining_blinded_path) - 1:  # final hop
-                    payload.update(destination_payload)
-                hop = OnionHopsDataSingle(tlv_stream_name='onionmsg_tlv', payload=payload)
-                hops_data.append(hop)
+        # append (remaining) blinded path and payload
+        blinded_path_blinded_ids = []
+        for i, onionmsg_hop in enumerate(remaining_blinded_path):
+            blinded_path_blinded_ids.append(onionmsg_hop.blinded_node_id)
+            payload = {
+                'encrypted_recipient_data': {'encrypted_recipient_data': onionmsg_hop.encrypted_recipient_data}
+            }
+            if i == len(remaining_blinded_path) - 1:  # final hop
+                payload.update(destination_payload)
+            hop = OnionHopsDataSingle(tlv_stream_name='onionmsg_tlv', payload=payload)
+            hops_data.append(hop)
 
-            payment_path_pubkeys = blinded_node_ids + blinded_path_blinded_ids
-            hop_shared_secrets, _ = get_shared_secrets_along_route(payment_path_pubkeys, session_key)
-            encrypt_hops_recipient_data('onionmsg_tlv', hops_data, hop_shared_secrets)
-            packet = new_onion_packet(payment_path_pubkeys, session_key, hops_data, onion_message=True)
-            packet_b = packet.to_bytes()
+        payment_path_pubkeys = blinded_node_ids + blinded_path_blinded_ids
+        hop_shared_secrets, _ = get_shared_secrets_along_route(payment_path_pubkeys, session_key)
+        encrypt_hops_recipient_data('onionmsg_tlv', hops_data, hop_shared_secrets)
+        packet = new_onion_packet(payment_path_pubkeys, session_key, hops_data, onion_message=True)
+        packet_b = packet.to_bytes()
 
     else:  # node pubkey
+        assert isinstance(node_id_or_blinded_path, bytes) and len(node_id_or_blinded_path) == 33
         pubkey = node_id_or_blinded_path
 
         if lnwallet.node_keypair.pubkey == pubkey:
@@ -357,6 +345,8 @@ def send_onion_message_to(
             path = [PathEdge(short_channel_id=None, start_node=None, end_node=pubkey)]
         else:
             path = create_onion_message_route_to(lnwallet, pubkey)
+            peer = lnwallet.lnpeermgr.get_peer_by_pubkey(path[0].end_node)
+            assert peer, "first hop is not a peer"
 
             hops_data = [
                 OnionHopsDataSingle(
@@ -376,113 +366,17 @@ def send_onion_message_to(
 
         hop_shared_secrets, blinded_node_ids = get_shared_secrets_along_route(payment_path_pubkeys, session_key)
         encrypt_hops_recipient_data('onionmsg_tlv', hops_data, hop_shared_secrets)
-        packet = new_onion_packet(blinded_node_ids, session_key, hops_data)
+        packet = new_onion_packet(blinded_node_ids, session_key, hops_data, onion_message=True)
         packet_b = packet.to_bytes()
 
         path_key = ecc.ECPrivkey(session_key).get_public_key_bytes()
 
-    peer.send_message(
-        "onion_message",
+    assert peer
+    peer.send_onion_message(
         path_key=path_key,
-        len=len(packet_b),
-        onion_message_packet=packet_b
+        onion_message_packet=packet_b,
+        timeout=OnionMessageManager.REQUEST_REPLY_RETRY_DELAY,
     )
-
-
-@dataclasses.dataclass(frozen=True, kw_only=True)
-class BlindedPathHop:
-    blinded_node_id: bytes
-    enclen: int
-    encrypted_recipient_data: bytes
-
-    def __post_init__(self):
-        ecc.ECPubkey(b=self.blinded_node_id)
-
-
-@dataclasses.dataclass(frozen=True, kw_only=True)
-class BlindedPath:
-    """
-    https://github.com/lightning/bolts/blob/34455ffe28b308dd7ac7552234d565890af8605b/04-onion-routing.md?plain=1#L441
-    """
-    first_node_id: bytes
-    first_path_key: bytes
-    num_hops: bytes
-    path: list[BlindedPathHop]
-
-    @property
-    def hop_count(self) -> int:
-        return int.from_bytes(self.num_hops, byteorder='big', signed=False)
-
-    def __post_init__(self):
-        # if num_hops is 0 in any blinded_path in offer_paths: MUST NOT respond to the offer
-        assert isinstance(self.num_hops, bytes), type(self.num_hops)
-        if self.hop_count == 0:
-            raise ValueError('invalid num_hops of 0')
-        if not self.path:
-            raise ValueError('empty path')
-        if not len(self.path) == self.hop_count:
-            raise ValueError(f'{len(self.path)=} != {self.hop_count=}')
-        ecc.ECPubkey(b=self.first_path_key)
-
-    @classmethod
-    def from_dict(cls, d: dict) -> 'BlindedPath':
-        if isinstance(d['path'], Mapping):  # single path
-            d['path'] = [d['path']]
-        return BlindedPath(
-            first_node_id=d['first_node_id'],
-            first_path_key=d['first_path_key'],
-            num_hops=d['num_hops'],
-            path=[BlindedPathHop(**p) for p in d['path']],
-        )
-
-
-@dataclasses.dataclass(frozen=True)
-class BlindedPayInfo:
-    fee_base_msat: int
-    fee_proportional_millionths: int
-    cltv_expiry_delta: int
-    htlc_minimum_msat: int
-    htlc_maximum_msat: int
-    features: LnFeatures
-
-    @property
-    def has_unknown_features(self) -> bool:
-        """
-        MUST NOT use the corresponding invoice_paths.path if payinfo.features has any unknown even bits set.
-        """
-        try:
-            validate_features(self.features)
-        except IncompatibleOrInsaneFeatures:
-            return True
-        return False
-
-    @classmethod
-    def from_dict(cls, d: dict) -> 'BlindedPayInfo':
-        return BlindedPayInfo(
-            fee_base_msat=int(d['fee_base_msat']),
-            fee_proportional_millionths=int(d['fee_proportional_millionths']),
-            cltv_expiry_delta=int(d['cltv_expiry_delta']),
-            htlc_minimum_msat=int(d['htlc_minimum_msat']),
-            htlc_maximum_msat=int(d['htlc_maximum_msat']),
-            features=LnFeatures(int.from_bytes(d['features'], byteorder="big", signed=False))
-        )
-
-    def to_dict(self) -> dict:
-        return {
-            'fee_base_msat': self.fee_base_msat,
-            'fee_proportional_millionths': self.fee_proportional_millionths,
-            'cltv_expiry_delta': self.cltv_expiry_delta,
-            'htlc_minimum_msat': self.htlc_minimum_msat,
-            'htlc_maximum_msat': self.htlc_maximum_msat,
-            'flen': len(self.features.to_tlv_bytes()),
-            'features': self.features.to_tlv_bytes()
-        }
-
-
-class BlindedPathInfo(NamedTuple):
-    path: BlindedPath
-    path_id: bytes
-    payinfo: Optional[BlindedPayInfo]
 
 
 def get_blinded_reply_paths(
@@ -533,7 +427,7 @@ def get_blinded_paths_to_me(
 
     if len(my_channels):
         # randomize list
-        rchans = sorted(my_channels, key=lambda x: random())
+        rchans = sorted(my_channels, key=lambda x: random.random())
         for chan in rchans[:max_paths]:
             hop_extras = None
             payinfo = None
@@ -591,7 +485,7 @@ def get_blinded_paths_to_me(
                              peer.their_features.supports(LnFeatures.OPTION_ONION_MESSAGE_OPT)]
         if len(my_onionmsg_peers):
             # randomize list
-            rpeers = sorted(my_onionmsg_peers, key=lambda x: random())
+            rpeers = sorted(my_onionmsg_peers, key=lambda x: random.random())
             for peer in rpeers[:max_paths]:
                 recipient_data, path_id = ensure_path_id(final_recipient_data)
                 blinded_path = create_blinded_path(os.urandom(32), [peer.pubkey, mynodeid], recipient_data)
@@ -637,7 +531,7 @@ class OnionMessageManager(Logger):
     FORWARD_MAX_QUEUE = 3
 
     class Request:
-        def __init__(self, *, payload: dict, node_id_or_blinded_paths: Union[bytes, Sequence[bytes]]):
+        def __init__(self, *, payload: dict, node_id_or_blinded_paths: Union[bytes, Sequence[BlindedPath]]):
             self.future = asyncio.Future()
             self.payload = payload
             self.node_id_or_blinded_paths = node_id_or_blinded_paths
@@ -700,11 +594,10 @@ class OnionMessageManager(Logger):
                     self.logger.debug('forward dropped, next peer is not ONION_MESSAGE capable')
                     continue
 
-                next_peer.send_message(
-                    "onion_message",
+                next_peer.send_onion_message(
                     path_key=blinding,
-                    len=len(onion_packet_b),
-                    onion_message_packet=onion_packet_b
+                    onion_message_packet=onion_packet_b,
+                    timeout=self.FORWARD_RETRY_DELAY,
                 )
             except BaseException as e:
                 self.logger.debug(f'error while sending {node_id=} e={e!r}')
@@ -761,7 +654,7 @@ class OnionMessageManager(Logger):
     def submit_send(
             self, *,
             payload: dict,
-            node_id_or_blinded_paths: Union[bytes, Sequence[bytes]],
+            node_id_or_blinded_paths: Union[bytes, Sequence[BlindedPath]],
             key: Optional[bytes] = None) -> 'Task':
         """Add onion message to queue for sending. Queued onion message payloads
            are supplied with a path_id and a reply_path to determine which request

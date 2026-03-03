@@ -29,6 +29,7 @@ import os
 import time
 import attr
 from dataclasses import dataclass, field, asdict, fields
+from functools import cached_property
 import re
 from decimal import Decimal
 from typing import TYPE_CHECKING, Union, Optional, Tuple, Iterable, Type, TypeVar, Any, ClassVar, Sequence
@@ -39,12 +40,15 @@ import electrum_ecc as ecc
 from . import constants
 from .bitcoin import COIN
 from .json_db import stored_in, StoredObject
-from .lnaddr import LnAddr
+from .bolt11 import BOLT11Addr
 from .lnmsg import OnionWireSerializer, batched
 from .lnutil import LnFeatures, hex_to_bytes, bytes_to_hex, validate_features
-from .onion_message import (Timeout, get_blinded_paths_to_me, BlindedPathInfo, BlindedPath, BlindedPayInfo,
-                            NoRouteBlindingChannelPeers)
-from .segwit_addr import bech32_decode, convertbits, bech32_encode, Encoding, INVALID_BECH32, CHARSET as BECH32_CHARSET
+from .lnonion import BlindedPathInfo, BlindedPath, BlindedPayInfo
+from .onion_message import Timeout, get_blinded_paths_to_me, NoRouteBlindingChannelPeers
+from .segwit_addr import (
+    bech32_decode, convertbits, bech32_encode, Encoding, INVALID_BECH32,
+    CHARSET as BECH32_CHARSET, encode_segwit_address,
+)
 
 if TYPE_CHECKING:
     from .lnworker import LNWallet
@@ -75,10 +79,13 @@ class BOLT12Base(ABC):
         return cls.deserialize(protocol_dict)
 
     def encode(self, *, signing_key: bytes = None, as_bech32: bool = False) -> str | bytes:
-        if self.signing_key_path is None:
+        if self.signing_key_path:
+            # if no signing_key is passed we keep the existing signature, else a new one is created
+            assert signing_key or hasattr(self, 'signature') and getattr(self, 'signature')
+        else:
             assert signing_key is None, "cannot sign offer"
 
-        data = self.serialize(with_signature=False)
+        data = self.serialize(with_signature=False if signing_key else True)
         with io.BytesIO() as fd:
             OnionWireSerializer.write_tlv_stream(
                 fd=fd,
@@ -130,6 +137,16 @@ class BOLT12Base(ABC):
             if get_value(self, name) != get_value(against, name):
                 return False
         return True
+
+    @property
+    def is_expired(self) -> bool:
+        now = int(time.time())
+        expiry_time = None
+        if type(self) == BOLT12Invoice:
+            expiry_time = self.invoice_created_at + self.invoice_relative_expiry
+        elif type(self) == BOLT12Offer:
+            expiry_time = self.offer_absolute_expiry
+        return now > expiry_time if expiry_time is not None else False
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -365,6 +382,8 @@ class BOLT12Invoice(BOLT12InvoiceRequest):
         # MUST reject the invoice if invoice_created_at is not present
         if self.invoice_created_at is None:
             raise ValueError("invoice_created_at missing")
+        elif self.invoice_created_at > int(time.time()) + 10:
+            raise ValueError("invoice_created_at in the future")
         # MUST reject the invoice if invoice_payment_hash is not present
         if self.invoice_payment_hash is None:
             raise ValueError("invoice_payment_hash missing")
@@ -383,7 +402,7 @@ class BOLT12Invoice(BOLT12InvoiceRequest):
         # MUST reject the invoice if invoice_blindedpay does not contain exactly one blinded_payinfo per invoice_paths.blinded_path.
         if len(self.invoice_blindedpay) != len(self.invoice_paths):
             raise ValueError("invoice_blindedpay length mismatch")
-        if all(payinfo.has_unknown_features for payinfo in self.invoice_blindedpay):
+        if all(payinfo.requires_unknown_mandatory_features for payinfo in self.invoice_blindedpay):
             # MUST reject the invoice if this leaves no usable paths.
             raise ValueError("no payinfo with sane features")
         # if offer_issuer_id is present (invoice_request for an offer):
@@ -440,6 +459,18 @@ class BOLT12Invoice(BOLT12InvoiceRequest):
         'invoice_node_id': lambda v: {'node_id': v},
         'invoice_signature': lambda v: {'sig': v},
     }
+
+    @cached_property
+    def fallback_address(self) -> Optional[str]:
+        fallbacks = self.invoice_fallbacks or ()
+        for fba in fallbacks:
+            version_bytes, witprog = fba.get('version'), fba.get('address', b'')
+            if version_bytes is not None and 2 <= len(witprog) <= 40:
+                version = int.from_bytes(version_bytes, signed=False, byteorder='big')
+                if version <= 16:
+                    address = encode_segwit_address(constants.net.SEGWIT_HRP, version, witprog)
+                    return address
+        return None
 
 
 def is_offer(data: str) -> bool:
@@ -509,57 +540,13 @@ class Offer(StoredObject):
     offer_bech32 = attr.ib(kw_only=True, type=str)
 
 
-# @stored_in('path_ids')
-# @attr.s
-# class PathId(StoredObject):
-#     # payment_hash = attr.ib(kw_only=True, type=bytes, converter=hex_to_bytes, repr=bytes_to_hex)
-#     path_id = attr.ib(kw_only=True, type=bytes, converter=hex_to_bytes, repr=bytes_to_hex)
-
-
-def to_lnaddr(data: BOLT12Invoice) -> LnAddr:
-    # FIXME: abusing BOLT11 oriented LnAddr for BOLT12 fields
-    net = constants.net
-    addr = LnAddr()
-
-    # NOTE: CLN puts the real node_id here, which is defeats the whole purpose of blinded paths
-    # also, this should not be used as routing destination in payments (introduction point in set of blinded paths
-    # must be used instead
-    pubkey = data.invoice_node_id
-
-    class WrappedBytesKey:
-        serialize = lambda: pubkey
-    addr.pubkey = WrappedBytesKey
-    addr.net = net
-    addr.date = data.invoice_created_at
-    addr.paymenthash = data.invoice_payment_hash
-    addr.payment_secret = b'\x00' * 32  # Note: payment secret is not needed, recipient can use path_id in encrypted_recipient_data
-    msat = data.invoice_amount
-    if msat is not None:
-        addr.amount = Decimal(msat) / COIN / 1000
-    fallbacks = data.invoice_fallbacks or []
-    fallbacks = list(filter(lambda x: x['version'] <= 16 and 2 <= len(x['address'] <= 40), fallbacks))
-    if fallbacks:
-        addr.tags.append(('f', fallbacks[0]))
-    exp = data.invoice_relative_expiry
-    if exp:
-        addr.tags.append(('x', int(exp)))
-    description = data.offer_description
-    if description:
-        addr.tags.append(('d', description))
-    features = data.invoice_features
-    if features:
-        # CLN (v25.09) doesn't add the assumed (see BOLT9) features to BOLT12 invoices, we add them here
-        addr.tags.append(('9', features.with_assumed().for_invoice()))
-    return addr
-
-
 async def request_invoice(
         lnwallet: 'LNWallet',
         bolt12_offer: BOLT12Offer,
         amount_msat: int,
         *,
         note: Optional[str] = None,
-) -> Tuple[BOLT12Invoice, bytes]:
+) -> Tuple[BOLT12Invoice, str]:
     # NOTE: offer_chains isn't checked here, BOLT12Offer.decode already raises on invalid chains.
 
     #   - if it chooses to send an `invoice_request`, it sends an onion message:
@@ -571,11 +558,7 @@ async def request_invoice(
 
     if paths := bolt12_offer.offer_paths:
         assert len(paths)
-        node_id_or_blinded_paths = []
-        for path in paths:
-            with io.BytesIO() as fd:
-                OnionWireSerializer.write_field(fd=fd, field_type='blinded_path', count=1, value=asdict(path))
-                node_id_or_blinded_paths.append(fd.getvalue())
+        node_id_or_blinded_paths = paths
     else:
         node_id_or_blinded_paths = bolt12_offer.offer_issuer_id
 
@@ -620,7 +603,7 @@ async def request_invoice(
         invoice_tlv = payload['invoice']['invoice']
         invoice = BOLT12Invoice.decode(invoice_tlv)
         lnwallet.logger.info('received bolt12 invoice')
-        lnwallet.logger.debug(f'invoice_data: {invoice!r}')
+        lnwallet.logger.debug(f'invoice_data: {invoice!r}\n{invoice.invoice_features.get_names()=}')
         bech32_data = convertbits(list(invoice_tlv), 8, 5, True)
         invoice_bech32 = bech32_encode(Encoding.BECH32, 'lni', bech32_data, with_checksum=False)
         lnwallet.logger.debug(f'invoice bech32: {invoice_bech32}')
@@ -646,7 +629,7 @@ async def request_invoice(
     # - fallback address checks
     # - MUST reject the invoice if it did not arrive via one of the paths in invreq_paths
 
-    return invoice, invoice_tlv
+    return invoice, invoice_bech32
 
 
 def verify_request_and_create_invoice(

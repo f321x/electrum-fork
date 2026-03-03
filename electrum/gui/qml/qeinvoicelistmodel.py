@@ -6,7 +6,7 @@ from PyQt6.QtCore import Qt, QAbstractListModel, QModelIndex
 
 from electrum.logging import get_logger
 from electrum.util import Satoshis, format_time
-from electrum.invoices import BaseInvoice, PR_EXPIRED, LN_EXPIRY_NEVER, Invoice, Request, PR_PAID, BOLT12_INVOICE_PREFIX
+from electrum.invoices import BaseInvoice, PR_EXPIRED, LN_EXPIRY_NEVER, Invoice, Request, PR_PAID
 
 from electrum.gui.common_qt.util import QtEventListener, qt_event_listener
 
@@ -198,7 +198,7 @@ class QEInvoiceListModel(QEAbstractInvoiceListModel, QtEventListener):
     def invoice_to_model(self, invoice: Invoice):
         item = super().invoice_to_model(invoice)
         item['type'] = 'invoice'
-        item['is_bolt12'] = invoice.lightning_invoice and invoice.lightning_invoice.startswith(BOLT12_INVOICE_PREFIX)
+        item['is_bolt12'] = bool(invoice.bolt12_invoice)
 
         return item
 

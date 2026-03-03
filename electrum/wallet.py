@@ -74,7 +74,7 @@ from .address_synchronizer import (
     TX_TIMESTAMP_INF
 )
 from .invoices import (
-    BaseInvoice, Invoice, Request, PR_PAID, PR_UNPAID, PR_EXPIRED, PR_UNCONFIRMED, BOLT12_INVOICE_PREFIX
+    BaseInvoice, Invoice, Request, PR_PAID, PR_UNPAID, PR_EXPIRED, PR_UNCONFIRMED,
 )
 from .contacts import Contacts
 from .mnemonic import Mnemonic
@@ -2959,13 +2959,7 @@ class Abstract_Wallet(ABC, Logger, EventListener):
         d = x.as_dict(status)
         d['invoice_id'] = d.pop('id')
         if x.is_lightning():
-            invoice = x.lightning_invoice
-            if invoice.startswith(BOLT12_INVOICE_PREFIX):
-                bolt12_invoice = bfh(invoice[len(BOLT12_INVOICE_PREFIX):])
-                bech32_data = convertbits(list(bolt12_invoice), 8, 5, True)
-                d['lightning_invoice'] = bech32_encode(Encoding.BECH32, 'lni', bech32_data, with_checksum=False)
-            else:
-                d['lightning_invoice'] = x.lightning_invoice
+            d['lightning_invoice'] = x.lightning_invoice
             if self.lnworker and status == PR_UNPAID:
                 d['can_pay'] = self.lnworker.can_pay_invoice(x)
             if self.lnworker and status == PR_PAID:

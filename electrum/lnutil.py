@@ -1,8 +1,10 @@
 # Copyright (C) 2018 The Electrum developers
 # Distributed under the MIT software license, see the accompanying
 # file LICENCE or http://www.opensource.org/licenses/mit-license.php
+import os
 from enum import IntFlag, IntEnum
 import enum
+from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import NamedTuple, List, Tuple, Mapping, Optional, TYPE_CHECKING, Union, Dict, Set, Sequence
 import sys
@@ -36,7 +38,7 @@ from .json_db import StoredObject, stored_in, stored_as
 if TYPE_CHECKING:
     from .lnchannel import Channel, AbstractChannel
     from .lnrouter import LNPaymentRoute
-    from .lnonion import OnionRoutingFailure, BlindedPayInfo
+    from .lnonion import OnionRoutingFailure, BlindedPathInfo, BlindedPayInfo
     from .simple_config import SimpleConfig
 
 
@@ -2157,3 +2159,60 @@ class PaymentFeeBudget(NamedTuple):
                 f"{blinded_payinfo.cltv_expiry_delta=}, cltv budget: {self.cltv=}"
             )
         return PaymentFeeBudget(fee_msat=remaining_fee_msat, cltv=remaining_cltv)
+
+
+@dataclasses.dataclass(kw_only=True)
+class RoutingInfo(ABC):
+    invoice_features: LnFeatures
+
+    @property
+    @abstractmethod
+    def id(self):
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_pubkeys(self) -> set[bytes]:
+        raise NotImplementedError
+
+    @property
+    def blinded(self) -> bool:
+        return isinstance(self, BlindedRoutingInfo)
+
+    def __post_init__(self):
+        assert self.id
+
+
+@dataclasses.dataclass(kw_only=True)
+class UnblindedRoutingInfo(RoutingInfo):
+    node_pubkey: bytes
+    payment_secret: bytes
+    min_final_cltv_delta: int
+    r_tags: Sequence[Sequence[Sequence[bytes | int]]]
+
+    @property
+    def id(self) -> bytes:
+        return self.payment_secret
+
+    def get_pubkeys(self) -> set[bytes]:
+        return {self.node_pubkey}
+
+
+@dataclasses.dataclass(kw_only=True)
+class BlindedRoutingInfo(RoutingInfo):
+    paths: tuple['BlindedPathInfo', ...]
+    current_path_index: int = 0
+    _id: bytes = os.urandom(32)
+
+    def get_current_path(self) -> 'BlindedPathInfo':
+        return self.paths[self.current_path_index % len(self.paths)]
+
+    def __post_init__(self):
+        assert self.paths, self.paths
+
+    @property
+    def id(self) -> bytes:
+        # FIXME: what to use?
+        return self._id
+
+    def get_pubkeys(self) -> set[bytes]:
+        return {p.path.first_node_id for p in self.paths}

@@ -111,7 +111,7 @@ class InvoiceList(MyTreeView):
         for idx, item in enumerate(self.wallet.get_unpaid_invoices()):
             key = item.get_id()
             if item.is_lightning():
-                if item.bolt12_invoice_tlv():
+                if item.bolt12_invoice:
                     icon_name = 'bolt12.png'
                 else:
                     icon_name = 'lightning.png'
