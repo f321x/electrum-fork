@@ -2078,7 +2078,7 @@ class Peer(Logger, EventListener):
         if htlc.blinding:  # payment over blinded path
             # spec: MUST return an error if the payload contains other tlv fields than encrypted_recipient_data,
             # current_path_key, amt_to_forward, outgoing_cltv_value and total_amount_msat.
-            allowed_payload_keys = ['encrypted_recipient_data', 'current_blinding_point', 'amt_to_forward', 'outgoing_cltv_value', 'total_amount_msat']
+            allowed_payload_keys = ['encrypted_recipient_data', 'current_path_key', 'amt_to_forward', 'outgoing_cltv_value', 'total_amount_msat']
             if any(x not in allowed_payload_keys for x in processed_onion.hop_data.payload.keys()):
                 log_fail_reason(f"unknown key in blinded payload: {processed_onion.hop_data.payload.keys()=}")
                 raise exc_incorrect_or_unknown_pd
