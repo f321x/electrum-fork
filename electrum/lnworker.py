@@ -3989,7 +3989,7 @@ class LNWallet(Logger):
                 amount_msat=next_amount_msat_htlc,
                 cltv_abs=next_cltv_abs,
                 onion=processed_onion.next_packet,
-                blinding=processed_onion.next_blinding,
+                blinding=processed_onion.next_path_key,
             )
         except BaseException as e:
             log_fail_reason(f"error sending message to next_peer={next_chan.node_id.hex()}")

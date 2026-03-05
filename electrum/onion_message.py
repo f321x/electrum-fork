@@ -42,7 +42,7 @@ from electrum.lnmsg import OnionWireSerializer
 from electrum.lnonion import (get_bolt04_onion_key, OnionPacket, process_onion_packet, blinding_privkey,
                               OnionHopsDataSingle, decrypt_onionmsg_data_tlv, encrypt_onionmsg_data_tlv,
                               get_shared_secrets_along_route, new_onion_packet, encrypt_hops_recipient_data,
-                              next_blinding_from_shared_secret)
+                              next_path_key_from_shared_secret)
 from electrum.lnutil import (LnFeatures, MIN_FINAL_CLTV_DELTA_ACCEPTED, MAXIMUM_REMOTE_TO_SELF_DELAY_ACCEPTED,
                              validate_features, IncompatibleOrInsaneFeatures)
 from electrum.util import OldTaskGroup, log_exceptions
@@ -312,7 +312,7 @@ def send_onion_message_to(
                 if next_path_key_override:
                     next_path_key = next_path_key_override.get('path_key')
                 else:
-                    next_path_key = next_blinding_from_shared_secret(our_blinding, shared_secret)
+                    next_path_key = next_path_key_from_shared_secret(our_blinding, shared_secret)
                 path_key = next_path_key
 
             else:
