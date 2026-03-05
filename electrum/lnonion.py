@@ -209,7 +209,7 @@ def blinding_privkey(privkey: bytes, blinding: bytes) -> bytes:
     return our_privkey
 
 
-def next_blinding_from_shared_secret(pubkey: bytes, shared_secret: bytes) -> bytes:
+def next_path_key_from_shared_secret(pubkey: bytes, shared_secret: bytes) -> bytes:
     # E_i+1=SHA256(E_i||ss_i) * E_i
     blinding_factor = sha256(pubkey + shared_secret)
     blinding_factor_int = int.from_bytes(blinding_factor, byteorder="big")
@@ -407,7 +407,7 @@ def calc_hops_data_for_blinded_payment(
                 'total_amount_msat': {'total_msat': total_msat},
             }
         if i == num_hops - 1:  # introduction point
-            payload['current_blinding_point'] = {'blinding': inv_path.first_path_key}
+            payload['current_path_key'] = {'path_key': inv_path.first_path_key}
         payload['encrypted_recipient_data'] = {'encrypted_data': inv_hop.encrypted_recipient_data}
 
         _logger.info(f'inv_hop[{num_hops - 1 - i}].payload: ' + repr(payload))
@@ -479,7 +479,7 @@ class ProcessedOnionPacket(NamedTuple):
     next_packet: OnionPacket
     trampoline_onion_packet: OnionPacket
     blinded_path_recipient_data: Optional[dict]
-    next_blinding: bytes = None
+    next_path_key: bytes = None
 
     @property
     def amt_to_forward(self) -> Optional[int]:
@@ -568,8 +568,8 @@ def process_onion_packet(
         # we are part of a blinded path
         if not blinding:
             # we are the introduction point
-            blinding = hop_data.payload.get('current_blinding_point', {}).get('blinding')
-            recipient_data_shared_secret = get_ecdh(our_onion_private_key, blinding)
+            path_key = hop_data.payload.get('current_path_key', {}).get('path_key')
+            recipient_data_shared_secret = get_ecdh(our_onion_private_key, path_key)
         blinded_path_recipient_data = decrypt_onionmsg_data_tlv(
             shared_secret=recipient_data_shared_secret,
             encrypted_recipient_data=erd
@@ -583,13 +583,13 @@ def process_onion_packet(
         trampoline_onion_packet = trampoline_onion_packet['trampoline_onion_packet']
         trampoline_onion_packet = OnionPacket.from_bytes(trampoline_onion_packet)
     # calc next ephemeral key
-    next_public_key = next_blinding_from_shared_secret(onion_packet.public_key, shared_secret)
+    next_public_key = next_path_key_from_shared_secret(onion_packet.public_key, shared_secret)
     next_onion_packet = OnionPacket(
         public_key=next_public_key,
         hops_data=next_hops_data_fd.read(data_size),
         hmac=hop_data.hmac)
 
-    next_blinding = None
+    next_path_key = None
     if hop_data.hmac == bytes(PER_HOP_HMAC_SIZE):
         # we are the destination / exit node
         are_we_final = True
@@ -598,10 +598,10 @@ def process_onion_packet(
         are_we_final = False
 
         if blinding:
-            next_blinding = next_blinding_from_shared_secret(blinding, recipient_data_shared_secret)
+            next_path_key = next_path_key_from_shared_secret(blinding, recipient_data_shared_secret)
 
     return ProcessedOnionPacket(are_we_final, hop_data, next_onion_packet, trampoline_onion_packet,
-                                blinded_path_recipient_data, next_blinding)
+                                blinded_path_recipient_data, next_path_key)
 
 
 def compare_trampoline_onions(
