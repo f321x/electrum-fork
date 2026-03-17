@@ -2,7 +2,7 @@ import enum
 from typing import TYPE_CHECKING, Optional, Union, Tuple, Sequence, Callable
 
 from PyQt6.QtCore import pyqtSignal, Qt, QTimer
-from PyQt6.QtGui import QIcon, QPixmap, QColor
+from PyQt6.QtGui import QIcon, QPixmap, QColor, QPainter
 from PyQt6.QtWidgets import QLabel, QVBoxLayout, QGridLayout, QPushButton
 from PyQt6.QtWidgets import QTreeWidget, QTreeWidgetItem, QHeaderView
 
@@ -510,10 +510,29 @@ class SwapServerDialog(WindowModalDialog, QtEventListener):
     headers = {
         Columns.PUBKEY: _("Pubkey"),
         Columns.FEE: _("Fee"),
-        Columns.MAX_FORWARD: _('Max Forward'),
-        Columns.MAX_REVERSE: _('Max Reverse'),
+        Columns.MAX_FORWARD: '',
+        Columns.MAX_REVERSE: '',
         Columns.LAST_SEEN: _("Last seen"),
     }
+
+    def _create_direction_pixmap(self, left_icon_name: str, right_icon_name: str) -> QPixmap:
+        """Creates a composite pixmap: left_icon → right_icon."""
+        icon_size = 24
+        arrow_width = 26
+        pad = 4
+        total_width = icon_size + pad + arrow_width + pad + icon_size
+        pixmap = QPixmap(total_width, icon_size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.drawPixmap(0, 0, read_QIcon(left_icon_name).pixmap(icon_size, icon_size))
+        painter.setPen(self.palette().color(self.palette().ColorRole.WindowText))
+        font = painter.font()
+        font.setPixelSize(18)
+        painter.setFont(font)
+        painter.drawText(icon_size + pad, 0, arrow_width, icon_size, Qt.AlignmentFlag.AlignCenter, "→")
+        painter.drawPixmap(icon_size + pad + arrow_width + pad, 0, read_QIcon(right_icon_name).pixmap(icon_size, icon_size))
+        painter.end()
+        return pixmap
 
     def __init__(self, window: 'ElectrumWindow', servers: Sequence['SwapOffer']):
         WindowModalDialog.__init__(self, window, _('Choose Swap Provider'))
@@ -526,6 +545,24 @@ class SwapServerDialog(WindowModalDialog, QtEventListener):
         self.servers_list = QTreeWidget()
         col_names = [self.headers[col_idx] for col_idx in sorted(self.headers.keys())]
         self.servers_list.setHeaderLabels(col_names)
+        header_item = self.servers_list.headerItem()
+        header_item.setToolTip(self.Columns.MAX_FORWARD, _("Max Forward"))
+        header_item.setToolTip(self.Columns.MAX_REVERSE, _("Max Reverse"))
+        # overlay pixmap labels on the header viewport for direction icons
+        self._header_pixmap_labels = {}
+        for col, left, right in [
+            (self.Columns.MAX_FORWARD, "lightning.png", "bitcoin.png"),
+            (self.Columns.MAX_REVERSE, "bitcoin.png", "lightning.png"),
+        ]:
+            pm = self._create_direction_pixmap(left, right)
+            label = QLabel(self.servers_list.header().viewport())
+            label.setPixmap(pm)
+            label.setFixedSize(pm.size())
+            label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            self._header_pixmap_labels[col] = label
+        self.servers_list.header().sectionResized.connect(self._reposition_header_pixmaps)
+        self.servers_list.header().geometriesChanged.connect(self._reposition_header_pixmaps)
+        QTimer.singleShot(0, self._reposition_header_pixmaps)
         self.servers_list.header().setStretchLastSection(False)
         for col_idx in range(len(self.Columns)):
             sm = QHeaderView.ResizeMode.Stretch if col_idx == self.Columns.PUBKEY else QHeaderView.ResizeMode.ResizeToContents
@@ -555,6 +592,15 @@ class SwapServerDialog(WindowModalDialog, QtEventListener):
     @qt_event_listener
     def on_event_swap_offers_changed(self, recent_offers: Sequence['SwapOffer']):
         self.update_servers_list(recent_offers)
+
+    def _reposition_header_pixmaps(self):
+        header = self.servers_list.header()
+        for col, label in self._header_pixmap_labels.items():
+            pos = header.sectionPosition(col) - header.offset()
+            size = header.sectionSize(col)
+            x = pos + (size - label.width()) // 2
+            y = (header.height() - label.height()) // 2
+            label.move(x, y)
 
     def update_servers_list(self, servers: Sequence['SwapOffer']):
         self.servers_list.clear()
