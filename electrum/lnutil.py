@@ -38,7 +38,7 @@ from .json_db import StoredObject, stored_in, stored_as
 if TYPE_CHECKING:
     from .lnchannel import Channel, AbstractChannel
     from .lnrouter import LNPaymentRoute
-    from .lnonion import OnionRoutingFailure
+    from .lnonion import OnionRoutingFailure, BlindedPayInfo
     from .simple_config import SimpleConfig
 
 
@@ -2139,6 +2139,26 @@ class PaymentFeeBudget(NamedTuple):
         fees_msat = max(total_amount_msat - amount_minus_fees, cutoff_clamped)
         fees_msat = min(fees_msat, total_amount_msat)  # to handle (invalid?) inputs below cutoff_clamped
         return fees_msat
+
+    def substract_blinded_path_fees(self, blinded_payinfo: 'BlindedPayInfo', amount_msat: int) -> 'PaymentFeeBudget':
+        """Subtract the blinded path's aggregate fees from this budget, returning the remaining budget
+        available for the non-blinded part of the route (e.g. trampoline fees).
+
+        Raises FeeBudgetExceeded if the blinded path fees or cltv exceed the budget.
+        """
+        blinded_fee_msat = (
+            blinded_payinfo.fee_base_msat
+            + (blinded_payinfo.fee_proportional_millionths * amount_msat) // 1_000_000
+        )
+        remaining_fee_msat = self.fee_msat - blinded_fee_msat
+        remaining_cltv = self.cltv - blinded_payinfo.cltv_expiry_delta
+        if remaining_fee_msat < 0 or remaining_cltv < 0:
+            raise FeeBudgetExceeded(
+                f"blinded path fees exceed budget: "
+                f"{blinded_fee_msat=}, fee budget: {self.fee_msat}, "
+                f"{blinded_payinfo.cltv_expiry_delta=}, cltv budget: {self.cltv=}"
+            )
+        return PaymentFeeBudget(fee_msat=remaining_fee_msat, cltv=remaining_cltv)
 
 
 @dataclasses.dataclass(kw_only=True)
