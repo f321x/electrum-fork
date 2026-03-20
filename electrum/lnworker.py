@@ -4180,8 +4180,6 @@ class LNWallet(Logger):
                 paths=bolt12_invoice.invoice_paths,
                 blinded_payinfos=bolt12_invoice.invoice_blindedpay,
             )
-            hops_data = hops_data[1:]
-            blinded_node_ids = blinded_node_ids[1:]
 
         self.logger.info(f"pay len(route)={len(route)}. for payment_hash={payment_hash.hex()}")
         for i in range(len(route)):
