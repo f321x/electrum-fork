@@ -104,9 +104,10 @@ def create_blinded_path(
         if is_non_final_node:
             # spec: alt: short_channel_id instead of next_node_id
             if channels:  # use short_channel_id for payments
+                scid = channels[i].get_remote_scid_alias() or channels[i].short_channel_id
                 recipient_data = {
                     # TODO: SHOULD add padding data to ensure all encrypted_data_tlv(i) have the same length
-                    'short_channel_id': {'short_channel_id': channels[i].short_channel_id}
+                    'short_channel_id': {'short_channel_id': scid}
                 }
             else:
                 recipient_data = {
