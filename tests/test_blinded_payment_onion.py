@@ -47,22 +47,31 @@ bolt12_invoice = {
 class TestPaymentRouteBlinding(ElectrumTestCase):
 
     def test_blinded_payment_onion(self):
-        # route contains only the non-blinded hop
+        # us -> alice -> bob (introduction point) -> remaining blinded path hops
+        # route[0] is us -> alice edge, skipped by calc_hops_data_for_blinded_payment as we don't need a payload for ourselves
         alice_outgoing_channel_id = ShortChannelID.from_str(alice_hop["tlvs"]["outgoing_channel_id"])
         route = [
             RouteEdge(
-                start_node=bytes(33), # our pubkey, not used
+                start_node=bytes(33),  # our (sender's) pubkey
                 end_node=bfh(alice_hop['pubkey']),
+                short_channel_id=ShortChannelID(0),  # sender's channel, not used in payloads
+                fee_base_msat=0,
+                fee_proportional_millionths=0,
+                cltv_delta=0,
+                node_features=0),
+            RouteEdge(
+                start_node=bfh(alice_hop['pubkey']),
+                end_node=first_node_id,  # Bob (introduction point)
                 short_channel_id=alice_outgoing_channel_id,
                 fee_base_msat=0,
                 fee_proportional_millionths=0,
                 cltv_delta=0,
-                node_features=0)
+                node_features=0),
         ]
         total_msat = 150000
         amount_msat = generate["final_amount_msat"]
         final_cltv = generate["final_cltv"]
-        hops_data, hops_pubkeys, amt, cltv_abs = calc_hops_data_for_blinded_payment(
+        hops_data, blinded_hops_pubkeys, amt, cltv_abs = calc_hops_data_for_blinded_payment(
             route=route,
             amount_msat=amount_msat,
             final_cltv_abs=final_cltv,
@@ -70,8 +79,8 @@ class TestPaymentRouteBlinding(ElectrumTestCase):
             bolt12_invoice=bolt12_invoice,
         )
 
-        # bob pubkey is not blinded
-        payment_path_pubkeys = [x.node_id for x in route] + [first_node_id] + hops_pubkeys[1:]
+        # route provides unblinded pubkeys (Alice, Bob)
+        payment_path_pubkeys = [x.node_id for x in route] + blinded_hops_pubkeys
 
         # assert payloads
         for i, h in enumerate(hops_data):

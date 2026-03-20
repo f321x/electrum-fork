@@ -4291,10 +4291,9 @@ class LNWallet(Logger):
                 amount_msat,
                 final_cltv_abs=final_cltv_abs,
                 total_msat=total_msat,
-                inv_path=bolt12_invoice.invoice_paths[0],
-                inv_blindedpay_info=bolt12_invoice.invoice_blindedpay[0])
-            hops_data = hops_data[1:]
-            blinded_node_ids = blinded_node_ids[1:]
+                paths=bolt12_invoice.invoice_paths,
+                blinded_payinfos=bolt12_invoice.invoice_blindedpay,
+            )
 
         self.logger.info(f"pay len(route)={len(route)}. for payment_hash={payment_hash.hex()}")
         for i in range(len(route)):

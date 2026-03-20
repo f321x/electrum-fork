@@ -336,7 +336,7 @@ def new_onion_packet(
     onion_message: bool = False
 ) -> OnionPacket:
     num_hops = len(payment_path_pubkeys)
-    assert num_hops == len(hops_data)
+    assert num_hops == len(hops_data), f"{num_hops=}, {hops_data=}"
     hop_shared_secrets, _ = get_shared_secrets_along_route(payment_path_pubkeys, session_key)
 
     payload_size = 0
@@ -451,8 +451,7 @@ def calc_hops_data_for_payment(
         }}
     hops_data = [OnionHopsDataSingle(payload=hop_payload)]
     # payloads, backwards from last hop (but excluding the first edge):
-    for edge_index in range(len(route) - 1, 0, -1):
-        route_edge = route[edge_index]
+    for route_edge in reversed(route[1:]):
         hop_payload = {
             "amt_to_forward": {"amt_to_forward": amt},
             "outgoing_cltv_value": {"outgoing_cltv_value": cltv_abs},
@@ -478,6 +477,7 @@ def calc_hops_data_for_blinded_payment(
     """Returns the hops_data to be used for constructing an onion packet,
     and the amount_msat and cltv_abs to be used on our immediate channel.
     """
+    from .lnrouter import fee_for_edge_msat
     if len(route) > NUM_MAX_EDGES_IN_PAYMENT_PATH:
         raise PaymentFailure(f"too long route ({len(route)} edges)")
 
@@ -493,7 +493,7 @@ def calc_hops_data_for_blinded_payment(
 
     hops_data = []
     _logger.info('inv_hops: ' + repr(inv_hops))
-    hops_pubkeys = [x.blinded_node_id for x in inv_hops]
+    hops_pubkeys = [x.blinded_node_id for x in inv_hops][1:]
     # build reversed
     for i, inv_hop in enumerate(reversed(inv_hops)):
         payload = {}
@@ -511,13 +511,16 @@ def calc_hops_data_for_blinded_payment(
         hops_data.append(OnionHopsDataSingle(payload=payload))
 
     # calc amount from aggregate blinded path info to send to introduction point
-    amt = amount_msat + inv_blindedpay_info.fee_base_msat + \
-        (inv_blindedpay_info.fee_proportional_millionths * amount_msat) // 1000000
+    amt += fee_for_edge_msat(
+        forwarded_amount_msat=amt,
+        fee_base_msat=inv_blindedpay_info.fee_base_msat,
+        fee_proportional_millionths=inv_blindedpay_info.fee_proportional_millionths,
+    )
     cltv_abs += inv_blindedpay_info.cltv_expiry_delta
     _logger.info(f'blinded payment introduction point {amt=} for {amount_msat=}, {cltv_abs=}')
 
-    # payloads, backwards from last hop (but excluding the first edges):
-    for i, route_edge in enumerate(reversed(route[0:])):
+    # payloads, backwards from last hop (excluding the first edge)
+    for i, route_edge in enumerate(reversed(route[1:])):
         hop_payload = {
             "amt_to_forward": {"amt_to_forward": amt},
             "outgoing_cltv_value": {"outgoing_cltv_value": cltv_abs},
