@@ -4332,7 +4332,7 @@ class LNWallet(Logger):
         is_response_to_offer = True  # always assume scenario 2 for now
 
         if is_response_to_offer:
-            node_id_or_blinded_path = encode_blinded_path(payload['reply_path']['path'])
+            node_id_or_blinded_path = [encode_blinded_path(payload['reply_path']['path'])]
         else:
             # spec: MUST use invreq_paths if present, otherwise MUST use invreq_payer_id as the node id to send to.
             if invreq.invreq_paths is not None:
@@ -4340,16 +4340,29 @@ class LNWallet(Logger):
             else:
                 node_id_or_blinded_path = invreq.invreq_payer_id
 
+        response_key = sha256(invreq.invreq_metadata)
+        if response_key in self.onion_message_manager.pending:
+            self.logger.debug(f"dropping incoming invreq, response already pending")
+            return
+
         try:
             invoice = bolt12.verify_request_and_create_invoice(self, offer, invreq)
         except Bolt12InvoiceError as e:
             self.logger.debug(f"failed to create bolt12 invoice, sending invoice_error: {str(e)}")
             error_payload = {'invoice_error': {'invoice_error': e.to_tlv()}}
-            send_onion_message_to(self, node_id_or_blinded_path, error_payload)
+            self.onion_message_manager.submit_send(
+                payload=error_payload,
+                node_id_or_blinded_paths=node_id_or_blinded_path,
+                key=response_key,
+            )
             return
 
         destination_payload = {
             'invoice': {'invoice': invoice.encode(signing_key=self.node_keypair.privkey)},
         }
 
-        send_onion_message_to(self, node_id_or_blinded_path, destination_payload)
+        self.onion_message_manager.submit_send(
+            payload=destination_payload,
+            node_id_or_blinded_paths=node_id_or_blinded_path,
+            key=response_key,
+        )
