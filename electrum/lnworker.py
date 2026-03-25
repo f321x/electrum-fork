@@ -1047,6 +1047,11 @@ class LNWallet(Logger):
                 self._channel_backups[bfh(channel_id)] = cb = ChannelBackup(storage, lnworker=self)
                 self.wallet.set_reserved_addresses_for_chan(cb, reserved=True)
 
+        self._pathids = {}  # type: Dict[bytes, Sequence[bytes]]
+        pathids = self.db.get_dict("path_ids")
+        for payment_hash, path_ids in pathids.items():
+            self._pathids[bfh(payment_hash)] = path_ids
+
         self._paysessions = dict()                      # type: Dict[bytes, PaySession]
         self.sent_htlcs_info = dict()                   # type: Dict[SentHtlcKey, SentHtlcInfo]
         self.received_mpp_htlcs = self.db.get_dict('received_mpp_htlcs')   # type: Dict[str, ReceivedMPPStatus]  # payment_key -> ReceivedMPPStatus
