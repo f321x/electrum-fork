@@ -511,39 +511,6 @@ def bolt12_bech32_to_bytes(data: str) -> bytes:
     return bytes(d)
 
 
-def to_lnaddr(data: BOLT12Invoice) -> BOLT11Addr:
-    # FIXME: abusing BOLT11 oriented BOLT11Addr for BOLT12 fields
-    net = constants.net
-    addr = BOLT11Addr()
-
-    # NOTE: CLN puts the real node_id here, which defeats the whole purpose of blinded paths
-    # also, this should not be used as routing destination in payments (introduction point in set of blinded paths
-    # must be used instead
-    pubkey = data.invoice_node_id
-
-    class WrappedBytesKey:
-        serialize = lambda: pubkey
-    addr.pubkey = WrappedBytesKey
-    addr.net = net
-    addr.date = data.invoice_created_at
-    addr.paymenthash = data.invoice_payment_hash
-    addr.payment_secret = b'\x00' * 32  # Note: payment secret is not needed, recipient can use path_id in encrypted_recipient_data
-    msat = data.invoice_amount
-    if msat is not None:
-        addr.amount = Decimal(msat) / COIN / 1000
-    fallbacks = data.invoice_fallbacks or []
-    fallbacks = list(filter(lambda x: x['version'] <= 16 and 2 <= len(x['address'] <= 40), fallbacks))
-    if fallbacks:
-        addr.tags.append(('f', fallbacks[0]))
-    exp = data.invoice_relative_expiry
-    if exp:
-        addr.tags.append(('x', int(exp)))
-    description = data.offer_description
-    if description:
-        addr.tags.append(('d', description))
-    return addr
-
-
 async def request_invoice(
         lnwallet: 'LNWallet',
         bolt12_offer: BOLT12Offer,

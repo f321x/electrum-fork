@@ -20,7 +20,7 @@ from electrum_ecc import ecdsa_sig64_from_r_and_s, ecdsa_der_sig_from_ecdsa_sig6
 import aiorpcx
 from aiorpcx import ignore_after
 
-from .bolt12 import BOLT12InvoicePathIDPayload
+from electrum.lnonion import BlindedPathInfo
 from .lrucache import LRUCache
 from .crypto import sha256, sha256d, privkey_to_pubkey, get_ecdh
 from . import bitcoin, util, bolt12
@@ -57,6 +57,7 @@ from .json_db import StoredDict
 from .invoices import PR_PAID
 from .fee_policy import FEE_LN_ETA_TARGET, FEERATE_PER_KW_MIN_RELAY_LIGHTNING
 from .channel_db import FLAG_DIRECTION
+from .bolt12 import BOLT12Invoice, BOLT12InvoicePathIDPayload
 
 if TYPE_CHECKING:
     from .lnworker import LNGossip, LNWallet
@@ -146,6 +147,22 @@ class Peer(Logger, EventListener):
         raw_msg = encode_msg(message_name, **kwargs)
         self._store_raw_msg_if_local_update(raw_msg, message_name=message_name, channel_id=kwargs.get("channel_id"))
         self.transport.send_bytes(raw_msg)
+
+    def send_onion_message(self, *, path_key: bytes, onion_message_packet: bytes, timeout: int) -> asyncio.Future:
+        """This is safe to call before a peer is initialized and can be called from any thread."""
+        async def send_on_asyncio_thread_after_init():
+            try:
+                async with util.async_timeout(timeout):
+                    await self.initialized
+                    self.send_message(
+                        message_name='onion_message',
+                        path_key=path_key,
+                        len=len(onion_message_packet),
+                        onion_message_packet=onion_message_packet,
+                    )
+            except Exception as e:
+                self.logger.warning(f"onion message sending attempt dropped, {e!r}")
+        return asyncio.run_coroutine_threadsafe(send_on_asyncio_thread_after_init(), util.get_asyncio_loop())
 
     def _store_raw_msg_if_local_update(self, raw_msg: bytes, *, message_name: str, channel_id: Optional[bytes]):
         is_commitment_signed = message_name == "commitment_signed"
@@ -1924,9 +1941,9 @@ class Peer(Logger, EventListener):
             total_msat: int,
             payment_hash: bytes,
             min_final_cltv_delta: int,
-            payment_secret: bytes,
+            payment_secret: Optional[bytes],
+            blinded_path: Optional['BlindedPathInfo'] = None,
             trampoline_onion: Optional[OnionPacket] = None,
-            bolt12_invoice=None,  # Optional[BOLT12Invoice]
         ) -> UpdateAddHtlc:
 
         assert amount_msat > 0, "amount_msat is not greater zero"
@@ -1940,8 +1957,8 @@ class Peer(Logger, EventListener):
             payment_hash=payment_hash,
             min_final_cltv_delta=min_final_cltv_delta,
             payment_secret=payment_secret,
+            blinded_path=blinded_path,
             trampoline_onion=trampoline_onion,
-            bolt12_invoice=bolt12_invoice,
         )
         htlc = self.send_htlc(
             chan=chan,
