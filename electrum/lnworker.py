@@ -61,7 +61,7 @@ from .crypto import (
 
 from .onion_message import (
     OnionMessageManager, get_blinded_reply_paths, NoOnionMessagePeers, get_blinded_paths_to_me,
-    NoRouteBlindingChannelPeers,
+    NoRouteBlindingChannelPeers, send_onion_message_to
 )
 from .lntransport import (
     LNTransport, LNResponderTransport, LNTransportBase, LNPeerAddr, split_host_port, extract_nodeid,
@@ -82,7 +82,7 @@ from .lnutil import (
 )
 from .lnonion import (
     decode_onion_error, OnionFailureCode, OnionRoutingFailure, OnionPacket, BlindedPath,
-    ProcessedOnionPacket, calc_hops_data_for_payment, new_onion_packet, calc_hops_data_for_blinded_payment,
+    ProcessedOnionPacket, calc_hops_data_for_payment, new_onion_packet, calc_hops_data_for_blinded_payment, BlindedPath
 )
 from .lnmsg import decode_msg
 from .lnrouter import (
