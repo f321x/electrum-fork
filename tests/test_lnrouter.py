@@ -10,7 +10,7 @@ from electrum.onion_message import is_onion_message_node
 from electrum.trampoline import (create_trampoline_onion, _allocate_fee_budget_among_route, PLACEHOLDER_FEE,
                                  get_trampoline_budget)
 from electrum.util import bfh
-from electrum.lnutil import ShortChannelID, LnFeatures, PaymentFeeBudget
+from electrum.lnutil import ShortChannelID, LnFeatures, UnblindedRoutingInfo, PaymentFeeBudget
 from electrum.lnonion import (OnionHopsDataSingle, new_onion_packet,
                               process_onion_packet, _decode_onion_error, decode_onion_error,
                               OnionFailureCode)
@@ -488,14 +488,22 @@ class Test_LNRouter(ElectrumTestCase):
                 node_features=0
             ),
         ]
+        routing_info = UnblindedRoutingInfo(
+            node_pubkey=node('c'),
+            payment_secret=urandom(32),
+            min_final_cltv_delta=0,
+            r_tags=[],  # create_trampoline_onion uses r_tags from route
+            invoice_features=LnFeatures(0),
+        )
         # create a trampoline onion, this shouldn't raise InvalidPayloadSize
         create_trampoline_onion(
             route=dummy_route,
+            routing_info=routing_info,
             amount_msat=0,
             final_cltv_abs=0,
             total_msat=0,
             payment_hash=urandom(32),
-            payment_secret=urandom(32),
+            is_legacy=True,
         )
 
     @needs_test_with_all_chacha20_implementations
