@@ -29,7 +29,6 @@ import os
 import time
 from dataclasses import dataclass, field, asdict, fields
 import re
-from decimal import Decimal
 from typing import TYPE_CHECKING, Union, Optional, Tuple, Iterable, Type, TypeVar, Any, ClassVar, Sequence
 from abc import ABC, abstractmethod
 
@@ -551,7 +550,7 @@ async def request_invoice(
         amount_msat: int,
         *,
         note: Optional[str] = None,
-) -> Tuple[BOLT12Invoice, bytes]:
+) -> Tuple[BOLT12Invoice, str]:
     # NOTE: offer_chains isn't checked here, BOLT12Offer.decode already raises on invalid chains.
 
     #   - if it chooses to send an `invoice_request`, it sends an onion message:
@@ -604,7 +603,10 @@ async def request_invoice(
         invoice_tlv = payload['invoice']['invoice']
         invoice = BOLT12Invoice.decode(invoice_tlv)
         lnwallet.logger.info('received bolt12 invoice')
-        lnwallet.logger.debug(f'invoice_data: {invoice!r}')
+        lnwallet.logger.debug(f'invoice_data: {invoice!r}\n{invoice.invoice_features.get_names()=}')
+        bech32_data = convertbits(list(invoice_tlv), 8, 5, True)
+        invoice_bech32 = bech32_encode(Encoding.BECH32, 'lni', bech32_data, with_checksum=False)
+        lnwallet.logger.debug(f'invoice bech32: {invoice_bech32}')
     except Timeout:
         lnwallet.logger.info('timeout waiting for bolt12 invoice')
         raise
@@ -612,14 +614,22 @@ async def request_invoice(
         lnwallet.logger.error(f'error requesting bolt12 invoice: {e!r}')
         raise
 
+    # - MUST reject the invoice if all fields in ranges 0 to 159 and 1000000000 to 2999999999 (inclusive) do not exactly match the invoice request.
     if not invoice.compare(against=invreq, ranges=[(0, 159), (1_000_000_000, 2_999_999_999)]):
         raise ValueError("invoice fields don't match invoice request")
 
     if invoice.offer_issuer_id is None:
-        # TODO: MUST reject the invoice if invoice_node_id is not equal to the final blinded_node_id
+        # TODO: otherwise (if offer_issuer_id is not present) MUST reject the invoice if
+        #  invoice_node_id is not equal to the final blinded_node_id it sent the invoice request to.
         pass
 
-    return invoice, invoice_tlv
+    # TODO:
+    # - invoice_features checks
+    # - invoice_blindedpay.payinfo matches invoice_paths.blinded_path and features
+    # - fallback address checks
+    # - MUST reject the invoice if it did not arrive via one of the paths in invreq_paths
+
+    return invoice, invoice_bech32
 
 
 @dataclass(frozen=True, kw_only=True)

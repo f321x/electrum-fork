@@ -1826,11 +1826,11 @@ class LNWallet(Logger):
             budget: Optional[PaymentFeeBudget] = None,
     ) -> Tuple[bool, List[HtlcLog]]:
         bolt12_invoice = None
-        if invoice.is_bolt12_invoice():
+        if invoice.bolt12_invoice:
             bolt12_invoice = invoice.bolt12_invoice
             lnaddr = self._check_bolt12_invoice(bolt12_invoice, amount_msat=amount_msat)
             min_final_cltv_delta = bolt12_invoice.invoice_blindedpay[0].cltv_expiry_delta
-        elif bolt11 := invoice.lightning_invoice:
+        elif bolt11 := invoice.bolt11_invoice:
             lnaddr = self._check_bolt11_invoice(bolt11, amount_msat=amount_msat)
             min_final_cltv_delta = lnaddr.get_min_final_cltv_delta()
 
