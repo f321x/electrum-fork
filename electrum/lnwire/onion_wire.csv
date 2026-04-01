@@ -9,8 +9,8 @@ tlvdata,payload,payment_data,payment_secret,byte,32
 tlvdata,payload,payment_data,total_msat,tu64,
 tlvtype,payload,encrypted_recipient_data,10
 tlvdata,payload,encrypted_recipient_data,encrypted_data,byte,...
-tlvtype,payload,current_blinding_point,12
-tlvdata,payload,current_blinding_point,blinding,point,
+tlvtype,payload,current_path_key,12
+tlvdata,payload,current_path_key,path_key,point,
 tlvtype,payload,payment_metadata,16
 tlvdata,payload,payment_metadata,payment_metadata,byte,...
 tlvtype,payload,total_amount_msat,18
@@ -23,6 +23,8 @@ tlvtype,payload,invoice_routing_info,66099
 tlvdata,payload,invoice_routing_info,invoice_routing_info,byte,...
 tlvtype,payload,trampoline_onion_packet,66100
 tlvdata,payload,trampoline_onion_packet,trampoline_onion_packet,byte,...
+tlvtype,payload,outgoing_blinded_paths,66102
+tlvdata,payload,outgoing_blinded_paths,paths,payment_blinded_path,...
 tlvtype,encrypted_data_tlv,padding,1
 tlvdata,encrypted_data_tlv,padding,padding,byte,...
 tlvtype,encrypted_data_tlv,short_channel_id,2
@@ -244,6 +246,9 @@ subtypedata,blinded_payinfo,htlc_minimum_msat,u64,
 subtypedata,blinded_payinfo,htlc_maximum_msat,u64,
 subtypedata,blinded_payinfo,flen,u16,
 subtypedata,blinded_payinfo,features,byte,flen
+subtype,payment_blinded_path
+subtypedata,payment_blinded_path,blinded_path,blinded_path,
+subtypedata,payment_blinded_path,payment_info,blinded_payinfo,
 subtype,fallback_address
 subtypedata,fallback_address,version,byte,
 subtypedata,fallback_address,len,u16,

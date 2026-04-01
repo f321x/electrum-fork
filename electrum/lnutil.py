@@ -1,9 +1,9 @@
 # Copyright (C) 2018 The Electrum developers
 # Distributed under the MIT software license, see the accompanying
 # file LICENCE or http://www.opensource.org/licenses/mit-license.php
+import os
 from enum import IntFlag, IntEnum
 import enum
-import os
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import NamedTuple, List, Tuple, Mapping, Optional, TYPE_CHECKING, Union, Dict, Set, Sequence
@@ -38,7 +38,7 @@ from .json_db import StoredObject, stored_in, stored_as
 if TYPE_CHECKING:
     from .lnchannel import Channel, AbstractChannel
     from .lnrouter import LNPaymentRoute
-    from .lnonion import OnionRoutingFailure, BlindedPayInfo
+    from .lnonion import OnionRoutingFailure, BlindedPathInfo, BlindedPayInfo
     from .simple_config import SimpleConfig
 
 
@@ -2199,11 +2199,11 @@ class UnblindedRoutingInfo(RoutingInfo):
 
 @dataclasses.dataclass(kw_only=True)
 class BlindedRoutingInfo(RoutingInfo):
-    paths: tuple  # tuple['BlindedPathInfo', ...]
+    paths: tuple['BlindedPathInfo', ...]
     current_path_index: int = 0
-    _id: bytes = dataclasses.field(default_factory=lambda: os.urandom(32))
+    _id: bytes = os.urandom(32)
 
-    def get_current_path(self):
+    def get_current_path(self) -> 'BlindedPathInfo':
         return self.paths[self.current_path_index % len(self.paths)]
 
     def __post_init__(self):
