@@ -1,7 +1,8 @@
 import os
 
-from electrum.lnonion import new_onion_packet, calc_hops_data_for_blinded_payment, calc_hops_data_for_payment, OnionPacket
+from electrum.lnonion import new_onion_packet, calc_hops_data_for_blinded_payment, OnionPacket
 from electrum.lnutil import LnFeatures, ShortChannelID
+from electrum.onion_message import BlindedPath, BlindedPathHop, BlindedPayInfo
 from electrum.util import read_json_file, bfh
 from electrum.lnrouter import RouteEdge
 
@@ -17,31 +18,33 @@ alice_hop = full_route['hops'][0]
 first_node_id = bfh(generate['blinded_route']['first_node_id'])
 first_path_key = bfh(generate['blinded_route']['first_path_key'])
 blinded_route_hops = generate['blinded_route']['hops']
-blinded_path = [
-    {
-        'blinded_node_id': bfh(hop['blinded_node_id']),
-        'encrypted_recipient_data': bfh(hop['encrypted_data'])
-    } for hop in blinded_route_hops
-]
-blinded_payinfo = generate['blinded_payinfo']
+
+blinded_path_hops = [BlindedPathHop(
+    blinded_node_id=bfh(hop['blinded_node_id']),
+    encrypted_recipient_data=bfh(hop['encrypted_data']),
+    enclen=len(bfh(hop['encrypted_data'])),
+) for hop in blinded_route_hops]
+
+blinded_path = BlindedPath(
+    path=blinded_path_hops,
+    first_path_key=first_path_key,
+    first_node_id=bytes(32),
+    num_hops=int.to_bytes(len(blinded_path_hops), signed=False, byteorder='big')
+)
+
+# blinded_payinfo = BlindedPayInfo.from_dict(generate['blinded_payinfo'])
+blinded_payinfo = BlindedPayInfo(
+    fee_base_msat=generate['blinded_payinfo']['fee_base_msat'],
+    fee_proportional_millionths=generate['blinded_payinfo']['fee_proportional_millionths'],
+    cltv_expiry_delta=generate['blinded_payinfo']['cltv_expiry_delta'],
+    htlc_minimum_msat=0,
+    htlc_maximum_msat=999999999999999,
+    features=LnFeatures(0),
+)
 
 ONION_MESSAGE_PACKET = bfh(generate['onion'])
 session_key = bfh(generate['session_key'])
 associated_data = bfh(generate['associated_data'])
-
-bolt12_invoice = {
-    'invoice_paths': {
-        'paths': [
-            {
-                'path': blinded_path,
-                'first_path_key': first_path_key
-            }
-        ]
-    },
-    'invoice_blindedpay': {
-        'payinfo': [blinded_payinfo]
-    }
-}
 
 
 class TestPaymentRouteBlinding(ElectrumTestCase):
@@ -76,7 +79,8 @@ class TestPaymentRouteBlinding(ElectrumTestCase):
             amount_msat=amount_msat,
             final_cltv_abs=final_cltv,
             total_msat=total_msat,
-            bolt12_invoice=bolt12_invoice,
+            path=blinded_path,
+            blinded_payinfo=blinded_payinfo,
         )
 
         # route provides unblinded pubkeys (Alice, Bob)
