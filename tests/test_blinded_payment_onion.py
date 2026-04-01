@@ -79,8 +79,8 @@ class TestPaymentRouteBlinding(ElectrumTestCase):
             amount_msat=amount_msat,
             final_cltv_abs=final_cltv,
             total_msat=total_msat,
-            paths=tuple([blinded_path]),
-            blinded_payinfos=tuple([blinded_payinfo]),
+            path=blinded_path,
+            blinded_payinfo=blinded_payinfo,
         )
 
         # route provides unblinded pubkeys (Alice, Bob)
