@@ -1492,6 +1492,13 @@ class LnFeatures(IntFlag):
     _ln_feature_contexts[OPTION_TRAMPOLINE_ROUTING_REQ_ELECTRUM] = (LNFC.INIT | LNFC.NODE_ANN | LNFC.INVOICE)
     _ln_feature_contexts[OPTION_TRAMPOLINE_ROUTING_OPT_ELECTRUM] = (LNFC.INIT | LNFC.NODE_ANN | LNFC.INVOICE)
 
+    OPTION_ROUTE_BLINDING_REQ = 1 << 24
+    OPTION_ROUTE_BLINDING_OPT = 1 << 25
+
+    _ln_feature_direct_dependencies[OPTION_ROUTE_BLINDING_OPT] = {VAR_ONION_OPT}
+    _ln_feature_contexts[OPTION_ROUTE_BLINDING_REQ] = (LNFC.INIT | LNFC.NODE_ANN)
+    _ln_feature_contexts[OPTION_ROUTE_BLINDING_OPT] = (LNFC.INIT | LNFC.NODE_ANN)
+
     OPTION_SHUTDOWN_ANYSEGWIT_REQ = 1 << 26
     OPTION_SHUTDOWN_ANYSEGWIT_OPT = 1 << 27
 
@@ -1905,16 +1912,18 @@ class UpdateAddHtlc:
     cltv_abs: int
     htlc_id: Optional[int] = dataclasses.field(default=None)
     timestamp: int = dataclasses.field(default_factory=lambda: int(time.time()))
+    blinding: bytes = None
 
     @staticmethod
     @stored_in('adds', tuple)
-    def from_tuple(amount_msat, rhash, cltv_abs, htlc_id, timestamp) -> 'UpdateAddHtlc':
+    def from_tuple(amount_msat, rhash, cltv_abs, htlc_id, timestamp, blinding = None) -> 'UpdateAddHtlc':
         return UpdateAddHtlc(
             amount_msat=amount_msat,
             payment_hash=bytes.fromhex(rhash),
             cltv_abs=cltv_abs,
             htlc_id=htlc_id,
-            timestamp=timestamp)
+            timestamp=timestamp,
+            blinding=None if blinding is None else bytes.fromhex(blinding))
 
     def to_json(self):
         self._validate()
