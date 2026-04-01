@@ -1,24 +1,82 @@
+import asyncio
+import copy
 import io
+import time
 import json
+from dataclasses import fields
 from pathlib import Path
 
 from electrum_ecc import ECPrivkey
 
 from electrum import segwit_addr, lnutil
-from electrum import bolt12
-from electrum.bolt12 import is_offer, decode_offer, encode_invoice_request, decode_invoice_request, encode_invoice, \
-    decode_invoice, encode_offer, bolt12_bech32_to_bytes
+from electrum.bolt12 import (
+    is_offer, verify_request_and_create_invoice, InvoiceRequestException,
+    bolt12_bech32_to_bytes, BOLT12Offer, BOLT12InvoiceRequest, BOLT12Invoice
+)
 from electrum.crypto import privkey_to_pubkey
-from electrum.lnmsg import UnknownMandatoryTLVRecordType, _tlv_merkle_root, OnionWireSerializer
+from electrum.invoices import LN_EXPIRY_NEVER
+from electrum.lnmsg import UnknownMandatoryTLVRecordType, _tlv_merkle_root, OnionWireSerializer, MsgInvalidSignature
 from electrum.lnonion import OnionHopsDataSingle
+from electrum.lnutil import LnFeatures
+from electrum.onion_message import NoRouteBlindingChannelPeers
 from electrum.segwit_addr import INVALID_BECH32, bech32_encode, Encoding, convertbits
 from electrum.util import bfh
 
-from . import ElectrumTestCase
+from . import ElectrumTestCase, test_lnpeer
+from .test_lnpeer import PeerInTests, PutIntoOthersQueueTransport
 
 
 def bech32_decode(x):
     return segwit_addr.bech32_decode(x, ignore_long_length=True, with_checksum=False)
+
+
+class MockLNWallet(test_lnpeer.MockLNWallet):
+    def __init__(self):
+        lnkey = bfh('4141414141414141414141414141414141414141414141414141414141414141')
+        kp = lnutil.Keypair(privkey_to_pubkey(lnkey), lnkey)
+        q = asyncio.Queue()
+        super().__init__(local_keypair=kp, chans=[], tx_queue=q, name='test', has_anchors=False)
+
+    def create_payment_info(
+        self, *,
+        amount_msat,
+        min_final_cltv_delta=None,
+        exp_delay: int = LN_EXPIRY_NEVER,
+        write_to_disk=True
+    ) -> bytes:
+        return b''
+
+    def add_path_ids_for_payment_hash(self, payment_hash, invoice_paths):
+        pass
+
+
+class MockChannel:
+    def __init__(self, node_id, rcv_capacity: int = 0):
+        self.short_channel_id = lnutil.ShortChannelID.from_str('0x0x0')
+        self.node_id = node_id
+        self.rcv_capacity = rcv_capacity
+
+    def is_active(self):
+        return True
+
+    def can_receive(self, *, amount_msat, check_frozen=False):
+        return True if self.rcv_capacity == 0 else amount_msat <= self.rcv_capacity
+
+    def get_remote_update(self):
+        return bfh('0102beb6d231566566e014c6f417f247a5e8e882fd6b44ff4526ee230ace401d6ae57205b5c5dd2de21b9ceecbd8676d99a4588266b38b8af59305103c956127122843497fd7f826957108f4a30fd9cec3aeba79972084e90ead01ea3309000000002fe34de423b66e0a6510eb91030200900000000000000001000003e8000000640000000012088038')
+
+
+ROUTE_BLINDING_CAPABLE_PEER_FEATURES = LnFeatures(LnFeatures.OPTION_ROUTE_BLINDING_OPT)
+
+
+class MockPeer(PeerInTests):
+    def __init__(self, lnwallet, pubkey, wkp, their_features=ROUTE_BLINDING_CAPABLE_PEER_FEATURES):
+        transport = PutIntoOthersQueueTransport(name='a', keypair=wkp)
+        super().__init__(lnwallet, pubkey, transport)
+        self.their_features = their_features
+
+    async def wait_one_htlc_switch_iteration(self, *args):
+        pass
 
 
 class TestBolt12(ElectrumTestCase):
@@ -50,12 +108,12 @@ class TestBolt12(ElectrumTestCase):
             valid, string, msg = test['valid'], test['string'], f"{test['comment']}: {test['string']}"
             if valid:
                 self.assertTrue(is_offer(string), msg=msg)
-                result = decode_offer(string)
-                self.assertIsInstance(result, dict)
+                result = BOLT12Offer.decode(string)
+                self.assertIsInstance(result, BOLT12Offer)
             else:
                 self.assertFalse(is_offer(string), msg=msg)
                 with self.assertRaises(ValueError, msg=msg):
-                    decode_offer(string)
+                    BOLT12Offer.decode(string)
 
     def test_decode(self):
         # https://bootstrap.bolt12.org/examples
@@ -64,24 +122,20 @@ class TestBolt12(ElectrumTestCase):
         self.assertNotEqual(d, INVALID_BECH32, "bech32 decode error")
         self.assertEqual(d.hrp, 'lno', "wrong hrp")
         self.assertTrue(is_offer(offer))
-        od = decode_offer(offer)
-        self.assertEqual(od, {'offer_description': {'description': "Offer by rusty's node"},
-                              'offer_issuer_id':
-                                  {'id': bfh('023f3219da03ee29a12de4107e6c5c364f607382f065f2bfed91ddd6b91079bfbc')}
-                              })
+        od = BOLT12Offer.decode(offer)
+        self.assertEqual(od.offer_description, "Offer by rusty's node")
+        self.assertEqual(od.offer_issuer_id, bfh('023f3219da03ee29a12de4107e6c5c364f607382f065f2bfed91ddd6b91079bfbc'))
 
         offer = 'lno1pqqnyzsmx5cx6umpwssx6atvw35j6ut4v9h8g6t50ysx7enxv4epyrmjw4ehgcm0wfczucm0d5hxzag5qqtzzq3lxgva5qlw9xsjmeqs0ek9cdj0vpec9ur972l7mywa66u3q7dlhs'
         d = bech32_decode(offer)
         self.assertNotEqual(d, INVALID_BECH32, "bech32 decode error")
         self.assertEqual(d.hrp, 'lno', "wrong hrp")
-        od = decode_offer(offer)
-        self.assertEqual(od, {'offer_amount': {'amount': 50},
-                              'offer_description': {'description': '50msat multi-quantity offer'},
-                              'offer_issuer': {'issuer': 'rustcorp.com.au'},
-                              'offer_quantity_max': {'max': 0},
-                              'offer_issuer_id':
-                                  {'id': bfh('023f3219da03ee29a12de4107e6c5c364f607382f065f2bfed91ddd6b91079bfbc')}
-                              })
+        od = BOLT12Offer.decode(offer)
+        self.assertEqual(od.offer_amount, 50)
+        self.assertEqual(od.offer_description, '50msat multi-quantity offer')
+        self.assertEqual(od.offer_issuer, 'rustcorp.com.au')
+        self.assertEqual(od.offer_quantity_max, 0)
+        self.assertEqual(od.offer_issuer_id, bfh('023f3219da03ee29a12de4107e6c5c364f607382f065f2bfed91ddd6b91079bfbc'))
 
         # TODO: tests below use recurrence (tlv record type 26) which is not supported/generated from wire specs
         # (c-lightning carries patches re-adding these, but for now we ignore them)
@@ -92,7 +146,7 @@ class TestBolt12(ElectrumTestCase):
         self.assertEqual(d.hrp, 'lno', "wrong hrp")
         # contains TLV record type 26 which is not defined (yet) in 12-offer-encoding.md
         with self.assertRaises(UnknownMandatoryTLVRecordType):
-            od = bolt12.decode_offer(offer)
+            BOLT12Offer.decode(offer)
 
         offer = 'lno1pqqkgz38xycrqmtnv96zqetkv4e8jgrdd9h82ar99ss82upqw3hjqargwfjk2gr5d9kk2ucjzpe82um50yhx77nvv938xtn0wfn3vggz8uepnksrac56zt0yzplxchpkfas88qhsvhetlmv3mhttjyreh77p5qsq8s0qzqs'
         d = bech32_decode(offer)
@@ -100,7 +154,7 @@ class TestBolt12(ElectrumTestCase):
         self.assertEqual(d.hrp, 'lno', "wrong hrp")
         # contains TLV record type 26 which is not defined (yet) in 12-offer-encoding.md
         with self.assertRaises(UnknownMandatoryTLVRecordType):
-            od = bolt12.decode_offer(offer)
+            BOLT12Offer.decode(offer)
 
         offer = 'lno1pqqkgz3zxycrqmtnv96zqetkv4e8jgryv9ujcgrxwfhk6gp3949xzm3dxgcryvgjzpe82um50yhx77nvv938xtn0wfn3vggz8uepnksrac56zt0yzplxchpkfas88qhsvhetlmv3mhttjyreh77p5qspqysq2q2laenqq'
         d = bech32_decode(offer)
@@ -108,7 +162,7 @@ class TestBolt12(ElectrumTestCase):
         self.assertEqual(d.hrp, 'lno', "wrong hrp")
         # contains TLV record type 26 which is not defined (yet) in 12-offer-encoding.md
         with self.assertRaises(UnknownMandatoryTLVRecordType):
-            od = bolt12.decode_offer(offer)
+            BOLT12Offer.decode(offer)
 
         offer = 'lno1pqpq86q2fgcnqvpsd4ekzapqv4mx2uneyqcnqgryv9uhxtpqveex7mfqxyk55ctw95erqv339ss8qcteyqcksu3qvfjkvmmjv5s8gmeqxcczqum9vdhkuernypkxzar9zgg8yatnw3ujumm6d3skyuewdaexw93pqglnyxw6q0hzngfdusg8umzuxe8kquuz7pjl90ldj8wadwgs0xlmcxszqy9pcpsqqq8pqqpuyqzszhlwvcqq'
         d = bech32_decode(offer)
@@ -116,7 +170,7 @@ class TestBolt12(ElectrumTestCase):
         self.assertEqual(d.hrp, 'lno', "wrong hrp")
         # contains TLV record type 26 which is not defined (yet) in 12-offer-encoding.md
         with self.assertRaises(UnknownMandatoryTLVRecordType):
-            od = bolt12.decode_offer(offer)
+            BOLT12Offer.decode(offer)
 
         offer = 'lno1pqpq86q2xycnqvpsd4ekzapqv4mx2uneyqcnqgryv9uhxtpqveex7mfqxyk55ctw95erqv339ss8qun094exzarpzgg8yatnw3ujumm6d3skyuewdaexw93pqglnyxw6q0hzngfdusg8umzuxe8kquuz7pjl90ldj8wadwgs0xlmcxszqy9pczqqp5hsqqgd9uqzqpgptlhxvqq'
         d = bech32_decode(offer)
@@ -124,7 +178,7 @@ class TestBolt12(ElectrumTestCase):
         self.assertEqual(d.hrp, 'lno', "wrong hrp")
         # contains TLV record type 26 which is not defined (yet) in 12-offer-encoding.md
         with self.assertRaises(UnknownMandatoryTLVRecordType):
-            od = bolt12.decode_offer(offer)
+            BOLT12Offer.decode(offer)
 
         offer = 'lno1qcp4256ypqpq86q2pucnq42ngssx2an9wfujqerp0yfpqun4wd68jtn00fkxzcnn9ehhyeckyypr7vsemgp7u2dp9hjpqlnvtsmy7crnstcxtu4lakgam44ezpuml0q6qgqsz'
         d = bech32_decode(offer)
@@ -132,60 +186,54 @@ class TestBolt12(ElectrumTestCase):
         self.assertEqual(d.hrp, 'lno', "wrong hrp")
         # contains TLV record type 26 which is not defined (yet) in 12-offer-encoding.md
         with self.assertRaises(UnknownMandatoryTLVRecordType):
-            od = bolt12.decode_offer(offer)
+            BOLT12Offer.decode(offer)
 
     def test_decode_offer(self):
+        # default test
         offer = 'lno1pggxv6tjwd6zqar9wd6zqmmxvejhy93pq02rpdcl6l20pakl2ad70k0n8v862jwp2twq8a8uz0hz5wfafg495'
         d = bech32_decode(offer)
         self.assertNotEqual(d, INVALID_BECH32, "bech32 decode error")
         self.assertEqual(d.hrp, 'lno', "wrong hrp")
         self.assertTrue(is_offer(offer))
 
-        od = decode_offer(offer)
-        self.assertEqual(od['offer_description']['description'], 'first test offer')
-        self.assertEqual(od['offer_issuer_id']['id'], bfh('03d430b71fd7d4f0f6df575be7d9f33b0fa549c152dc03f4fc13ee2a393d4a2a5a'))
+        od = BOLT12Offer.decode(offer)
+        self.assertEqual(od.offer_description, 'first test offer')
+        self.assertEqual(od.offer_issuer_id, bfh('03d430b71fd7d4f0f6df575be7d9f33b0fa549c152dc03f4fc13ee2a393d4a2a5a'))
 
     def test_decode_invreq(self):
-        payer_key = bfh('4242424242424242424242424242424242424242424242424242424242424242')
-        kp = lnutil.Keypair(privkey_to_pubkey(payer_key), payer_key)
+        invreq_bech32 = "lnr1qqyqqqqqqqqqqqqqqcp4256ypqqkgzshgysy6ct5dpjk6ct5d93kzmpq23ex2ct5d9ek293pqthvwfzadd7jejes8q9lhc4rvjxd022zv5l44g6qah82ru5rdpnpjkppqvjx204vgdzgsqpvcp4mldl3plscny0rt707gvpdh6ndydfacz43euzqhrurageg3n7kafgsek6gz3e9w52parv8gs2hlxzk95tzeswywffxlkeyhml0hh46kndmwf4m6xma3tkq2lu04qz3slje2rfthc89vss"
+        with self.assertRaises(NotImplementedError):
+            # TODO: no currency conversion support
+            BOLT12InvoiceRequest.decode(invreq_bech32)
 
-        invreq_tlv = bfh('0a1066697273742074657374206f66666572162103d430b71fd7d4f0f6df575be7d9f33b0fa549c152dc03f4fc13ee2a393d4a2a5a520215b358210324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c591b696e7672657120666f722066697273742074657374206f66666572f04080ffce74cb03393cd47307de79d7a6782e0d7b84b76d29958f9f732369a6620e0ed6bbeee66c99d077eb62f8cec8e2fe06ab15943961b2c009e41781aca3f34e')
-        invreq = decode_invoice_request(invreq_tlv)
+        # minimal invreq from eclair repo
+        privkey = ECPrivkey(bfh("527d410ec920b626ece685e8af9abc976a48dbf2fe698c1b35d90a1c5fa2fbca"))
+        invreq_bech32 = "lnr1qqp6hn00zcssxr0juddeytv7nwawhk9nq9us0arnk8j8wnsq8r2e86vzgtfneupe2gp9yzzcyypymkt4c0n6rhcdw9a7ay2ptuje2gvehscwcchlvgntump3x7e7tc0sgp9k43qeu892gfnz2hrr7akh2x8erh7zm2tv52884vyl462dm5tfcahgtuzt7j0npy7getf4trv5d4g78a9fkwu3kke6hcxdr6t2n7vz"
+        invreq = BOLT12InvoiceRequest.decode(invreq_bech32)
+
+        self.assertEqual(invreq.invreq_amount, 21_000)
+        self.assertEqual(invreq.invreq_metadata, bfh("abcdef"))
+        self.assertEqual(invreq.invreq_payer_id, privkey.get_public_key_bytes())
 
         data = {
-            'offer_description': {'description': 'first test offer'},
-            'offer_issuer_id': {'id': bfh('03d430b71fd7d4f0f6df575be7d9f33b0fa549c152dc03f4fc13ee2a393d4a2a5a')},
-            'invreq_amount': {'msat': 5555},
-            'invreq_payer_note': {'note': 'invreq for first test offer'},
-            'invreq_payer_id': {'key': kp.pubkey},
+            'offer_issuer_id': {'id': invreq.offer_issuer_id},
+            'invreq_amount': {'msat': invreq.invreq_amount},
+            'invreq_metadata': {'blob': invreq.invreq_metadata},
+            'invreq_payer_id': {'key': privkey.get_public_key_bytes()},
         }
-        del invreq['signature']
-        self.assertEqual(invreq, data)
-
-    def test_decode_invoice(self):
-        signing_key = bfh('4141414141414141414141414141414141414141414141414141414141414141')
-        kp = lnutil.Keypair(privkey_to_pubkey(signing_key), signing_key)
-
-        invoice_tlv = bfh('0407010203040506070801010a13746573745f656e636f64655f696e766f696365b02102eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619f04088d62f8db0c4033f7c4700e050f298d93f2d28a67e015f675c0835e22bfae2ec82fae6f404b24a92dc4779b85ff1fd63ff0521284e78f24969039ad98c0204ab')
-        invoice = decode_invoice(invoice_tlv)
-        data = {'offer_metadata': {'data': bfh('01020304050607')},
-                'offer_amount': {'amount': 1},
-                'offer_description': {'description': 'test_encode_invoice'},
-                'invoice_node_id': {'node_id': kp.pubkey},
-        }
-        del invoice['signature']
-        self.assertEqual(invoice, data)
+        self.assertEqual(invreq.serialize(with_signature=False), data)
 
     def test_encode_offer(self):
         data = {
             'offer_description': {'description': 'first test offer'},
             'offer_issuer_id': {'id': bfh('03d430b71fd7d4f0f6df575be7d9f33b0fa549c152dc03f4fc13ee2a393d4a2a5a')}
         }
-        offer_tlv = encode_offer(data)
+        offer_tlv = BOLT12Offer.deserialize(data).encode(as_bech32=False)
         self.assertEqual(offer_tlv, bfh('0a1066697273742074657374206f66666572162103d430b71fd7d4f0f6df575be7d9f33b0fa549c152dc03f4fc13ee2a393d4a2a5a'))
         offer_tlv_5bit = convertbits(list(offer_tlv), 8, 5)
         bech32_offer = bech32_encode(Encoding.BECH32, 'lno', offer_tlv_5bit, with_checksum=False)
         self.assertEqual(bech32_offer, 'lno1pggxv6tjwd6zqar9wd6zqmmxvejhy93pq02rpdcl6l20pakl2ad70k0n8v862jwp2twq8a8uz0hz5wfafg495')
+        self.assertEqual(BOLT12Offer.decode(bech32_offer).serialize(with_signature=False), data)
 
     def test_encode_invreq(self):
         payer_key = bfh('4242424242424242424242424242424242424242424242424242424242424242')
@@ -197,27 +245,64 @@ class TestBolt12(ElectrumTestCase):
             'invreq_amount': {'msat': 5555},
             'invreq_payer_note': {'note': 'invreq for first test offer'},
             'invreq_payer_id': {'key': kp.pubkey},
+            'invreq_metadata': {'blob': bfh('deadbeef')}
         }
-        invreq_tlv = encode_invoice_request(data, payer_key)
-        self.assertEqual(invreq_tlv, bfh('0a1066697273742074657374206f66666572162103d430b71fd7d4f0f6df575be7d9f33b0fa549c152dc03f4fc13ee2a393d4a2a5a520215b358210324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c591b696e7672657120666f722066697273742074657374206f66666572f04080ffce74cb03393cd47307de79d7a6782e0d7b84b76d29958f9f732369a6620e0ed6bbeee66c99d077eb62f8cec8e2fe06ab15943961b2c009e41781aca3f34e'))
+        invreq_tlv = BOLT12InvoiceRequest.deserialize(data).encode(signing_key=payer_key, as_bech32=False)
+        self.assertEqual(invreq_tlv, bfh('0004deadbeef0a1066697273742074657374206f66666572162103d430b71fd7d4f0f6df575be7d9f33b0fa549c152dc03f4fc13ee2a393d4a2a5a520215b358210324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c591b696e7672657120666f722066697273742074657374206f66666572f0406b3de34892023353e1d0f5765e7c34b5e952e6d6a9492b91a2f98c0817434362bd07a6c216dce7709bd16a2b533dec22cf8a9303310a29b7621e090d27f9dfb1'))
+        self.assertEqual(BOLT12InvoiceRequest.decode(invreq_tlv).serialize(with_signature=False), data)
 
     def test_encode_invoice(self):
         signing_key = bfh('4141414141414141414141414141414141414141414141414141414141414141')
         kp = lnutil.Keypair(privkey_to_pubkey(signing_key), signing_key)
 
-        data = {'offer_metadata': {'data': bfh('01020304050607')},
-                'offer_amount': {'amount': 1},
-                'offer_description': {'description': 'test_encode_invoice'},
-                'invoice_node_id': {'node_id': kp.pubkey}
+        data = {
+            'offer_metadata': {'data': bfh('01020304050607')},
+            'offer_amount': {'amount': 1},
+            'offer_description': {'description': 'test_encode_invoice'},
+            'offer_issuer_id': {'id': kp.pubkey},
+            'invreq_payer_id': {'key': kp.pubkey},
+            'invreq_metadata': {'blob': bfh('deadbeef')},
+            'invoice_node_id': {'node_id': kp.pubkey},
+            'invoice_amount': {'msat': 21_000},
+            'invoice_created_at': {'timestamp': 1770883131},
+            'invoice_payment_hash': {'payment_hash': bfh('cab10c2a10467d7dc4512a910530ef35d1028662b65c8a30656136ff957c6589')},
+            'invoice_relative_expiry': {'seconds_from_creation': 7200},
+            'invoice_paths': {'paths': [
+                {
+                    'first_node_id': kp.pubkey,
+                    'first_path_key': kp.pubkey,
+                    'num_hops': int.to_bytes(1, byteorder="big", signed=False),
+                    'path': [{
+                        'blinded_node_id': kp.pubkey,
+                        'enclen': 5,
+                        'encrypted_recipient_data': b'12345',
+                    }],
+                }
+            ]},
+            'invoice_blindedpay': {'payinfo': [
+                {
+                    'fee_base_msat': 100,
+                    'fee_proportional_millionths': 1000,
+                    'cltv_expiry_delta': 200,
+                    'htlc_minimum_msat': 1,
+                    'htlc_maximum_msat': 1_000_000,
+                    'flen': len(LnFeatures(0).to_tlv_bytes()),
+                    'features': LnFeatures(0).to_tlv_bytes(),
+                }
+            ]}
         }
-        invoice_tlv = encode_invoice(data, signing_key=kp.privkey)
-        self.assertEqual(invoice_tlv, bfh('0407010203040506070801010a13746573745f656e636f64655f696e766f696365b02102eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619f04088d62f8db0c4033f7c4700e050f298d93f2d28a67e015f675c0835e22bfae2ec82fae6f404b24a92dc4779b85ff1fd63ff0521284e78f24969039ad98c0204ab'))
+        invoice = BOLT12Invoice.deserialize(data)
+        invoice_tlv = invoice.encode(signing_key=kp.privkey, as_bech32=False)
+        self.assertEqual(invoice_tlv, bfh('0004deadbeef0407010203040506070801010a13746573745f656e636f64655f696e766f696365162102eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619582102eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619a06b02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f28368661902eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f2836866190102eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f28368661900053132333435a21d00000064000003e800c8000000000000000100000000000f4240000100a404698d883ba6021c20a820cab10c2a10467d7dc4512a910530ef35d1028662b65c8a30656136ff957c6589aa025208b02102eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619f0400a86f304ddc11abd27d828b7823fb32eb5b512e55879dee262b1c848fadf2872187b3b6fab0f92157af9ac1a0d9aa344573cdf22b5be1c7faaaf7c81f729c8f1'))
+        # also test decoding back
+        invoice = BOLT12Invoice.decode(invoice_tlv)
+        self.assertEqual(invoice.serialize(with_signature=False), data)
+        self.assertEqual(invoice.invoice_blindedpay[0].fee_base_msat, data['invoice_blindedpay']['payinfo'][0]['fee_base_msat'])
 
     def test_subtype_encode_decode(self):
-        offer = 'lno1pggxv6tjwd6zqar9wd6zqmmxvejhy93pq02rpdcl6l20pakl2ad70k0n8v862jwp2twq8a8uz0hz5wfafg495'
-        od = decode_offer(offer)
-        data = {'offer_issuer_id': od['offer_issuer_id']}
-        invreq_pl_tlv = encode_invoice_request(data, payer_key=bfh('4141414141414141414141414141414141414141414141414141414141414141'))
+        invreq_bech32 = "lnr1qqp6hn00zcssxr0juddeytv7nwawhk9nq9us0arnk8j8wnsq8r2e86vzgtfneupe2gp9yzzcyypymkt4c0n6rhcdw9a7ay2ptuje2gvehscwcchlvgntump3x7e7tc0sgp9k43qeu892gfnz2hrr7akh2x8erh7zm2tv52884vyl462dm5tfcahgtuzt7j0npy7getf4trv5d4g78a9fkwu3kke6hcxdr6t2n7vz"
+        invreq = BOLT12InvoiceRequest.decode(invreq_bech32)
+        invreq_pl_tlv = invreq.encode(signing_key=bfh('4141414141414141414141414141414141414141414141414141414141414141'), as_bech32=False)
 
         ohds = OnionHopsDataSingle(tlv_stream_name='onionmsg_tlv',
                                    payload={
@@ -242,8 +327,7 @@ class TestBolt12(ElectrumTestCase):
                                    )
 
         ohds_b = ohds.to_bytes()
-
-        self.assertEqual(ohds_b, bfh('fd00fd02940309d14e515e8ef4ea022787dcda8550edfbd7da6052208d2fc0cc4f7d949558e50309d14e515e8ef4ea022787dcda8550edfbd7da6052208d2fc0cc4f7d949558e5020309d14e515e8ef4ea022787dcda8550edfbd7da6052208d2fc0cc4f7d949558e5000500000000000309d14e515e8ef4ea022787dcda8550edfbd7da6052208d2fc0cc4f7d949558e500060011112222334065162103d430b71fd7d4f0f6df575be7d9f33b0fa549c152dc03f4fc13ee2a393d4a2a5af04078205e3d9d3cf87b743bcad5bca89f12f868ce638fbb4051d9570bac1a79d90ae3650ebcf15603b9349697edf71bf78ecb802aafe146d9118fe387bdb36ed26e0000000000000000000000000000000000000000000000000000000000000000'))
+        self.assertEqual(ohds_b, bfh('fd012902940309d14e515e8ef4ea022787dcda8550edfbd7da6052208d2fc0cc4f7d949558e50309d14e515e8ef4ea022787dcda8550edfbd7da6052208d2fc0cc4f7d949558e5020309d14e515e8ef4ea022787dcda8550edfbd7da6052208d2fc0cc4f7d949558e5000500000000000309d14e515e8ef4ea022787dcda8550edfbd7da6052208d2fc0cc4f7d949558e5000600111122223340910003abcdef1621030df2e35b922d9e9bbaebd8b3017907f473b1e4774e0038d593e98242d33cf039520252085821024dd975c3e7a1df0d717bee91415f25952199bc30ec62ff6226be6c3137b3e5e1f040dc8f84d6ba1a027766c3412e5c9f44d8a265818e584e5220b509d387dd127d27975dbb93c2f3a072af735b5ed4000ae32dda9075f34894bb58eaf25cb1aeab630000000000000000000000000000000000000000000000000000000000000000'))
 
         with io.BytesIO(ohds_b) as fd:
             ohds2 = OnionHopsDataSingle.from_fd(fd, tlv_stream_name='onionmsg_tlv')
@@ -294,8 +378,8 @@ class TestBolt12(ElectrumTestCase):
             ]}
         }
 
-        offer = encode_offer(offer_data)
-        decoded = decode_offer(offer)
+        offer = BOLT12Offer.deserialize(offer_data).encode(as_bech32=True)
+        decoded = BOLT12Offer.decode(offer).serialize()
         self.assertEqual(offer_data, decoded)
 
     def test_merkle_root(self):
@@ -311,69 +395,82 @@ class TestBolt12(ElectrumTestCase):
         self.assertEqual(_tlv_merkle_root(tlvs[:3]), bfh('ab2e79b1283b0b31e0b035258de23782df6b89a38cfa7237bde69aed1a658c5d'))
 
     def test_invoice_request_schnorr_signature(self):
-        # use invoice request in https://github.com/lightning/bolts/pull/798 to match test vectors
-        invreq = 'lnr1qqyqqqqqqqqqqqqqqcp4256ypqqkgzshgysy6ct5dpjk6ct5d93kzmpq23ex2ct5d9ek293pqthvwfzadd7jejes8q9lhc4rvjxd022zv5l44g6qah82ru5rdpnpjkppqvjx204vgdzgsqpvcp4mldl3plscny0rt707gvpdh6ndydfacz43euzqhrurageg3n7kafgsek6gz3e9w52parv8gs2hlxzk95tzeswywffxlkeyhml0hh46kndmwf4m6xma3tkq2lu04qz3slje2rfthc89vss'
-        data = decode_invoice_request(invreq)
-        del data['signature']  # remove signature, we regenerate it
+        invreq = 'lnr1qqp6hn00zcssxr0juddeytv7nwawhk9nq9us0arnk8j8wnsq8r2e86vzgtfneupe2gp9yzzcyypymkt4c0n6rhcdw9a7ay2ptuje2gvehscwcchlvgntump3x7e7tc0sgp9k43qeu892gfnz2hrr7akh2x8erh7zm2tv52884vyl462dm5tfcahgtuzt7j0npy7getf4trv5d4g78a9fkwu3kke6hcxdr6t2n7vz'
+        data = BOLT12InvoiceRequest.decode(invreq)
 
         payer_key = bfh('4242424242424242424242424242424242424242424242424242424242424242')
-        invreq_pl_tlv = encode_invoice_request(data, payer_key)
+        invreq_pl_tlv = data.encode(signing_key=payer_key, as_bech32=False)
 
-        self.assertEqual(invreq_pl_tlv, bfh('0008000000000000000006035553440801640a1741204d617468656d61746963616c205472656174697365162102eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f28368661958210324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1cf040b8f83ea3288cfd6ea510cdb481472575141e8d8744157f98562d162cc1c472526fdb24befefbdebab4dbb726bbd1b7d8aec057f8fa805187e5950d2bbe0e5642'))
+        self.assertEqual(invreq_pl_tlv, bfh('0003abcdef1621030df2e35b922d9e9bbaebd8b3017907f473b1e4774e0038d593e98242d33cf039520252085821024dd975c3e7a1df0d717bee91415f25952199bc30ec62ff6226be6c3137b3e5e1f0406f02f053bc4186dc980ece06c57e6fa867d61839700fa0f58fc383bfd8e40c428b942a7c157dc77b49a2172fa44aeb0a6e77194fe87df4a7575b71011bbe0332'))
 
     def test_schnorr_signature(self):
-        # encode+decode invoice to test signature
+        """encode+decode invoice to test signature validation"""
+        # the signing key is different from the encoded node_id, so the signature is invalid
         signing_key = bfh('4242424242424242424242424242424242424242424242424242424242424242')
-        signing_pubkey = ECPrivkey(signing_key).get_public_key_bytes()
-        invoice_tlv = encode_invoice({
-            'offer_amount': {'amount': 1},
-            'offer_description': {'description': 'test'},
-            'invoice_node_id': {'node_id': signing_pubkey}
-        }, signing_key)
-        decode_invoice(invoice_tlv)
+        with self.assertRaises(MsgInvalidSignature):
+            invoice = BOLT12Invoice.decode('lni1qqzdatd7auzqwqgzqvzq2ps8pqqszzsnw3jhxazlv4hxxmmyv40kjmnkda5kxegkyypwa3eyt44h6txtxquqh7lz5djge4afgfjn7k4rgrkuag0jsd5xvx2cyypwa3eyt44h6txtxquqh7lz5djge4afgfjn7k4rgrkuag0jsd5xvxdqdvpwa3eyt44h6txtxquqh7lz5djge4afgfjn7k4rgrkuag0jsd5xvxgzamrjghtt05kvkvpcp0a79gmy3nt6jsn98ad2xs8de6sl9qmgvcvszqhwcuj966ma9n9nqwqtl032xeyv6755yeflt235pmww58egx6rxryqq2vfjxv6rtgsaqqqqqeqqqqp7sqxgqqqqqqqqqqqqzqqqqqqqqr6zgqqqzq9yq35cmzpm5cppcg9gyr9tzrp2zpr86lwy2y4fzpfsau6azq5xv2m9ez3sv4sndlu403jcn2sz2gytqggzamrjghtt05kvkvpcp0a79gmy3nt6jsn98ad2xs8de6sl9qmgvcvlqsq2smesfhwpr27j0kpgk7prlvewkk639e2c080wyc43epy04hegwgv8kwm04v8ey9t6lxkp5rv65dz9w0xly26mu8rl42hheq0h98y0z')
+            encoded = invoice.encode(signing_key=signing_key, as_bech32=False)
+            BOLT12Invoice.decode(encoded)
+
+        # now use the same key as used inside the Invoice payload
+        signing_key = bfh('4141414141414141414141414141414141414141414141414141414141414141')
+        invoice = BOLT12Invoice.decode('lni1qqzdatd7auzqwqgzqvzq2ps8pqqszzsnw3jhxazlv4hxxmmyv40kjmnkda5kxegkyypwa3eyt44h6txtxquqh7lz5djge4afgfjn7k4rgrkuag0jsd5xvx2cyypwa3eyt44h6txtxquqh7lz5djge4afgfjn7k4rgrkuag0jsd5xvxdqdvpwa3eyt44h6txtxquqh7lz5djge4afgfjn7k4rgrkuag0jsd5xvxgzamrjghtt05kvkvpcp0a79gmy3nt6jsn98ad2xs8de6sl9qmgvcvszqhwcuj966ma9n9nqwqtl032xeyv6755yeflt235pmww58egx6rxryqq2vfjxv6rtgsaqqqqqeqqqqp7sqxgqqqqqqqqqqqqzqqqqqqqqr6zgqqqzq9yq35cmzpm5cppcg9gyr9tzrp2zpr86lwy2y4fzpfsau6azq5xv2m9ez3sv4sndlu403jcn2sz2gytqggzamrjghtt05kvkvpcp0a79gmy3nt6jsn98ad2xs8de6sl9qmgvcvlqsq2smesfhwpr27j0kpgk7prlvewkk639e2c080wyc43epy04hegwgv8kwm04v8ey9t6lxkp5rv65dz9w0xly26mu8rl42hheq0h98y0z')
+        encoded = invoice.encode(signing_key=signing_key, as_bech32=False)
+        BOLT12Invoice.decode(encoded)
 
     def test_serde_complex_fields(self):
         payer_key = bfh('4141414141414141414141414141414141414141414141414141414141414141')
 
-        # test complex field cardinality without explicit count
-        invreq = {
-            'offer_paths': {'paths': [
-                {'first_node_id': bfh('02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619'),
-                 'first_path_key': bfh('02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619'),
-                 'num_hops': 0,
-                 'path': []},
-                {'first_node_id': bfh('02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619'),
-                 'first_path_key': bfh('02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619'),
-                 'num_hops': 0,
-                 'path': []},
-                {'first_node_id': bfh('02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619'),
-                 'first_path_key': bfh('02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619'),
-                 'num_hops': 0,
-                 'path': []}
-            ]}
+        invreq_bech32 = "lnr1qqp6hn00zcssxr0juddeytv7nwawhk9nq9us0arnk8j8wnsq8r2e86vzgtfneupe2gp9yzzcyypymkt4c0n6rhcdw9a7ay2ptuje2gvehscwcchlvgntump3x7e7tc0sgp9k43qeu892gfnz2hrr7akh2x8erh7zm2tv52884vyl462dm5tfcahgtuzt7j0npy7getf4trv5d4g78a9fkwu3kke6hcxdr6t2n7vz"
+        invreq = BOLT12InvoiceRequest.decode(invreq_bech32).serialize(with_signature=False)
+        dummy_path = {
+            "blinded_node_id": bfh("034b1da9c0afa084c604f74f839de006d550422facc3b4be83323702892f7f5949"),
+            "enclen": 51,
+            "encrypted_recipient_data": bfh("42f0018dcfe5185602618b718f7aa72b1b97d8e85b97f88b8fdad95b80fd93a21d9a975cf544e8c4b5c2f519bc83bab84bda6b")
         }
 
-        invreq_pl_tlv = encode_invoice_request(invreq, payer_key=payer_key)
+        # test complex field cardinality
+        invreq['offer_paths'] = {
+            'paths': [
+                {'first_node_id': bfh('02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619'),
+                 'first_path_key': bfh('02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619'),
+                 'num_hops': int.to_bytes(1),
+                 'path': [dummy_path]},
+                {'first_node_id': bfh('02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619'),
+                 'first_path_key': bfh('02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619'),
+                 'num_hops': int.to_bytes(1),
+                 'path': [dummy_path]},
+                {'first_node_id': bfh('02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619'),
+                 'first_path_key': bfh('02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619'),
+                 'num_hops': int.to_bytes(1),
+                 'path': [dummy_path]}
+            ]
+        }
 
-        with io.BytesIO() as fd:
-            f = io.BytesIO(invreq_pl_tlv)
+        invreq_pl_tlv = BOLT12InvoiceRequest.deserialize(invreq).encode(signing_key=payer_key, as_bech32=False)
+
+        with io.BytesIO(invreq_pl_tlv) as f:
             deser = OnionWireSerializer.read_tlv_stream(fd=f, tlv_stream_name='invoice_request')
             self.assertEqual(len(deser['offer_paths']['paths']), 3)
 
         # test complex field all members required
-        invreq = {
-            'offer_paths': {'paths': [
+        invreq = {'offer_paths': {'paths': [
                 {'first_node_id': bfh('02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619'),
                  'first_path_key': bfh('02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619'),
-                 'num_hops': 0}
-            ]}
-        }
+                 'num_hops': int.to_bytes(1)}
+            ]}}
 
         # assertRaises on generic Exception used in lnmsg encode/write_tlv_stream makes flake8 complain
         # so work around this for now (TODO: refactor lnmsg generic exceptions)
         #with self.assertRaises(Exception):
         try:
-            invreq_pl_tlv = encode_invoice_request(invreq, payer_key=payer_key)
+            with io.BytesIO() as fd:
+                OnionWireSerializer.write_tlv_stream(
+                    fd=fd,
+                    tlv_stream_name='invoice_request',
+                    signing_key=payer_key,
+                    **invreq,
+                )
         except Exception as e:
             pass
         else:
@@ -384,10 +481,128 @@ class TestBolt12(ElectrumTestCase):
             'offer_paths': {'paths': [
                 {'first_node_id': bfh('02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619'),
                  'first_path_key': bfh('02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619'),
-                 'num_hops': 1,
+                 'num_hops': int.to_bytes(1),
                  'path': []}
             ]}
         }
 
         with self.assertRaises(AssertionError):
-            invreq_pl_tlv = encode_invoice_request(invreq, payer_key=payer_key)
+            with io.BytesIO() as fd:
+                OnionWireSerializer.write_tlv_stream(
+                    fd=fd,
+                    tlv_stream_name='invoice_request',
+                    signing_key=payer_key,
+                    **invreq,
+                )
+
+    def gen_base_offer_and_invreq(self, wkp, pkp, *, offer_extra: dict = None, invreq_extra: dict = None):
+        offer_extra = offer_extra or {}
+        offer = BOLT12Offer(
+            offer_metadata=bfh('01'),
+            offer_amount=offer_extra.pop('offer_amount', 1000),
+            offer_description='descr',
+            offer_issuer='test',
+            offer_issuer_id=wkp.pubkey,
+            **offer_extra,
+        )
+
+        invreq_extra = invreq_extra or {}
+        invreq = BOLT12InvoiceRequest(
+            **offer.__dict__,
+            invreq_metadata=bfh('ff'),
+            invreq_payer_id=pkp.pubkey,
+            invreq_signature=bfh('00'),  # bogus
+            invreq_features=LnFeatures(0),
+            **invreq_extra,
+        )
+
+        return offer, invreq
+
+    async def test_invoice_request(self):
+        wallet_key = bfh('4141414141414141414141414141414141414141414141414141414141414141')
+        wkp = lnutil.Keypair(privkey_to_pubkey(wallet_key), wallet_key)
+        chan_key = bfh('4242424242424242424242424242424242424242424242424242424242424242')
+        ckp = lnutil.Keypair(privkey_to_pubkey(chan_key), chan_key)
+        payer_key = bfh('4343434343434343434343434343434343434343434343434343434343434343')
+        pkp = lnutil.Keypair(privkey_to_pubkey(payer_key), payer_key)
+
+        lnwallet = self.create_mock_lnwallet(name='alice', has_anchors=True)
+
+        chan = MockChannel(ckp.pubkey, 1_000_000)
+        lnwallet._channels[ckp.pubkey] = chan
+        peer = MockPeer(lnwallet, ckp.pubkey, wkp)
+
+        # base case but without ROUTE_BLINDING capable peers
+        with self.assertRaises(NoRouteBlindingChannelPeers):
+            offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
+            invoice_data = verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+
+        lnwallet.lnpeermgr._peers[ckp.pubkey] = peer
+
+        # base case
+        offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
+        invoice_data = verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+        for field_name in [f.name for f in fields(invreq_data) if not f.name.startswith('_') or f.name.endswith('_signature')]:
+            self.assertEqual(getattr(invoice_data, field_name), getattr(invreq_data, field_name))
+
+        # non matching offer fields in invreq
+        offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
+        invreq_data.__dict__['offer_metadata'] = None
+        with self.assertRaises(InvoiceRequestException):
+            verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+
+        offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
+        invreq_data.__dict__['offer_metadata'] = bfh('02')
+        with self.assertRaises(InvoiceRequestException):
+            verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+
+        offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
+        invreq_data.__dict__['offer_amount'] = 1001
+        with self.assertRaises(InvoiceRequestException):
+            verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+
+        offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
+        invreq_data.__dict__['offer_issuer_id'] = ckp.pubkey
+        with self.assertRaises(InvoiceRequestException):
+            verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+
+        # invreq_metadata mandatory
+        offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
+        invreq_data.__dict__['invreq_metadata'] = None
+        with self.assertRaises(ValueError):
+            verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+
+        # expiry
+        offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
+        invreq_data.__dict__['offer_absolute_expiry'] = int(time.time()) - 5
+        with self.assertRaises(InvoiceRequestException):
+            verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+
+        offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp, offer_extra={
+            'offer_absolute_expiry': int(time.time()) + 5
+        })
+        invoice_data = verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+
+        # offer/invreq amount matching
+        offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
+        invoice_data = verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+        self.assertEqual(invoice_data.invoice_amount, offer_data.offer_amount)
+
+        # offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
+        # del offer_data['offer_amount']
+        # del invreq_data['offer_amount']
+        # with self.assertRaises(InvoiceRequestException):
+        #     verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+
+        # rcv capacity check
+        offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp,
+            offer_extra={'offer_amount': 2_000_000},
+            invreq_extra={'invreq_amount': 2_000_000},
+        )
+        with self.assertRaises(InvoiceRequestException):
+            verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+
+        # invoice_node_id == offer_issuer_id
+        offer_data, invreq_data = self.gen_base_offer_and_invreq(wkp, pkp)
+        invoice_data = verify_request_and_create_invoice(lnwallet, offer_data, invreq_data)
+        self.assertEqual(invoice_data.invoice_node_id, wkp.pubkey)
