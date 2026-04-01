@@ -180,16 +180,20 @@ class MockLNWallet(LNWallet):
             await self.channel_db.stopped_event.wait()
 
     async def create_routes_from_invoice(self, amount_msat: int, decoded_invoice: BOLT11Addr, *, full_path=None):
-        paysession = PaySession(
-            payment_hash=decoded_invoice.paymenthash,
+        unblinded_routing_info = lnutil.UnblindedRoutingInfo(
+            node_pubkey=decoded_invoice.pubkey.serialize(),
             payment_secret=decoded_invoice.payment_secret,
-            initial_trampoline_fee_level=0,
-            invoice_features=decoded_invoice.get_features(),
             r_tags=decoded_invoice.get_routing_info('r'),
             min_final_cltv_delta=decoded_invoice.get_min_final_cltv_delta(),
+            invoice_features=decoded_invoice.get_features(),
+        )
+        paysession = PaySession(
+            payment_hash=decoded_invoice.paymenthash,
+            initial_trampoline_fee_level=0,
+            invoice_features=decoded_invoice.get_features(),
             amount_to_pay=amount_msat,
-            invoice_pubkey=decoded_invoice.pubkey.serialize(),
             uses_trampoline=False,
+            routing_info=unblinded_routing_info,
         )
         payment_key = decoded_invoice.paymenthash + decoded_invoice.payment_secret
         self._paysessions[payment_key] = paysession
@@ -1282,7 +1286,7 @@ class TestPeerDirect(TestPeer):
             paysession1 = w1._paysessions[lnaddr2.paymenthash + lnaddr2.payment_secret]
             shi1 = SentHtlcInfo(
                 route=route1,
-                payment_secret_orig=lnaddr2.payment_secret,
+                payment_id=lnaddr2.payment_secret,
                 payment_secret_bucket=lnaddr2.payment_secret,
                 amount_msat=lnaddr2.get_amount_msat(),
                 bucket_msat=lnaddr2.get_amount_msat(),
@@ -1302,7 +1306,7 @@ class TestPeerDirect(TestPeer):
             paysession2 = w2._paysessions[lnaddr1.paymenthash + lnaddr1.payment_secret]
             shi2 = SentHtlcInfo(
                 route=route2,
-                payment_secret_orig=lnaddr1.payment_secret,
+                payment_id=lnaddr1.payment_secret,
                 payment_secret_bucket=lnaddr1.payment_secret,
                 amount_msat=lnaddr1.get_amount_msat(),
                 bucket_msat=lnaddr1.get_amount_msat(),
@@ -1896,7 +1900,7 @@ class TestPeerDirect(TestPeer):
         async def f():
             shi = SentHtlcInfo(
                 route=route,
-                payment_secret_orig=lnaddr.payment_secret,
+                payment_id=lnaddr.payment_secret,
                 payment_secret_bucket=lnaddr.payment_secret,
                 amount_msat=amount_msat,
                 bucket_msat=amount_msat,
