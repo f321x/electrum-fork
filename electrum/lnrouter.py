@@ -33,6 +33,7 @@ from math import inf
 
 import attr
 
+from .lnonion import BlindedPathInfo
 from .util import profiler, with_lock
 from .logging import Logger
 from .lnutil import (NUM_MAX_EDGES_IN_PAYMENT_PATH, ShortChannelID, LnFeatures,
@@ -41,6 +42,7 @@ from .channel_db import ChannelDB, Policy, NodeInfo
 
 if TYPE_CHECKING:
     from .lnchannel import Channel
+    from .lnonion import BlindedPayInfo
 
 DEFAULT_PENALTY_BASE_MSAT = 500  # how much base fee we apply for unknown sending capability of a channel
 DEFAULT_PENALTY_PROPORTIONAL_MILLIONTH = 100  # how much relative fee we apply for unknown sending capability of a channel
@@ -115,7 +117,8 @@ class RouteEdge(PathEdge):
 
 @attr.s
 class TrampolineEdge(RouteEdge):
-    invoice_routing_info = attr.ib(type=Sequence[bytes], default=None)
+    # r-tags (non e2e bolt11) or a sequence of `payment_blinded_path` (non e2e bolt12)
+    invoice_routing_info = attr.ib(type=Sequence[bytes] | Sequence[dict], default=None)
     invoice_features = attr.ib(type=int, default=None)
     # this is re-defined from parent just to specify a default value:
     short_channel_id = attr.ib(default=ShortChannelID(8), repr=lambda val: str(val))
@@ -135,6 +138,7 @@ def is_route_within_budget(
     budget: PaymentFeeBudget,
     amount_msat_for_dest: int,  # that final receiver gets
     cltv_delta_for_dest: int,   # that final receiver gets
+    additional_blinded_path_fees: Optional['BlindedPayInfo'] = None,
 ) -> bool:
     """Run some sanity checks on the whole route, before attempting to use it.
     called when we are paying; so e.g. lower cltv is better
@@ -143,6 +147,13 @@ def is_route_within_budget(
         return False
     amt = amount_msat_for_dest
     cltv_cost_of_route = 0  # excluding cltv_delta_for_dest
+    if additional_blinded_path_fees is not None:
+        amt += fee_for_edge_msat(
+            forwarded_amount_msat=amt,
+            fee_base_msat=additional_blinded_path_fees.fee_base_msat,
+            fee_proportional_millionths=additional_blinded_path_fees.fee_proportional_millionths,
+        )
+        cltv_cost_of_route += additional_blinded_path_fees.cltv_expiry_delta
     for route_edge in reversed(route[1:]):
         amt += route_edge.fee_for_edge(amt)
         cltv_cost_of_route += route_edge.cltv_delta

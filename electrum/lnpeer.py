@@ -20,7 +20,7 @@ from electrum_ecc import ecdsa_sig64_from_r_and_s, ecdsa_der_sig_from_ecdsa_sig6
 import aiorpcx
 from aiorpcx import ignore_after
 
-from .bolt12 import BOLT12InvoicePathIDPayload
+from electrum.lnonion import BlindedPathInfo
 from .lrucache import LRUCache
 from .crypto import sha256, sha256d, privkey_to_pubkey, get_ecdh
 from . import bitcoin, util, bolt12
@@ -57,6 +57,7 @@ from .json_db import StoredDict
 from .invoices import PR_PAID
 from .fee_policy import FEE_LN_ETA_TARGET, FEERATE_PER_KW_MIN_RELAY_LIGHTNING
 from .channel_db import FLAG_DIRECTION
+from .bolt12 import BOLT12Invoice, BOLT12InvoicePathIDPayload
 
 if TYPE_CHECKING:
     from .lnworker import LNGossip, LNWallet
@@ -1982,9 +1983,9 @@ class Peer(Logger, EventListener):
             total_msat: int,
             payment_hash: bytes,
             min_final_cltv_delta: int,
-            payment_secret: bytes,
+            payment_secret: Optional[bytes],
+            blinded_path: Optional['BlindedPathInfo'] = None,
             trampoline_onion: Optional[OnionPacket] = None,
-            bolt12_invoice=None,  # Optional[BOLT12Invoice]
         ) -> UpdateAddHtlc:
 
         assert amount_msat > 0, "amount_msat is not greater zero"
@@ -1998,8 +1999,8 @@ class Peer(Logger, EventListener):
             payment_hash=payment_hash,
             min_final_cltv_delta=min_final_cltv_delta,
             payment_secret=payment_secret,
+            blinded_path=blinded_path,
             trampoline_onion=trampoline_onion,
-            bolt12_invoice=bolt12_invoice,
         )
         htlc = self.send_htlc(
             chan=chan,
