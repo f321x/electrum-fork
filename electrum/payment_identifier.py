@@ -138,8 +138,8 @@ class PaymentIdentifier(Logger):
         self.lnurl = None  # type: Optional[str]
         self.lnurl_data = None # type: Optional[LNURLData]
         #
-        self.bolt12_offer = None
-        self.bolt12_invoice = None
+        self.bolt12_offer = None  # type: Optional[bolt12.BOLT12Offer]
+        self.bolt12_invoice = None  # type: Optional[Invoice]  # TODO: unify with self.bolt11
 
         self.parse(text)
 
@@ -425,10 +425,9 @@ class PaymentIdentifier(Logger):
                 try:
                     if not self.wallet.lnworker:
                         raise Exception('wallet is not lightning-enabled')
-                    invoice, invoice_tlv = await bolt12.request_invoice(
+                    invoice, bolt12_invoice_bech32 = await bolt12.request_invoice(
                         self.wallet.lnworker, self.bolt12_offer, amount_sat * 1000, note=comment)
-                    self.bolt12_invoice = invoice
-                    self.bolt12_invoice_bech32 = bolt12.bolt12_bytes_to_bech32(invoice_tlv)
+                    self.bolt12_invoice = Invoice.from_bech32(bolt12_invoice_bech32)
                     self.set_state(PaymentIdentifierState.AVAILABLE)
                     self.logger.debug(f'BOLT12 invoice_request reply: {invoice!r}')
                 except Timeout:
@@ -570,12 +569,8 @@ class PaymentIdentifier(Logger):
             offer_amount = self.bolt12_offer.offer_amount
             if offer_amount:
                 amount = Decimal(offer_amount) / 1000  # msat->sat
-            offer_description = self.bolt12_offer.offer_description
-            if offer_description:
-                description = offer_description
-            offer_issuer = self.bolt12_offer.get('offer_issuer')
-            if offer_issuer:
-                recipient = offer_issuer.get('issuer')
+            description = self.bolt12_offer.offer_description
+            recipient = self.bolt12_offer.offer_issuer
 
         elif self.lnurl and self.lnurl_data:
             assert isinstance(self.lnurl_data, LNURL6Data), f"{self.lnurl_data=}"
@@ -609,7 +604,7 @@ class PaymentIdentifier(Logger):
                             comment=comment, validated=validated, amount_range=amount_range)
 
     def _get_bolt11_fields(self):
-        lnaddr = self.bolt11._lnaddr # TODO: improve access to lnaddr
+        lnaddr = self.bolt11.bolt11_invoice
         pubkey = lnaddr.pubkey.serialize().hex()
         for k, v in lnaddr.tags:
             if k == 'd':
@@ -636,18 +631,12 @@ class PaymentIdentifier(Logger):
             return None
 
     def has_expired(self):
-        if self.bolt11:
-            return self.bolt11.has_expired()
-        elif self.bolt12_offer or self.bolt12_invoice:
-            # TODO: invoice not from offer, or original offer unavailable (e.g. saved resolved invoice from offer)
-            if self.bolt12_offer:
-                offer_absolute_expiry = self.bolt12_offer.get('offer_absolute_expiry', {}).get('seconds_from_epoch', 0)
-                if offer_absolute_expiry:
-                    return now() > offer_absolute_expiry
-            if self.bolt12_invoice:
-                invoice_relative_expiry = self.bolt12_invoice.get('invoice_relative_expiry', {}).get('seconds_from_creation', 0)
-                if invoice_relative_expiry:
-                    return now() > self.bolt12_invoice.get('invoice_created_at').get('timestamp') + invoice_relative_expiry
+        if self.bolt11 or self.bolt12_invoice:
+            lightning_invoice = self.bolt11 or self.bolt12_invoice
+            return lightning_invoice.has_expired()
+        elif self.bolt12_offer:
+            if (offer_absolute_expiry := self.bolt12_offer.offer_absolute_expiry) is not None:
+                return now() > offer_absolute_expiry
         elif self.bip21:
             expires = self.bip21.get('exp') + self.bip21.get('time') if self.bip21.get('exp') else 0
             return bool(expires) and expires < time.time()
@@ -664,10 +653,10 @@ def invoice_from_payment_identifier(
     assert pi.is_onchain() if amount_sat == '!' else True  # MAX should only be allowed if pi has onchain destination
 
     if pi.is_lightning() and not amount_sat == '!':
-        invoice = pi.bolt11 if pi.bolt11 else Invoice.from_bolt12_invoice(pi.bolt12_invoice_bech32)
+        invoice = pi.bolt11 or pi.bolt12_invoice
         if not invoice:
             return
-        if invoice._lnaddr.get_amount_msat() is None and amount_sat is not None:
+        if invoice.get_amount_msat() is None and amount_sat is not None:
             invoice.set_amount_msat(int(amount_sat * 1000))
         return invoice
     else:
