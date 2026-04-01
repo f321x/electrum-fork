@@ -29,6 +29,7 @@ import time
 from dataclasses import dataclass, field, asdict, fields
 from functools import cached_property
 import re
+from decimal import Decimal
 from typing import TYPE_CHECKING, Union, Optional, Tuple, Iterable, Type, TypeVar, Any, ClassVar, Sequence
 from abc import ABC, abstractmethod
 
