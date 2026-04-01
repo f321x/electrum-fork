@@ -23,26 +23,31 @@
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import attr
 import copy
 import io
 import os
 import time
+import attr
 from dataclasses import dataclass, field, asdict, fields
+from functools import cached_property
 import re
+from decimal import Decimal
 from typing import TYPE_CHECKING, Union, Optional, Tuple, Iterable, Type, TypeVar, Any, ClassVar, Sequence
 from abc import ABC, abstractmethod
 
 import electrum_ecc as ecc
 
 from . import constants
+from .bitcoin import COIN
 from .json_db import stored_in, StoredObject
+from .bolt11 import BOLT11Addr
 from .lnmsg import OnionWireSerializer, batched
-from .lnutil import LnFeatures, validate_features, hex_to_bytes, bytes_to_hex
-from .onion_message import Timeout, BlindedPath, BlindedPayInfo, BlindedPathInfo, get_blinded_paths_to_me, get_blinded_reply_paths, NoRouteBlindingChannelPeers
+from .lnutil import LnFeatures, hex_to_bytes, bytes_to_hex, validate_features
+from .lnonion import BlindedPathInfo, BlindedPath, BlindedPayInfo
+from .onion_message import Timeout, get_blinded_paths_to_me, NoRouteBlindingChannelPeers
 from .segwit_addr import (
     bech32_decode, convertbits, bech32_encode, Encoding, INVALID_BECH32,
-    CHARSET as BECH32_CHARSET,
+    CHARSET as BECH32_CHARSET, encode_segwit_address,
 )
 
 if TYPE_CHECKING:
@@ -454,6 +459,18 @@ class BOLT12Invoice(BOLT12InvoiceRequest):
         'invoice_node_id': lambda v: {'node_id': v},
         'invoice_signature': lambda v: {'sig': v},
     }
+
+    @cached_property
+    def fallback_address(self) -> Optional[str]:
+        fallbacks = self.invoice_fallbacks or ()
+        for fba in fallbacks:
+            version_bytes, witprog = fba.get('version'), fba.get('address', b'')
+            if version_bytes is not None and 2 <= len(witprog) <= 40:
+                version = int.from_bytes(version_bytes, signed=False, byteorder='big')
+                if version <= 16:
+                    address = encode_segwit_address(constants.net.SEGWIT_HRP, version, witprog)
+                    return address
+        return None
 
 
 def is_offer(data: str) -> bool:
