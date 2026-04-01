@@ -136,16 +136,16 @@ def is_route_within_budget(
     route: LNPaymentRoute,
     *,
     budget: PaymentFeeBudget,
-    amount_msat_for_dest: int,  # that final receiver gets
-    cltv_delta_for_dest: Optional[int],   # that final receiver gets, not given for blinded paths
+    amount_msat_for_recipient: int,  # that final receiver gets
+    cltv_delta_for_recipient: Optional[int],   # that final receiver gets, not given for blinded paths
     additional_blinded_path_fees: Optional['BlindedPayInfo'] = None,
 ) -> bool:
     """Run some sanity checks on the whole route, before attempting to use it.
     called when we are paying; so e.g. lower cltv is better
     """
-    if len(route) > NUM_MAX_EDGES_IN_PAYMENT_PATH:
+    if len(route) > NUM_MAX_EDGES_IN_PAYMENT_PATH:  # doesn't count blinded path hops
         return False
-    amt = amount_msat_for_dest
+    amt = amount_msat_for_recipient
     cltv_cost_of_route = 0  # excluding cltv_delta_for_dest
     if additional_blinded_path_fees is not None:
         amt += fee_for_edge_msat(
@@ -157,14 +157,14 @@ def is_route_within_budget(
     for route_edge in reversed(route[1:]):
         amt += route_edge.fee_for_edge(amt)
         cltv_cost_of_route += route_edge.cltv_delta
-    fee_cost = amt - amount_msat_for_dest
+    fee_cost = amt - amount_msat_for_recipient
     # check against budget
     if cltv_cost_of_route > budget.cltv:
         return False
     if fee_cost > budget.fee_msat:
         return False
     # sanity check
-    total_cltv_delta = cltv_cost_of_route + (cltv_delta_for_dest or 0)
+    total_cltv_delta = cltv_cost_of_route + (cltv_delta_for_recipient or 0)
     if total_cltv_delta > NBLOCK_CLTV_DELTA_TOO_FAR_INTO_FUTURE:
         return False
     return True

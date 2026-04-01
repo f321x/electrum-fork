@@ -1,3 +1,4 @@
+import os
 import random
 import unittest
 from math import inf
@@ -8,9 +9,9 @@ from electrum import util
 from electrum.channel_db import NodeInfo
 from electrum.onion_message import is_onion_message_node
 from electrum.trampoline import (create_trampoline_onion, _allocate_fee_budget_among_route, PLACEHOLDER_FEE,
-                                 get_trampoline_budget)
+                                 get_trampoline_budget, create_trampoline_route_and_onion)
 from electrum.util import bfh
-from electrum.lnutil import ShortChannelID, LnFeatures, PaymentFeeBudget
+from electrum.lnutil import ShortChannelID, LnFeatures, UnblindedRoutingInfo, PaymentFeeBudget
 from electrum.lnonion import (OnionHopsDataSingle, new_onion_packet,
                               process_onion_packet, _decode_onion_error, decode_onion_error,
                               OnionFailureCode)
@@ -488,15 +489,76 @@ class Test_LNRouter(ElectrumTestCase):
                 node_features=0
             ),
         ]
+        routing_info = UnblindedRoutingInfo(
+            node_pubkey=node('c'),
+            payment_secret=urandom(32),
+            min_final_cltv_delta=0,
+            r_tags=[],  # create_trampoline_onion uses r_tags from route
+            invoice_features=LnFeatures(0),
+        )
         # create a trampoline onion, this shouldn't raise InvalidPayloadSize
         create_trampoline_onion(
             route=dummy_route,
+            routing_info=routing_info,
             amount_msat=0,
-            final_cltv_abs=0,
+            local_height=0,
             total_msat=0,
             payment_hash=urandom(32),
-            payment_secret=urandom(32),
+            is_legacy=True,
+            blinded_path=None,
         )
+
+    def test_create_trampoline_route_and_onion_unblinded_legacy(self):
+        routing_info = UnblindedRoutingInfo(
+            node_pubkey=node('c'),
+            payment_secret=urandom(32),
+            min_final_cltv_delta=144,
+            r_tags=[],
+            invoice_features=LnFeatures(0),  # no trampoline support
+        )
+        r = create_trampoline_route_and_onion(
+            amount_msat=10_000_000,
+            total_msat=10_000_000,
+            routing_info=routing_info,
+            my_pubkey=node('a'),
+            my_trampoline=node('b'),
+            payment_hash=os.urandom(32),
+            local_height=100_000,
+            trampoline_fee_level=1,
+            next_trampolines={},
+            failed_routes=[],
+            budget=PaymentFeeBudget(fee_msat=210_000, cltv=2100),
+            blinded_path=None,
+        )
+        route, onion, amount_with_fees, bucket_cltv_delta = r
+        self.assertEqual(route[0].start_node, node('a'))
+        self.assertEqual(route[0].end_node, node('b'))
+        self.assertEqual(len(route), 1)
+
+        # recipient is in next_trampolines
+        r = create_trampoline_route_and_onion(
+            amount_msat=10_000_000,
+            total_msat=10_000_000,
+            routing_info=routing_info,
+            my_pubkey=node('a'),
+            my_trampoline=node('b'),
+            payment_hash=os.urandom(32),
+            local_height=100_000,
+            trampoline_fee_level=1,
+            next_trampolines={
+                node('c'): None,  # recipient shouldn't be used
+                node('d'): None,
+            },
+            failed_routes=[],
+            budget=PaymentFeeBudget(fee_msat=210_000, cltv=2100),
+            blinded_path=None,
+        )
+        route, onion, amount_with_fees, bucket_cltv_delta = r
+        self.assertEqual(route[0].start_node, node('a'))
+        self.assertEqual(route[0].end_node, node('b'))
+        self.assertEqual(route[1].start_node, node('b'))
+        self.assertEqual(route[1].end_node, node('d'))
+        self.assertEqual(len(route), 2)
 
     @needs_test_with_all_chacha20_implementations
     def test_decode_onion_error(self):
