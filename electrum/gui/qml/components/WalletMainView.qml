@@ -43,7 +43,7 @@ Item {
         // Android based send dialog if on android
         var scanner = app.scanDialog.createObject(mainView, {
             hint: Daemon.currentWallet.isLightning
-                ? qsTr('Scan an Invoice, an Address, an LNURL, a PSBT or a Channel Backup')
+                ? qsTr('Scan an Invoice, an Address, an Offer, a LNURL, a PSBT or a Channel Backup')
                 : qsTr('Scan an Invoice, an Address, an LNURL or a PSBT')
         })
         scanner.onFoundText.connect(function(data) {
@@ -434,6 +434,20 @@ Item {
             })
             dialog.open()
         }
+        onBolt12Offer: {
+            closeSendDialog()
+            var dialog = bolt12OfferDialog.createObject(app, {
+                invoiceParser: invoiceParser
+            })
+            dialog.open()
+        }
+        onBolt12Invoice: {
+            closeSendDialog()
+            var dialog = invoiceDialog.createObject(app, {
+                invoice: invoiceParser
+            })
+            dialog.open()
+        }
     }
 
     Bitcoin {
@@ -737,6 +751,16 @@ Item {
     Component {
         id: lnurlWithdrawDialog
         LnurlWithdrawRequestDialog {
+            width: parent.width * 0.9
+            anchors.centerIn: parent
+
+            onClosed: destroy()
+        }
+    }
+
+    Component {
+        id: bolt12OfferDialog
+        Bolt12OfferDialog {
             width: parent.width * 0.9
             anchors.centerIn: parent
 

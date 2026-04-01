@@ -28,7 +28,9 @@ import io
 import os
 import time
 from dataclasses import dataclass, field, asdict, fields
+from functools import cached_property
 import re
+from decimal import Decimal
 from typing import TYPE_CHECKING, Union, Optional, Tuple, Iterable, Type, TypeVar, Any, ClassVar, Sequence
 from abc import ABC, abstractmethod
 
@@ -42,7 +44,7 @@ from .lnutil import LnFeatures, validate_features, MIN_FINAL_CLTV_DELTA_ACCEPTED
 from .onion_message import Timeout, BlindedPath, BlindedPayInfo, get_blinded_paths_to_me, NoRouteBlindingChannelPeers
 from .segwit_addr import (
     bech32_decode, convertbits, bech32_encode, Encoding, INVALID_BECH32,
-    CHARSET as BECH32_CHARSET,
+    CHARSET as BECH32_CHARSET, encode_segwit_address,
 )
 
 if TYPE_CHECKING:
@@ -469,6 +471,18 @@ class BOLT12Invoice(BOLT12InvoiceRequest):
         'invoice_node_id': lambda v: {'node_id': v},
         'invoice_signature': lambda v: {'sig': v},
     }
+
+    @cached_property
+    def fallback_address(self) -> Optional[str]:
+        fallbacks = self.invoice_fallbacks or ()
+        for fba in fallbacks:
+            version_bytes, witprog = fba.get('version'), fba.get('address', b'')
+            if version_bytes is not None and 2 <= len(witprog) <= 40:
+                version = int.from_bytes(version_bytes, signed=False, byteorder='big')
+                if version <= 16:
+                    address = encode_segwit_address(constants.net.SEGWIT_HRP, version, witprog)
+                    return address
+        return None
 
 
 def extract_offer_from_invoice_request(invreq: BOLT12InvoiceRequest) -> BOLT12Offer:
