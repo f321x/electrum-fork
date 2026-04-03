@@ -49,7 +49,6 @@ from . import util, keystore, transaction, bitcoin, coinchooser, bip32, descript
 from .i18n import _
 from .bip32 import BIP32Node, convert_bip32_intpath_to_strpath, convert_bip32_strpath_to_intpath
 from .logging import get_logger, Logger
-from .onion_message import get_blinded_reply_paths, get_blinded_paths_to_me
 from .util import (
     NotEnoughFunds, UserCancelled, profiler, OldTaskGroup, format_fee_satoshis,
     WalletFileException, BitcoinException, InvalidPassword, format_time, timestamp_to_datetime,
@@ -439,9 +438,6 @@ class Abstract_Wallet(ABC, Logger, EventListener):
         self._invoices             = db.get_dict('invoices')  # type: Dict[str, Invoice]
         self._reserved_addresses   = set(db.get('reserved_addresses', []))
         self._num_parents          = db.get_dict('num_parents')
-
-        # TODO: save
-        self._offers               = {}
 
         self._freeze_lock = threading.RLock()  # for mutating/iterating frozen_{addresses,coins}
 
@@ -3122,42 +3118,6 @@ class Abstract_Wallet(ABC, Logger, EventListener):
             self.delete_request(key, write_to_disk=False)
         if keys:
             self.save_db()
-
-    def create_offer(self, amount, memo, expiry, *, issuer: str = None, allow_unblinded=True):
-        from .bolt12 import BOLT12Offer
-        assert self.has_lightning(), 'not a lightning wallet'
-        assert self.has_channels() or allow_unblinded, 'no channels but blinding required'
-
-        path_id = os.urandom(32)  # TODO: move path_id gen get_blinded_reply_paths, unique per path
-        reply_paths, _payinfo = get_blinded_paths_to_me(self.lnworker, {'path_id': {'data': path_id}}, max_paths=1, onion_message=True)
-        if not len(reply_paths) and not allow_unblinded:
-            raise Exception('No suitable channels')
-
-        offer_id = os.urandom(16)
-        node_id = self.lnworker.node_keypair.pubkey
-
-        chains = None
-        if constants.net != constants.BitcoinMainnet:
-            chains = [constants.net.rev_genesis_bytes()]
-
-        offer = BOLT12Offer(
-            offer_metadata=offer_id,
-            offer_description=memo,
-            offer_chains=chains,
-            offer_amount=amount * 1000 if amount else None,
-            offer_absolute_expiry=int(time.time()) + expiry if expiry else None,
-            # TODO: remove adding of offer_issuer_id, once we can sign invoices properly based on invreq used blinded path
-            offer_issuer_id=node_id,
-            offer_issuer=issuer,
-            offer_paths=tuple(reply_paths) if reply_paths else None,
-        )
-
-        self._offers[offer_id] = offer
-
-        return offer_id
-
-    def get_offer(self, key):
-        return self._offers.get(key)
 
     @abstractmethod
     def get_fingerprint(self) -> str:

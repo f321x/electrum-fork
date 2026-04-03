@@ -23,6 +23,7 @@
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+import attr
 import copy
 import io
 import os
@@ -38,9 +39,10 @@ import electrum_ecc as ecc
 from . import constants
 from .bitcoin import COIN
 from .bolt11 import BOLT11Addr
+from .json_db import stored_in, StoredObject
 from .lnmsg import OnionWireSerializer, batched
-from .lnutil import LnFeatures, validate_features
-from .onion_message import Timeout, BlindedPath, BlindedPayInfo, get_blinded_paths_to_me, NoRouteBlindingChannelPeers
+from .lnutil import LnFeatures, validate_features, hex_to_bytes, bytes_to_hex
+from .onion_message import Timeout, BlindedPath, BlindedPayInfo, get_blinded_paths_to_me, get_blinded_reply_paths, NoRouteBlindingChannelPeers
 from .segwit_addr import (
     bech32_decode, convertbits, bech32_encode, Encoding, INVALID_BECH32,
     CHARSET as BECH32_CHARSET,
@@ -486,6 +488,51 @@ def bolt12_bech32_to_bytes(data: str) -> bytes:
     if d is None:
         raise ValueError(f"Invalid bech32 data: {data[:64]=}...")
     return bytes(d)
+
+
+def create_offer(
+    lnwallet: 'LNWallet',
+    *,
+    amount_msat: Optional[int] = None,
+    memo: Optional[str] = None,
+    expiry: Optional[int] = None,
+    issuer: str = None,
+    allow_unblinded: bool = True,
+) -> Tuple[bytes, 'BOLT12Offer']:
+    path_id = os.urandom(32)  # TODO: move path_id gen get_blinded_reply_paths, unique per path
+    reply_paths = get_blinded_reply_paths(lnwallet, path_id)  # TODO: catch exceptions
+    if not len(reply_paths) and not allow_unblinded:
+        raise Exception('No suitable channels')
+
+    offer_id = os.urandom(16)  # todo: use hmac instead of random id?
+    node_id = lnwallet.node_keypair.pubkey
+
+    chains = None
+    if constants.net != constants.BitcoinMainnet:
+        chains = [constants.net.rev_genesis_bytes()]
+
+    offer_paths = tuple(reply_paths) if reply_paths else None
+
+    offer = BOLT12Offer(
+        offer_metadata=offer_id,
+        offer_description=memo,
+        offer_chains=chains,
+        offer_amount=amount_msat,
+        offer_absolute_expiry=int(time.time()) + expiry if expiry else None,
+        # TODO: remove adding of offer_issuer_id, once we can sign invoices properly based on invreq used blinded path
+        offer_issuer_id=node_id, # node_id if not offer_paths else None,
+        offer_issuer=issuer,
+        offer_paths=offer_paths,
+    )
+
+    return offer_id, offer
+
+
+@stored_in('offers')
+@attr.s
+class Offer(StoredObject):
+    offer_id = attr.ib(kw_only=True, type=bytes, converter=hex_to_bytes, repr=bytes_to_hex)
+    offer_bech32 = attr.ib(kw_only=True, type=str)
 
 
 def to_lnaddr(data: BOLT12Invoice) -> BOLT11Addr:

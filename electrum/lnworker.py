@@ -29,8 +29,7 @@ import dns.asyncresolver
 import dns.exception
 from aiorpcx import run_in_thread, NetAddress, ignore_after
 
-from . import bolt12
-from .bolt12 import Bolt12InvoiceError
+from .bolt12 import Bolt12InvoiceError, Offer
 from .logging import Logger
 from .i18n import _
 from .json_db import stored_in
@@ -1049,6 +1048,11 @@ class LNWallet(Logger):
             for channel_id, storage in channel_backups.items():
                 self._channel_backups[bfh(channel_id)] = cb = ChannelBackup(storage, lnworker=self)
                 self.wallet.set_reserved_addresses_for_chan(cb, reserved=True)
+
+        self._offers = {}  # type: Dict[bytes, Offer]
+        offers = self.db.get_dict("offers")
+        for offer_id, offer in offers.items():
+            self._offers[bfh(offer_id)] = offer
 
         self._pathids = {}  # type: Dict[bytes, Sequence[bytes]]
         pathids = self.db.get_dict("path_ids")
@@ -4233,6 +4237,42 @@ class LNWallet(Logger):
         failure_message = OnionRoutingFailure.from_bytes(bytes.fromhex(failure_hex)) if failure_hex else None
         return error_bytes, failure_message
 
+    def create_offer(
+        self,
+        *,
+        amount_msat: Optional[int] = None,
+        memo: Optional[str] = None,
+        expiry: int,
+        issuer: Optional[str] = None,
+        allow_unblinded: bool = True
+    ):
+        """ Create an offer
+            allow_unblinded only makes sense if node_id is public, or for testing with direct electrum peer
+        """
+        if len(self._channels) == 0 and not allow_unblinded:
+            raise Exception('No channels')
+
+        offer_id, offer = bolt12.create_offer(self, amount_msat=amount_msat, memo=memo, expiry=expiry, issuer=issuer)
+        with self.lock:
+            o = self._offers[offer_id] = Offer(offer_id=offer_id, offer_bech32=offer.encode(as_bech32=True))
+            self.db.get('offers')[offer_id.hex()] = o
+
+        return offer_id
+
+    def get_offer(self, offer_id: bytes) -> Optional[Offer]:
+        return self._offers.get(offer_id)
+
+    def delete_offer(self, offer_id: bytes):
+        with self.lock:
+            self._offers.pop(offer_id)
+            self.db.get('offers').pop(offer_id.hex())
+
+    @property
+    def offers(self) -> Mapping[bytes, Offer]:
+        """Returns a read-only copy of offers."""
+        with self.lock:
+            return self._offers.copy()
+
     def on_bolt12_invoice_request(self, recipient_data: dict, payload: dict):
         # match to offer
         self.logger.debug(f'on_bolt12_invoice_request: {recipient_data=} {payload=}')
@@ -4242,11 +4282,12 @@ class LNWallet(Logger):
         self.logger.info(f'invoice_request: {invreq=}')
 
         offer_id = invreq.offer_metadata
-        offer = self.wallet.get_offer(offer_id)
+        offer = self.get_offer(offer_id)
         if offer is None:
             self.logger.warning('no matching offer for invoice_request')
             return
-        self.logger.debug(f'invoice_request for {offer=}')
+        self.logger.debug(f'invoice_request for offer_id={offer_id.hex()}')
+        offer = bolt12.BOLT12Offer.decode(offer.offer_bech32)
 
         # two scenarios:
         # 1) not in response to offer (no offer_issuer_id or offer_paths)
