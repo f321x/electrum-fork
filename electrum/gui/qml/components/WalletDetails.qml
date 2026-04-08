@@ -26,6 +26,17 @@ Pane {
         dialog.open()
     }
 
+    function renameWallet() {
+        var dialog = walletRenameDialog.createObject(rootItem, {
+            currentName: Daemon.currentWallet.name
+        })
+        dialog.nameChosen.connect(function(newName) {
+            dialog.close()
+            Daemon.renameWallet(newName)
+        })
+        dialog.open()
+    }
+
     function importAddressesKeys() {
         var dialog = importAddressesKeysDialog.createObject(rootItem)
         dialog.open()
@@ -443,6 +454,13 @@ Pane {
             FlatButton {
                 Layout.fillWidth: true
                 Layout.preferredWidth: 1
+                text: qsTr('Change Name')
+                onClicked: rootItem.renameWallet()
+                icon.source: '../../icons/pen.png'
+            }
+            FlatButton {
+                Layout.fillWidth: true
+                Layout.preferredWidth: 1
                 visible: Daemon.currentWallet.walletType == 'imported'
                 text: Daemon.currentWallet.isWatchOnly
                         ? qsTr('Add addresses')
@@ -526,6 +544,14 @@ Pane {
                 dialog.open()
             }
         }
+        function onWalletRenameError(message) {
+            var dialog = app.messageDialog.createObject(app, {
+                title: qsTr('Error'),
+                iconSource: Qt.resolvedUrl('../../icons/warning.png'),
+                text: message
+            })
+            dialog.open()
+        }
     }
 
     Connections {
@@ -596,6 +622,13 @@ Pane {
                 text: qsTr('Failed to update biometric authentication to new password: ') + error
             })
             err.open()
+        }
+    }
+
+    Component {
+        id: walletRenameDialog
+        WalletRenameDialog {
+            onClosed: destroy()
         }
     }
 

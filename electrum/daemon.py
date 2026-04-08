@@ -585,6 +585,21 @@ class Daemon(Logger):
             return True
         return False
 
+    def rename_wallet_file(self, old_path: str, new_path: str):
+        old_path = standardize_path(old_path)
+        new_path = standardize_path(new_path)
+        if os.path.exists(new_path):
+            raise ValueError("Wallet file already exists")
+        os.rename(old_path, new_path)
+        self.logger.debug(f'renamed wallet: {old_path} -> {new_path}')
+        recent = self.config.RECENTLY_OPEN_WALLET_FILES
+        if recent and old_path in recent:
+            recent.remove(old_path)
+            self.config.RECENTLY_OPEN_WALLET_FILES = recent
+            util.trigger_callback('recently_opened_wallets_update')
+        if self.config.CURRENT_WALLET == old_path:
+            self.config.CURRENT_WALLET = new_path
+
     def stop_wallet(self, path: str) -> bool:
         """Returns True iff a wallet was found."""
         assert util.get_running_loop() != util.get_asyncio_loop(), 'must not be called from asyncio thread'
