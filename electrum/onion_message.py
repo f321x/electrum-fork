@@ -337,7 +337,7 @@ def send_onion_message_to(
 
             payment_path_pubkeys = blinded_node_ids + blinded_path_blinded_ids
             hop_shared_secrets, _ = get_shared_secrets_along_route(payment_path_pubkeys, session_key)
-            encrypt_hops_recipient_data('onionmsg_tlv', hops_data, hop_shared_secrets)
+            encrypt_hops_recipient_data(hops_data, hop_shared_secrets)
             packet = new_onion_packet(payment_path_pubkeys, session_key, hops_data, onion_message=True)
             packet_b = packet.to_bytes()
 
@@ -377,7 +377,7 @@ def send_onion_message_to(
         payment_path_pubkeys = [edge.end_node for edge in path]
 
         hop_shared_secrets, blinded_node_ids = get_shared_secrets_along_route(payment_path_pubkeys, session_key)
-        encrypt_hops_recipient_data('onionmsg_tlv', hops_data, hop_shared_secrets)
+        encrypt_hops_recipient_data(hops_data, hop_shared_secrets)
         packet = new_onion_packet(blinded_node_ids, session_key, hops_data)
         packet_b = packet.to_bytes()
 
