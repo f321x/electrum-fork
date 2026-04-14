@@ -29,7 +29,7 @@ from functools import cached_property
 from typing import (Sequence, List, Tuple, NamedTuple, TYPE_CHECKING, Dict, Any, Optional, Union,
                     Mapping, Iterator)
 from enum import IntEnum
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, replace, asdict
 from types import MappingProxyType
 
 import electrum_ecc as ecc
@@ -44,8 +44,7 @@ from . import lnmsg
 from . import util
 
 if TYPE_CHECKING:
-    from .lnrouter import LNPaymentRoute
-
+    from .lnrouter import LNPaymentRoute, fee_for_edge_msat
 
 HOPS_DATA_SIZE = 1300      # also sometimes called routingInfoSize in bolt-04
 PER_HOP_HMAC_SIZE = 32
@@ -425,7 +424,7 @@ def calc_hops_data_for_payment(
         *,
         final_cltv_abs: int,
         total_msat: int,
-        payment_secret: bytes,
+        payment_secret: Optional[bytes],  # None if blinded legacy trampoline payment
 ) -> Tuple[List[OnionHopsDataSingle], int, int]:
     """Returns the hops_data to be used for constructing an onion packet,
     and the amount_msat and cltv_abs to be used on our immediate channel.
