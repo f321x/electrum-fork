@@ -39,6 +39,7 @@ class ToyNetwork:
         self.debug = True
         self.bhi_lock = asyncio.Lock()
         self.interface = None  # type: Interface | None
+        self.asmap = None
 
         self.relay_fee = None  # type: int | None  # sat/kbyte, set from the server on connect
         self.fee_estimates = FeeTimeEstimates()

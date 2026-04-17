@@ -1,7 +1,10 @@
 import asyncio
+from unittest import mock
+
 from aiorpcx import RPCError
 
 from electrum import util
+from electrum.asmap import ASMap
 from electrum.bitcoin import COIN
 from electrum.interface import ServerAddr, PaddedRSTransport
 from electrum.util import bfh
@@ -98,6 +101,22 @@ class TestInterface(ElectrumTestCase):
         interface = await self._start_iface_and_wait_for_sync()
         self.assertEqual(self._toyserver.cur_height, interface.tip)
         self.assertFalse(interface.got_disconnected.is_set())
+
+    async def test_bucket_based_on_ipaddress(self):
+        interface = await self._start_iface_and_wait_for_sync()
+
+        def bucket_of(ip: str) -> str:
+            interface._ipaddr_bucket = None
+            with mock.patch.object(interface, "ip_addr", return_value=ip):
+                return interface.bucket_based_on_ipaddress()
+
+        self.assertEqual("8.8.0.0/16", bucket_of("8.8.8.8"))
+        self.assertEqual("2001:4860:4860::/48", bucket_of("2001:4860:4860::8888"))
+        self.network.asmap = ASMap(bytes(3))  # maps every IP to AS1
+        self.assertEqual("AS1", bucket_of("8.8.8.8"))
+        self.assertEqual("AS1", bucket_of("2001:4860:4860::8888"))
+        self.assertEqual("10.1.0.0/16", bucket_of("10.1.2.3"))  # not globally routable
+        self.assertEqual("", bucket_of("127.0.0.1"))
 
     async def test_transaction_get(self):
         interface = await self._start_iface_and_wait_for_sync()

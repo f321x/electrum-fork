@@ -68,6 +68,7 @@ class MockNetwork(Logger):
         self.asyncio_loop = util.get_asyncio_loop()
         self.taskgroup = OldTaskGroup()
         self.proxy = None
+        self.asmap = None
         self.bhi_lock = asyncio.Lock()
         # for switch_lagging_interface
         self.auto_connect = True

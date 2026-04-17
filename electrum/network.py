@@ -48,6 +48,7 @@ from .util import (
 )
 from . import constants
 from . import dns_hacks
+from .asmap import ASMap, load_bundled_asmap
 from .transaction import Transaction
 from .blockchain import Blockchain, BlockchainManager
 from .interface import (
@@ -347,6 +348,8 @@ class Network(Logger, NetworkRetryManager[ServerAddr]):
 
         self.config = config
         self.daemon = daemon
+
+        self.asmap = load_bundled_asmap()  # type: Optional[ASMap]
 
         self.bc_mgr = BlockchainManager.from_config(self.config)
         self._blockchain_preferred_block = self.config.BLOCKCHAIN_PREFERRED_BLOCK  # type: Optional[Dict[str, Any]]
