@@ -49,6 +49,7 @@ from .util import (
 from . import constants
 from . import blockchain
 from . import dns_hacks
+from .asmap import ASMap, load_bundled_asmap
 from .transaction import Transaction
 from .blockchain import Blockchain
 from .interface import (
@@ -348,6 +349,10 @@ class Network(Logger, NetworkRetryManager[ServerAddr]):
 
         self.config = config
         self.daemon = daemon
+
+        self.asmap: Optional[ASMap] = (
+            load_bundled_asmap() if self.config.NETWORK_USE_ASMAP else None
+        )
 
         blockchain.read_blockchains(self.config)
         blockchain.init_headers_file_for_best_chain()

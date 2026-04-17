@@ -79,6 +79,7 @@ class MockNetwork:
         self.debug = True
         self.bhi_lock = asyncio.Lock()
         self.interface = None  # type: Interface | None
+        self.asmap = None
 
     async def connection_down(self, interface: Interface):
         pass

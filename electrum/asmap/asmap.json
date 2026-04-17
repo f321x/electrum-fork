@@ -1,0 +1,10 @@
+{
+  "format_version": 1,
+  "filename": "asmap.dat",
+  "sha256": null,
+  "size": null,
+  "source_url": null,
+  "source_commit": null,
+  "generated_at": null,
+  "notes": "Placeholder. The actual asmap.dat and its matching metadata are produced by the release manager from upstream asmap.org tooling; see README.md."
+}

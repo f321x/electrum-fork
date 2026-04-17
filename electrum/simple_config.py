@@ -653,6 +653,7 @@ class SimpleConfig(Logger):
         #   Double that due to our JSON-RPC hex-encoding, plus overhead, that's 8+ MB.
     NETWORK_TIMEOUT = ConfigVar('network_timeout', default=None, type_=int)
     NETWORK_BOOKMARKED_SERVERS = ConfigVar('network_bookmarked_servers', default=None)
+    NETWORK_USE_ASMAP = ConfigVar('network_use_asmap', default=True, type_=bool)
 
     WALLET_MERGE_DUPLICATE_OUTPUTS = ConfigVar(
         'wallet_merge_duplicate_outputs', default=False, type_=bool,

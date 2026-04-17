@@ -74,6 +74,7 @@ if TYPE_CHECKING:
 ca_path = certifi.where()
 
 BUCKET_NAME_OF_ONION_SERVERS = 'onion'
+BUCKET_PREFIX_OF_ASN = 'AS'
 
 KNOWN_ELEC_PROTOCOL_TRANSPORTS = {'t', 's'}
 PREFERRED_NETWORK_PROTOCOL = 's'
@@ -1335,6 +1336,12 @@ class Interface(Logger):
                 return ''
             if ip_addr.is_loopback:  # localhost is exempt
                 return ''
+            # ASN bucket for globally routable IPs; private ranges fall through to /16,/48.
+            asmap = self.network.asmap if self.network else None
+            if asmap is not None and ip_addr.is_global:
+                asn = asmap.lookup_asn(ip_addr)
+                if asn is not None:
+                    return f"{BUCKET_PREFIX_OF_ASN}{asn}"
             if ip_addr.version == 4:
                 slash16 = IPv4Network(ip_addr).supernet(prefixlen_diff=32-16)
                 return str(slash16)

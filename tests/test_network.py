@@ -60,6 +60,7 @@ class MockNetwork:
         self.asyncio_loop = util.get_asyncio_loop()
         self.taskgroup = OldTaskGroup()
         self.proxy = None
+        self.asmap = None
 
 class MockInterface(Interface):
     def __init__(self, config: SimpleConfig):
