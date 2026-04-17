@@ -10,7 +10,7 @@ from electrum_ecc import ECPrivkey
 from electrum import segwit_addr, lnutil
 from electrum.bolt12 import (
     is_offer, bolt12_bech32_to_bytes, BOLT12Offer, BOLT12InvoiceRequest, BOLT12Invoice, extract_shared_fields,
-    BOLT12InvoicePathIDPayload
+    BOLT12InvoicePathIDPayload, Bolt12InvoiceError
 )
 from electrum.crypto import privkey_to_pubkey
 from electrum.lnmsg import UnknownMandatoryTLVRecordType, MsgInvalidSignature
@@ -408,6 +408,18 @@ class TestBolt12(ElectrumTestCase):
         self.assertEqual(decoded.quantity, invreq_quantity)
         self.assertEqual(decoded.payer_note, invreq_payer_note)
         self.assertEqual(decoded.description, offer_description)
+
+    def test_bolt12_invoice_error(self):
+        invoice_error_tlv = bfh("01015203086465616462656566050e616d6f756e7420746f6f206c6f77")
+        invoice_error = Bolt12InvoiceError.from_tlv(invoice_error_tlv)
+        invoice_error = invoice_error.to_tlv()
+        self.assertEqual(invoice_error, invoice_error_tlv)
+        invoice_error = Bolt12InvoiceError(
+            msg="amount too low",
+            erroneous_field=82,
+            suggested_value=b"deadbeef"
+        )
+        self.assertEqual(invoice_error.to_tlv(), invoice_error_tlv)
 
     def test_fallback_address(self):
         # invoice without fallback address
