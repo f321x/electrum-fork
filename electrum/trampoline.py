@@ -2,6 +2,7 @@ import io
 import os
 import random
 import dataclasses
+from fractions import Fraction
 from typing import Mapping, Tuple, Optional, List, Iterable, Sequence, Set, Any, TYPE_CHECKING
 from types import MappingProxyType
 
@@ -200,29 +201,74 @@ def _extend_trampoline_route(
             node_features=trampoline_features))
 
 
-def _allocate_fee_along_route(
-    route: List[TrampolineEdge],
-    *,
-    budget: PaymentFeeBudget,
-    trampoline_fee_level: int,
-) -> None:
+def get_trampoline_budget(trampoline_fee_level, budget_msat):
     # calculate budget_to_use, based on given max available "budget"
     if trampoline_fee_level == 0:
-        budget_to_use = 0
+        return 0
     else:
         assert trampoline_fee_level > 0
         MAX_LEVEL = 6
         if trampoline_fee_level > MAX_LEVEL:
             raise FeeBudgetExceeded("highest trampoline fee level reached")
-        budget_to_use = budget.fee_msat // (2 ** (MAX_LEVEL - trampoline_fee_level))
-    _logger.debug(f"_allocate_fee_along_route(). {trampoline_fee_level=}, {budget.fee_msat=}, {budget_to_use=}")
-    # replace placeholder fees
-    edges_to_update = [
-        edge for edge in route
-        if edge.fee_base_msat == PLACEHOLDER_FEE]
-    _logger.debug(f"_allocate_fee_along_route(): {len(edges_to_update)} edges")
-    for edge in edges_to_update:
-        edge.fee_base_msat = budget_to_use // len(edges_to_update)
+        return budget_msat // (2 ** (MAX_LEVEL - trampoline_fee_level))
+
+
+def _allocate_fee_budget_among_route(
+    route: Sequence[TrampolineEdge],
+    *,
+    budget: PaymentFeeBudget,
+    trampoline_fee_level: int,
+    amount_msat_for_dest: int,
+) -> None:
+    """
+    Assign trampoline base fee to PLACEHOLDER trampoline edges so the realized route fee stays
+    within the trampoline_fee_level's share of the payment budget.
+
+    Let x be the placeholder base fee we solve for (equal for every placeholder edge).
+    Walking the route from destination back to source, every quantity is a linear function of x:
+        edge_fee(x)   = edge_fee_const   + edge_fee_coeff   * x
+        amt_in(x)     = amt_in_const     + amt_in_coeff     * x   # amount entering the edge
+        total_fee(x)  = total_fee_const  + total_fee_coeff  * x   # sum of edge_fee over route
+    The constraint total_fee(x) <= usable_budget_msat gives
+        x = (usable_budget_msat - total_fee_const) / total_fee_coeff
+    which we floor to an integer msat.
+    """
+    usable_budget_msat = get_trampoline_budget(trampoline_fee_level, budget.fee_msat)
+    placeholder_edges = [e for e in route[1:] if e.fee_base_msat == PLACEHOLDER_FEE]
+    if not placeholder_edges:
+        return
+
+    amt_in_const = Fraction(amount_msat_for_dest)
+    amt_in_coeff = Fraction(0)
+    total_fee_const = Fraction(0)
+    total_fee_coeff = Fraction(0)
+    for edge in reversed(route[1:]):
+        if edge.fee_base_msat == PLACEHOLDER_FEE:
+            edge_fee_const = Fraction(0)
+            edge_fee_coeff = Fraction(1)
+        else:
+            edge_fee_const = edge.fee_base_msat + amt_in_const * edge.fee_proportional_millionths / 1_000_000
+            edge_fee_coeff = amt_in_coeff * edge.fee_proportional_millionths / 1_000_000
+
+        amt_in_const += edge_fee_const
+        amt_in_coeff += edge_fee_coeff
+
+        total_fee_const += edge_fee_const
+        total_fee_coeff += edge_fee_coeff
+
+    budget_residual = Fraction(usable_budget_msat) - total_fee_const
+    if budget_residual <= 0 or total_fee_coeff <= 0:
+        placeholder_fee = 0
+    else:
+        placeholder_fee_exact = budget_residual / total_fee_coeff
+        placeholder_fee = placeholder_fee_exact.numerator // placeholder_fee_exact.denominator  # floor
+    _logger.debug(
+        f"_allocate_fee_budget_among_route(): {usable_budget_msat=}, "
+        f"total_fee_const={float(total_fee_const):.2f}, "
+        f"total_fee_coeff={float(total_fee_coeff):.4f}, "
+        f"placeholder_fee={placeholder_fee}, placeholders={len(placeholder_edges)}")
+    for edge in placeholder_edges:
+        edge.fee_base_msat = placeholder_fee
         edge.fee_proportional_millionths = 0
 
 
@@ -305,7 +351,12 @@ def create_trampoline_route(
         _extend_trampoline_route(route, end_node=invoice_pubkey)
 
     # replace placeholder fees in route
-    _allocate_fee_along_route(route, budget=budget, trampoline_fee_level=trampoline_fee_level)
+    _allocate_fee_budget_among_route(
+        route,
+        budget=budget,
+        trampoline_fee_level=trampoline_fee_level,
+        amount_msat_for_dest=amount_msat,
+    )
 
     # check that we can pay amount and fees
     if not is_route_within_budget(
