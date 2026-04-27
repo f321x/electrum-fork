@@ -23,6 +23,10 @@ Pane {
         width: parent.width
         height: parent.height
         boundsBehavior: Flickable.StopAtBounds
+        reuseItems: true
+        property bool dragScrolling: vdragscroll.drag.active
+        // keeps a buffer of delegate items outside the view, this makes normal scrolling (flicking) smoother
+        cacheBuffer: dragScrolling ? 0 : 1000
 
         model: visualModel
 
