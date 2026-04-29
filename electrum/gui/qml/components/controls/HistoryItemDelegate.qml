@@ -168,4 +168,15 @@ Item {
         function onEnabledUpdated() { fiatLabel.updateText() }
     }
 
+    // visible/cached delegates don't go through the onPooled/onReused cycle when the wallet
+    // (and thus the underlying model) is swapped, so refresh the imperatively-set labels here
+    Connections {
+        target: Daemon
+        function onWalletLoaded() {
+            delegate.pooled = false
+            valueLabel.updateText()
+            fiatLabel.updateText()
+        }
+    }
+
 }
