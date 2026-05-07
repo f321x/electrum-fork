@@ -69,6 +69,7 @@ class QEWallet(AuthMixin, QObject, QtEventListener):
     paymentAuthRejected = pyqtSignal()
     paymentSucceeded = pyqtSignal([str], arguments=['key'])
     paymentFailed = pyqtSignal([str, str], arguments=['key', 'reason'])
+    lnurlSuccessAction = pyqtSignal(['QVariant'], arguments=['action'])
     requestNewPassword = pyqtSignal()
     broadcastSucceeded = pyqtSignal([str], arguments=['txid'])
     broadcastFailed = pyqtSignal([str, str, str], arguments=['txid', 'code', 'reason'])
@@ -249,6 +250,15 @@ class QEWallet(AuthMixin, QObject, QtEventListener):
         if wallet == self.wallet:
             self.paymentSucceeded.emit(key)
             self.historyModel.initModel(True)  # TODO: be less dramatic
+            action = self.wallet.lnworker.get_lnurl_success_action(key) if self.wallet.lnworker else None
+            if action is not None:
+                payload = {'tag': action.tag}
+                if action.tag == 'message':
+                    payload['message'] = action.message
+                elif action.tag == 'url':
+                    payload['description'] = action.description
+                    payload['url'] = action.url
+                self.lnurlSuccessAction.emit(payload)
 
     @event_listener
     def on_event_payment_failed(self, wallet, key, reason):

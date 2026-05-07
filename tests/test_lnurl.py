@@ -102,3 +102,124 @@ class TestLnurl(TestCase):
 
         with self.assertRaises(lnurl.LNURLError):
             lnurl._parse_lnurl3_response(bad_amounts_response)
+
+    def test_parse_lnurl6_success_action(self):
+        callback_url = 'https://service.io/lnurl/cb?session=1'
+
+        # no successAction => None
+        self.assertIsNone(lnurl.parse_lnurl6_success_action({'pr': 'lnbc...'}, callback_url))
+
+        # valid 'message'
+        result = lnurl.parse_lnurl6_success_action(
+            {'successAction': {'tag': 'message', 'message': 'Thanks!'}},
+            callback_url)
+        self.assertEqual('message', result.tag)
+        self.assertEqual('Thanks!', result.message)
+        self.assertIsNone(result.url)
+
+        # message too long
+        with self.assertRaises(lnurl.LNURLError):
+            lnurl.parse_lnurl6_success_action(
+                {'successAction': {'tag': 'message', 'message': 'x' * 145}},
+                callback_url)
+
+        # message field missing
+        with self.assertRaises(lnurl.LNURLError):
+            lnurl.parse_lnurl6_success_action(
+                {'successAction': {'tag': 'message'}},
+                callback_url)
+
+        # message field wrong type
+        with self.assertRaises(lnurl.LNURLError):
+            lnurl.parse_lnurl6_success_action(
+                {'successAction': {'tag': 'message', 'message': 123}},
+                callback_url)
+
+        # valid 'url' with matching netloc
+        result = lnurl.parse_lnurl6_success_action(
+            {'successAction': {
+                'tag': 'url',
+                'description': 'Your order',
+                'url': 'https://service.io/order/42',
+            }},
+            callback_url)
+        self.assertEqual('url', result.tag)
+        self.assertEqual('Your order', result.description)
+        self.assertEqual('https://service.io/order/42', result.url)
+        self.assertIsNone(result.message)
+
+        # url with mismatched netloc
+        with self.assertRaises(lnurl.LNURLError):
+            lnurl.parse_lnurl6_success_action(
+                {'successAction': {
+                    'tag': 'url',
+                    'description': 'Phish',
+                    'url': 'https://attacker.example/x',
+                }},
+                callback_url)
+
+        # url with http:// scheme
+        with self.assertRaises(lnurl.LNURLError):
+            lnurl.parse_lnurl6_success_action(
+                {'successAction': {
+                    'tag': 'url',
+                    'description': 'Insecure',
+                    'url': 'http://service.io/order/42',
+                }},
+                callback_url)
+
+        # description too long
+        with self.assertRaises(lnurl.LNURLError):
+            lnurl.parse_lnurl6_success_action(
+                {'successAction': {
+                    'tag': 'url',
+                    'description': 'x' * 145,
+                    'url': 'https://service.io/order/42',
+                }},
+                callback_url)
+
+        # missing description
+        with self.assertRaises(lnurl.LNURLError):
+            lnurl.parse_lnurl6_success_action(
+                {'successAction': {
+                    'tag': 'url',
+                    'url': 'https://service.io/order/42',
+                }},
+                callback_url)
+
+        # missing url
+        with self.assertRaises(lnurl.LNURLError):
+            lnurl.parse_lnurl6_success_action(
+                {'successAction': {
+                    'tag': 'url',
+                    'description': 'Order',
+                }},
+                callback_url)
+
+        # unknown tag (e.g. aes from lud-10) => reject
+        with self.assertRaises(lnurl.LNURLError):
+            lnurl.parse_lnurl6_success_action(
+                {'successAction': {
+                    'tag': 'aes',
+                    'description': 'Encrypted',
+                    'ciphertext': 'xx',
+                    'iv': 'yy',
+                }},
+                callback_url)
+
+        # successAction not an object
+        with self.assertRaises(lnurl.LNURLError):
+            lnurl.parse_lnurl6_success_action(
+                {'successAction': 'not a dict'},
+                callback_url)
+
+        # callback URL with .onion: domain match works
+        onion_cb = 'http://servicexyzabcdefg.onion/lnurl/cb?session=1'
+        result = lnurl.parse_lnurl6_success_action(
+            {'successAction': {
+                'tag': 'url',
+                'description': 'Ok',
+                'url': 'http://servicexyzabcdefg.onion/order/42',
+            }},
+            onion_cb)
+        self.assertEqual('url', result.tag)

@@ -16,7 +16,8 @@ from .util import get_asyncio_loop, log_exceptions
 from .transaction import PartialTxOutput
 from .lnurl import (decode_lnurl, request_lnurl, callback_lnurl, LNURLError,
                     lightning_address_to_url, try_resolve_lnurlpay, LNURL6Data,
-                    LNURL3Data, LNURLData, SUPPORTED_LNURL_SCHEMES)
+                    LNURL3Data, LNURLData, LNURL6SuccessAction,
+                    parse_lnurl6_success_action, SUPPORTED_LNURL_SCHEMES)
 from .bitcoin import opcodes, construct_script
 from .bolt11 import BOLT11InvoiceException
 from .lnutil import IncompatibleOrInsaneFeatures
@@ -144,6 +145,7 @@ class PaymentIdentifier(Logger):
         #
         self.lnurl = None  # type: Optional[str]
         self.lnurl_data = None # type: Optional[LNURLData]
+        self.lnurl_success_action = None  # type: Optional[LNURL6SuccessAction]
 
         self.parse(text)
 
@@ -407,12 +409,22 @@ class PaymentIdentifier(Logger):
                 self.set_state(PaymentIdentifierState.ERROR)
                 return
 
+            try:
+                success_action = parse_lnurl6_success_action(
+                    invoice_data, self.lnurl_data.callback_url)
+            except LNURLError as e:
+                # lud-9: reject the payment if successAction is malformed/unsupported
+                self.error = f"LNURL successAction rejected: {e}"
+                self.set_state(PaymentIdentifierState.ERROR)
+                return
+
             bolt11_invoice = invoice_data.get('pr')
             invoice = Invoice.from_bech32(bolt11_invoice)
             if invoice.get_amount_sat() != amount_sat:
                 raise Exception("lnurl returned invoice with wrong amount")
             # this will change what is returned by get_fields_for_GUI
             self.bolt11 = invoice
+            self.lnurl_success_action = success_action
             self.set_state(PaymentIdentifierState.AVAILABLE)
         except Exception as e:
             self.error = str(e)

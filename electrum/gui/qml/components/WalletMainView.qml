@@ -500,6 +500,12 @@ Item {
             })
             dialog.open()
         }
+        function onLnurlSuccessAction(action) {
+            var dialog = lnurlSuccessActionDialog.createObject(app, {
+                actionData: action
+            })
+            dialog.open()
+        }
         function onImportChannelBackupFailed(message) {
             var dialog = app.messageDialog.createObject(app, {
                 title: qsTr('Error'),
@@ -731,6 +737,16 @@ Item {
     Component {
         id: lnurlPayDialog
         LnurlPayRequestDialog {
+            width: parent.width * 0.9
+            anchors.centerIn: parent
+
+            onClosed: destroy()
+        }
+    }
+
+    Component {
+        id: lnurlSuccessActionDialog
+        LnurlSuccessActionDialog {
             width: parent.width * 0.9
             anchors.centerIn: parent
 

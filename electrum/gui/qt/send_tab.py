@@ -565,6 +565,9 @@ class SendTab(QWidget, MessageBoxMixin, Logger):
         invoice = pi.bolt11
         self.pending_invoice = invoice
         self.logger.debug(f'after finalize invoice: {invoice!r}')
+        if pi.lnurl_success_action is not None and self.wallet.lnworker:
+            self.wallet.lnworker.register_lnurl_success_action(
+                invoice.rhash, pi.lnurl_success_action)
         self.do_pay_invoice(invoice)
 
     def do_pay_or_get_invoice(self):

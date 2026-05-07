@@ -118,6 +118,18 @@ class LNURL3Data(NamedTuple):
 LNURLData = LNURL6Data | LNURL3Data
 
 
+# successAction (lud-9)
+# https://github.com/lnurl/luds/blob/luds/09.md
+class LNURL6SuccessAction(NamedTuple):
+    tag: str  # 'message' or 'url'
+    message: Optional[str] = None      # set when tag == 'message'
+    description: Optional[str] = None  # set when tag == 'url'
+    url: Optional[str] = None          # set when tag == 'url'
+
+
+_LNURL6_SUCCESS_ACTION_MAX_LEN = 144
+
+
 async def _request_lnurl(url: str) -> dict:
     """Requests payment data from a lnurl."""
     if not _is_url_safe_enough_for_lnurl(url):
@@ -196,6 +208,50 @@ def _parse_lnurl3_response(lnurl_response: dict) -> LNURL3Data:
         min_withdrawable_sat=min_withdrawable_sat,
         max_withdrawable_sat=max_withdrawable_sat,
     )
+
+
+def parse_lnurl6_success_action(
+    callback_response: dict,
+    callback_url: str,
+) -> Optional[LNURL6SuccessAction]:
+    """Parse the optional successAction from a lud-6 callback response (lud-9).
+
+    Returns None when no successAction is present. Raises LNURLError when an
+    action is present but malformed or uses an unsupported tag — per LUD-09 the
+    wallet must reject the payment in that case.
+    """
+    raw = callback_response.get('successAction')
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise LNURLError(f"Malformed successAction (not an object): {raw!r}")
+    tag = raw.get('tag')
+    if tag == 'message':
+        message = raw.get('message')
+        if not isinstance(message, str):
+            raise LNURLError("successAction 'message' field is missing or not a string")
+        if len(message) > _LNURL6_SUCCESS_ACTION_MAX_LEN:
+            raise LNURLError(
+                f"successAction message too long ({len(message)} > {_LNURL6_SUCCESS_ACTION_MAX_LEN})")
+        return LNURL6SuccessAction(tag='message', message=message)
+    if tag == 'url':
+        description = raw.get('description')
+        url = raw.get('url')
+        if not isinstance(description, str):
+            raise LNURLError("successAction 'description' field is missing or not a string")
+        if len(description) > _LNURL6_SUCCESS_ACTION_MAX_LEN:
+            raise LNURLError(
+                f"successAction description too long ({len(description)} > {_LNURL6_SUCCESS_ACTION_MAX_LEN})")
+        if not isinstance(url, str):
+            raise LNURLError("successAction 'url' field is missing or not a string")
+        if not _is_url_safe_enough_for_lnurl(url):
+            raise LNURLError(
+                f"successAction url is not safe (must use https or .onion): {url[:32]}...")
+        if urllib.parse.urlparse(url).netloc != urllib.parse.urlparse(callback_url).netloc:
+            # spec: "URL domain must match the callback domain"
+            raise LNURLError("successAction url domain does not match callback domain")
+        return LNURL6SuccessAction(tag='url', description=description, url=url)
+    raise LNURLError(f"Unsupported successAction tag: {tag!r}")
 
 
 async def request_lnurl(url: str) -> LNURLData:

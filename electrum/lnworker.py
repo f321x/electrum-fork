@@ -85,6 +85,7 @@ from .lnrouter import (
     RouteEdge, LNPaymentRoute, LNPaymentPath, is_route_within_budget, NoChannelPolicy,
     LNPathInconsistent, fee_for_edge_msat,
 )
+from .lnurl import LNURL6SuccessAction
 from .lnwatcher import LNWatcher
 from .submarine_swaps import SwapManager
 from .mpp_split import suggest_splits, SplitConfigRating
@@ -1034,6 +1035,9 @@ class LNWallet(Logger):
         self._bolt11_cache = {}
         # note: this sweep_address is only used as fallback; as it might result in address-reuse
         self.logs = defaultdict(list)  # type: Dict[str, List[HtlcLog]]  # key is RHASH  # (not persisted)
+        # lud-9 successAction received from lnurl-pay callbacks, keyed by payment_hash hex.
+        # populated at lnurl-pay finalize time, popped when the payment_succeeded event fires (not persisted)
+        self._pending_lnurl_success_actions = {}  # type: Dict[str, LNURL6SuccessAction]
         # used in tests
         self.enable_htlc_settle = True
         self.enable_htlc_forwarding = True
@@ -3076,6 +3080,12 @@ class LNWallet(Logger):
         if status == PR_UNPAID and invoice_id in self.logs:
             status = PR_FAILED
         return status
+
+    def register_lnurl_success_action(self, payment_hash_hex: str, action: LNURL6SuccessAction) -> None:
+        self._pending_lnurl_success_actions[payment_hash_hex] = action
+
+    def get_lnurl_success_action(self, payment_hash_hex: str) -> Optional[LNURL6SuccessAction]:
+        return self._pending_lnurl_success_actions.pop(payment_hash_hex, None)
 
     def set_invoice_status(self, key: str, status: int) -> None:
         if status == PR_INFLIGHT:

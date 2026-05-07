@@ -623,6 +623,9 @@ class QEInvoiceParser(QEInvoice):
                 else:
                     self.lnurlError.emit('lnurl', pi.get_error())
             else:
+                if pi.lnurl_success_action is not None:
+                    self._wallet.wallet.lnworker.register_lnurl_success_action(
+                        pi.bolt11.rhash, pi.lnurl_success_action)
                 self.on_lnurl_invoice(self.amountOverride.satsInt, pi.bolt11)
 
         self._busy = True

@@ -1400,6 +1400,27 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, Logger, QtEventListener):
         description = self.wallet.get_label_for_rhash(key)
         self.notify(_('Payment sent') + '\n\n' + description)
         self.need_update.set()
+        if self.wallet.lnworker:
+            action = self.wallet.lnworker.get_lnurl_success_action(key)
+            if action is not None:
+                self._show_lnurl_success_action(action)
+
+    def _show_lnurl_success_action(self, action):
+        d = WindowModalDialog(self, _("Payment successful"))
+        vbox = QVBoxLayout(d)
+        if action.tag == 'message':
+            vbox.addWidget(WWLabel(action.message))
+            vbox.addLayout(Buttons(CloseButton(d)))
+            d.exec()
+        elif action.tag == 'url':
+            vbox.addWidget(WWLabel(action.description))
+            url_label = WWLabel(f'<a href="{action.url}">{action.url}</a>')
+            url_label.setOpenExternalLinks(False)
+            url_label.linkActivated.connect(lambda _u: webopen(action.url))
+            vbox.addWidget(url_label)
+            open_btn = EnterButton(_("Open URL"), lambda: webopen(action.url))
+            vbox.addLayout(Buttons(open_btn, CloseButton(d)))
+            d.exec()
 
     @qt_event_listener
     def on_event_payment_failed(self, wallet, key, reason):
