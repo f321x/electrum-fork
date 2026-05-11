@@ -30,7 +30,7 @@ import threading
 import json
 from typing import (
     NamedTuple, Optional, Sequence, List, Dict, Tuple, TYPE_CHECKING, Iterable, Set, Any, TypeVar,
-    Callable, Mapping,
+    Callable, Mapping, Awaitable,
 )
 import copy
 import functools
@@ -284,6 +284,9 @@ class NetworkParameters(NamedTuple):
 
 
 class BestEffortRequestFailed(NetworkException): pass
+
+
+class ResponseTooLarge(NetworkException): pass
 
 
 class UntrustedServerReturnedError(NetworkException):
@@ -1317,12 +1320,16 @@ class Network(Logger, NetworkRetryManager[ServerAddr]):
             body: bytes = None,
             json: dict = None,
             headers=None,
-            on_finish=None,
-            timeout=None,
+            on_finish: Optional[Callable[[ClientResponse], Awaitable[Any]]] = None,
+            timeout: Optional[int] = None,
+            max_response_size: int = 1_000_000,  # ~1mb, only enforced in default on_finish
     ):
         async def default_on_finish(resp: ClientResponse):
             resp.raise_for_status()
-            return await resp.text()
+            data = await resp.content.read(max_response_size + 1)
+            if len(data) > max_response_size:
+                raise ResponseTooLarge(f"response from {url} exceeds {max_response_size=} bytes")
+            return data.decode(resp.charset or 'utf-8')
         if headers is None:
             headers = {}
         if on_finish is None:

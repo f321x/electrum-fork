@@ -13,7 +13,7 @@ import aiohttp.client_exceptions
 from electrum import segwit_addr, util
 from electrum.segwit_addr import bech32_decode, Encoding, convertbits, bech32_encode
 from electrum.bolt11 import BOLT11DecodeException, BOLT11EncodeException
-from electrum.network import Network
+from electrum.network import Network, ResponseTooLarge
 from electrum.logging import get_logger
 from electrum.i18n import _
 
@@ -128,6 +128,8 @@ async def _request_lnurl(url: str) -> dict:
         raise LNURLError("LNURL server did not reply in time.") from e
     except aiohttp.client_exceptions.ClientError as e:
         raise LNURLError(f"Client error: {e}") from e
+    except ResponseTooLarge as e:
+        raise LNURLError(f"LNURL server sent too large response. Malicious server?") from e
     try:
         response = json.loads(response_raw)
     except json.JSONDecodeError:
@@ -239,6 +241,8 @@ async def callback_lnurl(url: str, params: dict) -> dict:
         raise LNURLError("LNURL server did not reply in time.") from e
     except aiohttp.client_exceptions.ClientError as e:
         raise LNURLError(f"Client error: {e}") from e
+    except ResponseTooLarge as e:
+        raise LNURLError(f"LNURL server sent too large response. Malicious server?") from e
     try:
         response = json.loads(response_raw)
         _logger.debug(f"lnurl response: {response}")
