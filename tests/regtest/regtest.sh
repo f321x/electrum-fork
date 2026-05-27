@@ -771,7 +771,6 @@ if [[ $1 == "watchtower" ]]; then
 fi
 
 if [[ $1 == "bolt12" ]]; then
-#    $carol enable_htlc_settle false
     bob_node=$($bob nodeid)
     wait_for_balance carol 1
     echo "alice and carol open channels with bob"
