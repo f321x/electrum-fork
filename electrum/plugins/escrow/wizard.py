@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Dict, Any
+from typing import TYPE_CHECKING
 from electrum.wizard import AbstractWizard, WizardViewState
 
 if TYPE_CHECKING:

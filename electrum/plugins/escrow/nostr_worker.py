@@ -12,14 +12,11 @@ import electrum_aionostr as aionostr
 from electrum_aionostr.key import PrivateKey
 from electrum_aionostr.event import Event as nEvent
 
-from electrum.keystore import MasterPublicKeyMixin
 from electrum.logging import Logger
 from electrum.util import (
     EventListener, make_aiohttp_proxy_connector, ca_path, event_listener, get_asyncio_loop,
     run_sync_function_on_asyncio_thread, wait_for2
 )
-from electrum.wallet import Abstract_Wallet
-from electrum.crypto import sha256
 from electrum import constants
 from .constants import (
     AGENT_STATUS_EVENT_KIND, AGENT_PROFILE_EVENT_KIND, AGENT_RELAY_LIST_METADATA_KIND,
@@ -35,6 +32,42 @@ if TYPE_CHECKING:
 NostrJob = Callable[['aionostr.Manager'], Coroutine[Any, Any, None]]
 
 class NostrJobID(str): pass
+
+
+class SeenEventIdCache:
+    """Bounded cache of nostr event ids, used to detect events that relays
+    (re)serve multiple times."""
+
+    def __init__(self, max_size: int):
+        self._max_size = max_size
+        self._seen: Set[str] = set()
+        self._order: Deque[str] = deque()
+
+    def seen_before(self, event_id: str) -> bool:
+        """Returns whether the event id was seen before, and remembers it."""
+        if event_id in self._seen:
+            return True
+        self._seen.add(event_id)
+        self._order.append(event_id)
+        if len(self._order) > self._max_size:
+            oldest = self._order.popleft()
+            self._seen.discard(oldest)
+        return False
+
+def get_net_tag() -> list:
+    return ['r', f"net:{constants.net.NET_NAME}"]
+
+def get_protocol_tag() -> list:
+    return ['d', f"electrum-escrow-plugin-{PROTOCOL_VERSION}"]
+
+def event_matches_net(event: 'nEvent') -> bool:
+    """Returns False if the event carries an 'r' net tag of a different bitcoin network."""
+    for tag in event.tags:
+        if len(tag) >= 2 and tag[0] == 'r' and tag[1].startswith("net:"):
+            if tag[1] != f"net:{constants.net.NET_NAME}":
+                return False
+    return True
+
 
 class EscrowNostrWorker(Logger, EventListener):
     def __init__(self, config: 'SimpleConfig', network: 'Network'):
@@ -66,7 +99,7 @@ class EscrowNostrWorker(Logger, EventListener):
 
         task.add_done_callback(done_callback)
         self.main_task = task
-        self.logger.debug(f"Nostr worker started")
+        self.logger.debug("Nostr worker started")
 
     def _add_job(self, job: NostrJob) -> NostrJobID:
         job_id = NostrJobID(secrets.token_hex(8))
@@ -152,7 +185,7 @@ class EscrowNostrWorker(Logger, EventListener):
                             t.cancel()
                         self.running_tasks.clear()
 
-            except Exception as e:
+            except Exception:
                 self.logger.exception("Error in nostr main loop")
                 await asyncio.sleep(1)
 
@@ -162,19 +195,7 @@ class EscrowNostrWorker(Logger, EventListener):
             if not self.main_task.cancelled():
                 self.main_task.cancel()
             self.main_task = None
-        self.logger.debug(f"Nostr worker stopped")
-
-    @staticmethod
-    def get_nostr_privkey_for_wallet(wallet: 'Abstract_Wallet', *, key_id: int = -1) -> PrivateKey:
-        """
-        This should only be used to store application data on nostr but not as identity.
-        Each trade should use a new keypair to prevent trades from getting linked to each other.
-        """
-        keystore = wallet.get_keystore()
-        assert isinstance(keystore, MasterPublicKeyMixin)
-        xpub = keystore.get_master_public_key()
-        privkey = sha256('nostr_escrow:' + xpub + str(key_id))
-        return PrivateKey(privkey)
+        self.logger.debug("Nostr worker stopped")
 
     @asynccontextmanager
     async def nostr_manager(self):
@@ -186,11 +207,8 @@ class EscrowNostrWorker(Logger, EventListener):
         manager_logger = self.logger.getChild('aionostr')
         manager_logger.setLevel("INFO")  # set to INFO because DEBUG is very spammy
 
-        relays = self.config.NOSTR_RELAYS
-        relay_list = relays.split(',') if relays else []
-
         async with aionostr.Manager(
-            relays=relay_list,
+            relays=self.config.get_nostr_relays(),
             private_key=secrets.token_hex(nbytes=32),
             ssl_context=ssl_context,
             proxy=proxy,
@@ -206,7 +224,7 @@ class EscrowNostrWorker(Logger, EventListener):
         self.main_task.cancel()
         self.main_task = None
         self.start()
-        self.logger.debug(f"Nostr worker restarted")
+        self.logger.debug("Nostr worker restarted")
 
     def fetch_events(self, query: dict, output_queue: asyncio.Queue) -> NostrJobID:
         async def _job(manager: 'aionostr.Manager'):
@@ -216,6 +234,9 @@ class EscrowNostrWorker(Logger, EventListener):
                     single_event=False,
                     only_stored=False,
                 ):
+                    if event.is_expired():
+                        # don't trust relays to drop expired events
+                        continue
                     await output_queue.put(event)
             finally:  # put None in the queue when the query ends in case the job gets canceled
                 asyncio.create_task(output_queue.put(None))
@@ -227,7 +248,7 @@ class EscrowNostrWorker(Logger, EventListener):
                 event_id = await manager.add_event(nostr_event)
                 self.logger.debug(f"nostr event {event_id} broadcast")
             except asyncio.TimeoutError:
-                self.logger.warn(f"broadcasting event {nostr_event.id} timed out")
+                self.logger.warning(f"broadcasting event {nostr_event.id} timed out")
         self._add_job(job=_job)
 
     @staticmethod
@@ -248,7 +269,7 @@ class EscrowNostrWorker(Logger, EventListener):
             pubkey=signing_key.public_key.hex(),
         )
         if expiration_ts:
-            event.add_expiration_tag(expiration_ts=expiration_ts)
+            event = event.add_expiration_tag(expiration_ts=expiration_ts)
         event = event.sign(signing_key.hex())
         return event
 
@@ -286,8 +307,8 @@ class EscrowNostrWorker(Logger, EventListener):
         encrypted_content = signing_key.encrypt_message(cleartext_msg, recipient_pubkey)
         tags = [
             ['p', recipient_pubkey],
-            ['r', f"net:{constants.net.NET_NAME}"],
-            ['d', f"electrum-escrow-plugin-{PROTOCOL_VERSION}"]
+            get_net_tag(),
+            get_protocol_tag(),
         ]
         if response_to_id:
             tags.append(['e', response_to_id])
@@ -326,6 +347,7 @@ class EscrowNostrWorker(Logger, EventListener):
     ) -> dict:
         """
         Sends an ephemeral request and awaits a response. Might raise TimeoutError.
+        Raises ValueError on a malformed response.
         """
         event = self.prepare_encrypted_ephemeral_message(
             cleartext_content=cleartext_content,
@@ -344,23 +366,29 @@ class EscrowNostrWorker(Logger, EventListener):
         response_queue = asyncio.Queue()
         job_id = self.fetch_events(query, response_queue)
         self._broadcast_event(event)
-        query_start = int(time.time())
+        deadline = time.monotonic() + timeout_sec
         while True:
             try:
                 if not job_id:
                     job_id = self.fetch_events(query, response_queue)
                 while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError()
                     try:
-                        resp_event = await wait_for2(response_queue.get(), timeout=timeout_sec)
+                        resp_event = await wait_for2(response_queue.get(), timeout=remaining)
                     except (asyncio.TimeoutError, TimeoutError):
                         raise TimeoutError()
 
                     if resp_event is None:
-                        timeout_sec -= int(time.time()) - query_start
-                        timeout_sec = max(timeout_sec, 0)
+                        # job got cancelled (e.g. proxy change), resubscribe in outer loop
                         break
 
                     if resp_event.pubkey != recipient_pubkey:
+                        continue
+
+                    # don't rely on relay-side filtering: check the response references our request
+                    if not any(len(t) >= 2 and t[0] == 'e' and t[1] == event.id for t in resp_event.tags):
                         continue
 
                     try:
@@ -383,7 +411,7 @@ class EscrowNostrWorker(Logger, EventListener):
             content=content,
             tags=tags,
             signing_key=signing_key,
-            expiration_ts=int(time.time()) + 2_600_000, # ~ 1m
+            expiration_ts=int(time.time()) + 2_600_000,  # ~1 month
         )
         self._broadcast_event(event)
 
@@ -393,7 +421,7 @@ class EscrowNostrWorker(Logger, EventListener):
             content=content,
             tags=tags,
             signing_key=signing_key,
-            expiration_ts=int(time.time()) + 7_700_000, # ~ 3m
+            expiration_ts=int(time.time()) + 7_700_000,  # ~3 months
         )
         self._broadcast_event(event)
 
@@ -404,6 +432,6 @@ class EscrowNostrWorker(Logger, EventListener):
             content='',
             tags=tags,
             signing_key=signing_key,
-            expiration_ts=int(time.time()) + 7_700_000, # ~ 3m
+            expiration_ts=int(time.time()) + 7_700_000,  # ~3 months
         )
         self._broadcast_event(event)
