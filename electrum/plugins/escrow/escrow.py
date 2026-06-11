@@ -1,7 +1,9 @@
 from typing import Optional, TYPE_CHECKING, Dict, Type
 from enum import Enum
 
+from electrum.i18n import _
 from electrum.plugin import BasePlugin, hook
+from electrum.util import UserFacingException
 
 from .nostr_worker import EscrowNostrWorker
 from .agent import EscrowAgent
@@ -29,15 +31,15 @@ class EscrowPlugin(BasePlugin):
 
     def __init__(self, parent, config: 'SimpleConfig', name):
         BasePlugin.__init__(self, parent, config, name)
-        self.wallets = {}  # type: Dict[Abstract_Wallet, EscrowWorker]
+        self.wallets: Dict['Abstract_Wallet', 'EscrowWorker'] = {}
         self.config = config
-        self.nostr_worker = None  # type: Optional[EscrowNostrWorker]
-        self.logger.debug(f"Escrow plugin created")
+        self.nostr_worker: Optional[EscrowNostrWorker] = None
+        self.logger.debug("Escrow plugin created")
 
     def is_available(self) -> bool:
         network_available = not self.config.NETWORK_OFFLINE
         if not network_available:
-            self.logger.warning(f"Escrow Plugin unavailable: no network")
+            self.logger.warning("Escrow Plugin unavailable: no network")
         return network_available
 
     @hook
@@ -48,18 +50,25 @@ class EscrowPlugin(BasePlugin):
         if wallet in self.wallets:
             return  # already loaded
 
+        if wallet.network is None:
+            self.logger.warning("not loading wallet, no network available")
+            return
+
         if not self.nostr_worker:
             # create shared nostr worker for all wallets
             self.nostr_worker = EscrowNostrWorker(self.config, wallet.network)
             self.nostr_worker.start()
 
-        if self.is_escrow_agent(wallet):
+        if self.is_escrow_agent(wallet) and wallet.has_lightning():
             worker = EscrowAgent.create(
                 wallet,
                 self.nostr_worker,
                 self._get_storage(wallet=wallet, purpose=StoragePurpose.AGENT_DATA),
             )
         else:
+            if self.is_escrow_agent(wallet):
+                self.logger.warning("wallet is flagged as escrow agent but has no "
+                                    "lightning support, falling back to client mode")
             worker = EscrowClient.create(
                 wallet,
                 self.nostr_worker,
@@ -79,15 +88,35 @@ class EscrowPlugin(BasePlugin):
                 self.nostr_worker.stop()
                 self.nostr_worker = None
 
-    def is_escrow_agent(self, wallet: 'Abstract_Wallet') -> Optional[bool]:
-        """Is stored in wallet db as the user might is agent in one wallet and user in another wallet"""
+    def on_close(self):
+        """Called when the plugin gets disabled."""
+        for worker in self.wallets.values():
+            worker.stop()
+        self.wallets.clear()
+        if self.nostr_worker:
+            self.nostr_worker.stop()
+            self.nostr_worker = None
+
+    def is_escrow_agent(self, wallet: 'Abstract_Wallet') -> bool:
+        """Is stored in wallet db as the user might be agent in one wallet and user in another wallet"""
         storage = self.get_storage(wallet)
-        return storage.get('is_escrow_agent', False)
+        return bool(storage.get('is_escrow_agent', False))
+
+    def has_agent_worker(self, wallet: 'Abstract_Wallet') -> bool:
+        """Whether the wallet actually runs as escrow agent. May differ from is_escrow_agent
+        e.g. when the wallet is flagged as agent but has no lightning support."""
+        return isinstance(self.wallets.get(wallet), EscrowAgent)
 
     def set_escrow_agent_mode(self, *, enabled: bool, wallet: 'Abstract_Wallet'):
+        if enabled and not wallet.has_lightning():
+            raise UserFacingException(
+                _("Acting as escrow agent requires a wallet with Lightning support."))
+        if wallet not in self.wallets:
+            raise UserFacingException(_("Wallet is not loaded in the escrow plugin."))
         storage = self.get_storage(wallet)
         self.wallets[wallet].stop()
         storage['is_escrow_agent'] = enabled
+        wallet.save_db()
         if enabled:
             self.wallets[wallet] = EscrowAgent.create(
                 wallet,
