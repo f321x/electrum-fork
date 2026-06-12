@@ -56,3 +56,56 @@ class TestConsole(QETestCase):
         c = self._console()
         c.runCommand('print("a" * 300000)')
         self.assertLessEqual(len(c.output), QEConsole.MAX_OUTPUT_SIZE)
+
+    @qt_test
+    def test_multiline_construct(self):
+        c = self._console()
+        c.runCommand('for i in range(3):')
+        self.assertTrue(c.inConstruct)
+        self.assertEqual(c.prompt, '... ')
+        c.runCommand('    print(i)')
+        self.assertTrue(c.inConstruct)
+        c.runCommand('')
+        self.assertFalse(c.inConstruct)
+        self.assertEqual(c.prompt, '>>> ')
+        self.assertIn('0\n1\n2\n', c.output)
+
+    @qt_test
+    def test_keyboard_interrupt_aborts_construct(self):
+        c = self._console()
+        c.runCommand('for i in range(3):')
+        self.assertTrue(c.inConstruct)
+        c.keyboardInterrupt()
+        self.assertFalse(c.inConstruct)
+        self.assertIn('KeyboardInterrupt', c.output)
+        # construct must not execute afterwards
+        c.runCommand('"done"')
+        self.assertIn("'done'\n", c.output)
+
+    @qt_test
+    def test_history_navigation(self):
+        c = self._console()
+        c.runCommand('1')
+        c.runCommand('2')
+        self.assertEqual(c.getPrevHistoryEntry(), '2')
+        self.assertEqual(c.getPrevHistoryEntry(), '1')
+        self.assertEqual(c.getPrevHistoryEntry(), '1')  # clamps at oldest
+        self.assertEqual(c.getNextHistoryEntry(), '2')
+        self.assertEqual(c.getNextHistoryEntry(), '')   # past newest
+
+    @qt_test
+    def test_history_dedup_and_cap(self):
+        c = self._console()
+        c.runCommand('1')
+        c.runCommand('1')  # consecutive duplicate not recorded
+        self.assertEqual(len(c._history), 1)
+        for i in range(QEConsole.MAX_HISTORY_SIZE + 10):
+            c.runCommand(str(i))
+        self.assertEqual(len(c._history), QEConsole.MAX_HISTORY_SIZE)
+
+    @qt_test
+    def test_clear(self):
+        c = self._console()
+        c.runCommand('1')
+        c.clear()
+        self.assertEqual(c.output, '')
