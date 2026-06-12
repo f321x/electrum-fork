@@ -20,6 +20,7 @@ Flickable {
     property string placeholderText
     property alias color: edit.color
     property alias topPadding: rootpane.topPadding
+    property alias cursorPosition: edit.cursorPosition
     readonly property bool anyActiveFocus: activeFocus || edit.activeFocus
 
     contentWidth: rootpane.width

@@ -996,6 +996,10 @@ class EscrowAgent(EscrowWorker, EventListener):
             return None
 
     def save_profile(self, profile_data: EscrowAgentProfile) -> None:
-        self.storage['profile'] = dataclasses.asdict(profile_data)
+        profile_dict = dataclasses.asdict(profile_data)
+        # apply the same validation customers apply on receive: an invalid stored
+        # profile would silently turn every later get_profile() into None
+        EscrowAgentProfile.from_remote_dict(dict(profile_dict))  # raises ValueError
+        self.storage['profile'] = profile_dict
         self.wallet.save_db()
         self.broadcast_profile_event(profile_data)

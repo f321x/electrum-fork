@@ -16,10 +16,7 @@ from PyQt6.QtWidgets import (
 from electrum.i18n import _
 from electrum.logging import Logger
 from electrum.plugin import hook
-from electrum.network import Network
-from electrum.util import (
-    make_aiohttp_session, UserFacingException, get_asyncio_loop,
-)
+from electrum.util import UserFacingException, get_asyncio_loop
 from electrum.gui.qt.util import (
     WindowModalDialog, Buttons, OkButton, CancelButton, CloseButton,
     read_QIcon_from_bytes, read_QPixmap_from_bytes, read_QIcon, HelpLabel,
@@ -32,11 +29,19 @@ from electrum.gui.qt.wizard.wizard import QEAbstractWizard, WizardComponent
 from electrum.wizard import WizardViewState
 from electrum.invoices import Invoice
 
+from .common_qt import (
+    fetch_url_bytes, format_fee_ppm, help_text, plugin_status_warning,
+    get_trade_validation_error, build_new_maker_trade,
+    maker_funding_narrative, taker_funding_narrative,
+    question_confirm_success, question_cancel, question_request_mediation,
+    msg_confirmation_sent, msg_cancellation_requested, msg_mediation_requested,
+    msg_payout_claim_submitted,
+)
 from .escrow import EscrowPlugin
 from .wizard import EscrowWizard
 from .agent import EscrowAgent, AgentEscrowTrade
 from .client import EscrowClient, ClientEscrowTrade
-from .escrow_worker import TradeContract, EscrowAgentProfile
+from .escrow_worker import EscrowAgentProfile
 from .constants import (
     MAX_TITLE_LEN_CHARS, MAX_CONTRACT_LEN_CHARS, MIN_TRADE_AMOUNT_SAT, MAX_AGENT_FEE_PPM,
     TradePaymentProtocol, TradePaymentDirection, TradeState,
@@ -46,37 +51,12 @@ if TYPE_CHECKING:
     from electrum.gui.qt.main_window import ElectrumWindow
     from electrum.wallet import Abstract_Wallet
 
-MAX_AVATAR_BYTES = 1024 * 1024  # don't fetch arbitrarily large profile pictures
-
-
-def fetch_url_bytes(url: str) -> Optional[bytes]:
-    network = Network.get_instance()
-    if not network:
-        return None
-    async def get_bytes():
-        async with make_aiohttp_session(network.proxy, timeout=20) as session:
-            async with session.get(url) as response:
-                if response.status != 200:
-                    return None
-                if response.content_length and response.content_length > MAX_AVATAR_BYTES:
-                    return None
-                data = await response.content.read(MAX_AVATAR_BYTES + 1)
-                if len(data) > MAX_AVATAR_BYTES:
-                    return None
-                return data
-    return network.run_from_another_thread(get_bytes())
-
-
 def run_coro_with_dialog(parent, message: str, coro, on_success, on_failure):
     """Runs a coroutine on the asyncio loop while showing a modal waiting dialog."""
     def task():
         fut = asyncio.run_coroutine_threadsafe(coro, get_asyncio_loop())
         return fut.result()
     WaitingDialog(parent, message, task, on_success, on_failure)
-
-
-def format_fee_ppm(fee_ppm: int) -> str:
-    return f"{fee_ppm / 10_000:g}%"
 
 
 class EscrowType(Enum):
@@ -197,31 +177,14 @@ class WCCreateTrade(WizardComponent):
         self.warning_label.setText(error or '')
 
     def _get_validation_error(self) -> Optional[str]:
-        amount = self.amount_e.get_amount()
-        if amount and amount < MIN_TRADE_AMOUNT_SAT:
-            return _("Trade amount too small. Minimal trade amount: {}").format(
-                self.wizard.main_window.format_amount_and_units(MIN_TRADE_AMOUNT_SAT))
-        if self.trade_payment_protocol == TradePaymentProtocol.BITCOIN_LIGHTNING:
-            return self._get_lightning_liquidity_error()
-        return None
-
-    def _get_lightning_liquidity_error(self) -> Optional[str]:
         assert self.trade_payment_protocol == TradePaymentProtocol.BITCOIN_LIGHTNING
-        if not self.wizard.main_window.wallet.has_lightning():
-            return _("Your wallet doesn't support the Lightning Network. Please use a wallet with Lightning Network support.")
-        can_send = self.wizard.main_window.wallet.lnworker.num_sats_can_send() or 0
-        if can_send < self.total_send_amount:
-            return _("You cannot send this amount with your Lightning channels. Please open a larger Lightning channel or "
-                      "do a submarine swap in the 'Channels' tab to increase your outgoing liquidity. "
-                      "You can send: {}").format(self.wizard.main_window.format_amount_and_units(can_send))
-        if self.payment_direction == TradePaymentDirection.RECEIVING:
-            # we will receive roughly the trade amount + bond refund as payout later
-            can_receive = self.wizard.main_window.wallet.lnworker.num_sats_can_receive() or 0
-            if can_receive < (self.amount_e.get_amount() or 0) + self.bond_amount_sat:
-                return _("You cannot receive the trade payout with your Lightning channels. Please do a "
-                      "submarine swap in the 'Channels' tab to increase your incoming liquidity. "
-                      "You can receive: {}").format(self.wizard.main_window.format_amount_and_units(can_receive))
-        return None
+        return get_trade_validation_error(
+            self.wizard.main_window.wallet,
+            trade_amount_sat=self.amount_e.get_amount(),
+            bond_sat=self.bond_amount_sat,
+            payment_direction=self.payment_direction,
+            fmt=self.wizard.main_window.format_amount_and_units,
+        )
 
     def on_event_channel(self):
         # called by the EscrowWizardDialog callback
@@ -545,27 +508,19 @@ class WCConfirmCreate(WizardComponent, Logger):
 
     def request_escrow(self):
         data = self.wizard_data
-
-        contract = TradeContract(
-            title=data['title'],
-            text=data['contract_text'],
-            trade_amount_sat=data['trade_amount_sat'],
-            bond_sat=data['bond_sat'],
-            agent_fee_ppm=data['agent_fee_ppm'],
-            maker_payment_direction=data['payment_direction'],
-            payment_protocol=data['payment_protocol'],
-            agent_pubkey=data['escrow_agent_pubkey'],
-        )
-
-        fallback_address = self.wallet.get_unused_address() or self.wallet.get_receiving_address()
+        assert data['payment_protocol'] == TradePaymentProtocol.BITCOIN_LIGHTNING
 
         worker = self.plugin.get_escrow_worker(self.wallet, worker_type=EscrowClient)
 
-        self.trade = ClientEscrowTrade(
-            state=TradeState.WAITING_FOR_TAKER,
-            contract=contract,
-            is_maker=True,
-            onchain_fallback_address=fallback_address,
+        self.trade = build_new_maker_trade(
+            self.wallet,
+            title=data['title'],
+            contract_text=data['contract_text'],
+            trade_amount_sat=data['trade_amount_sat'],
+            bond_sat=data['bond_sat'],
+            agent_fee_ppm=data['agent_fee_ppm'],
+            payment_direction=data['payment_direction'],
+            agent_pubkey=data['escrow_agent_pubkey'],
         )
 
         coro = worker.request_register_escrow(self.trade)
@@ -600,11 +555,7 @@ class WCConfirmCreate(WizardComponent, Logger):
             f"<b>{_('Bond')}:</b> {fmt(contract.bond_sat)}",
             f"<b>{_('Agent fee')}:</b> {format_fee_ppm(contract.agent_fee_ppm)} ({fmt(contract.agent_fee_sat())})",
         ]
-        if self.trade.payment_direction == TradePaymentDirection.SENDING:
-            details.append(_("You send the trade payment of {}.").format(fmt(contract.trade_amount_sat)))
-        else:
-            details.append(_("You lock a bond of {} and will receive {} when the trade succeeds.")
-                           .format(fmt(contract.bond_sat), fmt(contract.payout_amount_sat())))
+        details.append(maker_funding_narrative(self.trade, fmt))
 
         if self.funding_invoice is not None:
             self.info_label.setText(
@@ -882,15 +833,7 @@ class WCAcceptTrade(WizardComponent, Logger):
             f"<b>{_('Contract')}:</b><br>{html.escape(contract.text)}",
             "",
         ]
-        if self.trade.payment_direction == TradePaymentDirection.SENDING:
-            details.append(_("You pay the trade amount of {} to the escrow agent now. The counterparty "
-                             "receives it when both of you confirm the successful trade.")
-                           .format(fmt(contract.trade_amount_sat)))
-        else:
-            funding = contract.bond_sat
-            details.append(_("You lock a bond of {} with the escrow agent now. When both of you confirm "
-                             "the successful trade you receive {} (trade amount minus agent fee plus "
-                             "bond refund).").format(fmt(funding), fmt(contract.payout_amount_sat())))
+        details.append(taker_funding_narrative(self.trade, fmt))
 
         info_label = QLabel("<br>".join(details))
         info_label.setWordWrap(True)
@@ -932,12 +875,14 @@ class WCAcceptTrade(WizardComponent, Logger):
 
         self.accept_button.setEnabled(False)
         worker = self.plugin.get_escrow_worker(self.wallet, worker_type=EscrowClient)
+        saved_invoice = {}  # so the error path can remove the unpaid invoice again
 
         async def do_accept():
             # 1. Request accept from agent
             invoice = await worker.request_accept_escrow(self.trade, self.trade_id)
             # 2. Pay the funding invoice (if there is something to pay)
             if invoice is not None:
+                saved_invoice['invoice'] = invoice
                 self.wallet.save_invoice(invoice)
                 payment_success, log = await self.wallet.lnworker.pay_invoice(invoice)
                 if not payment_success:
@@ -951,6 +896,12 @@ class WCAcceptTrade(WizardComponent, Logger):
             self.wizard.accept()
 
         def on_failure(exc_info):
+            invoice = saved_invoice.get('invoice')
+            if invoice is not None:
+                try:
+                    self.wallet.delete_invoice(invoice.get_id())
+                except Exception:
+                    pass
             self.wizard.show_error(str(exc_info[1]))
             self.accept_button.setEnabled(True)
 
@@ -1166,6 +1117,11 @@ class EscrowAgentProfileDialog(WindowModalDialog, Logger):
 
         website_url = self.website_e.text().strip()
         if website_url and not website_url.startswith("https://"):
+            valid = False
+
+        # mirror the limits enforced when customers parse the profile
+        languages = [x.strip() for x in self.languages_e.text().split(',') if x.strip()]
+        if len(languages) > 20 or any(len(lang) > 20 for lang in languages):
             valid = False
 
         self.ok_button.setEnabled(valid)
@@ -1477,43 +1433,34 @@ class TradeDetailsDialog(WindowModalDialog, Logger):
         run_coro_with_dialog(self, waiting_msg, coro, on_success, on_failure)
 
     def _request_confirm(self):
-        if not self.question(_("Confirm that this trade completed successfully? "
-                               "Once both parties confirm, the agent pays out and "
-                               "this cannot be undone.")):
+        if not self.question(question_confirm_success()):
             return
         self._run_client_action(
             self._client_worker().request_collaborative_confirm(self.trade_id),
             _("Sending confirmation..."),
-            _("Confirmation sent."))
+            msg_confirmation_sent())
 
     def _request_cancel(self):
-        if self.trade.state == TradeState.WAITING_FOR_TAKER:
-            msg = _("Cancel this trade and get your funding back?")
-        else:
-            msg = _("Request to cancel this trade? The trade is cancelled and everyone "
-                    "gets their funds back once both parties request cancellation.")
-        if not self.question(msg):
+        if not self.question(question_cancel(self.trade.state)):
             return
         self._run_client_action(
             self._client_worker().request_collaborative_cancel(self.trade_id),
             _("Requesting cancellation..."),
-            _("Cancellation requested."))
+            msg_cancellation_requested())
 
     def _request_mediation(self):
-        if not self.question(_("Put this trade into mediation? You will have to contact the "
-                               "escrow agent out of band so they can decide the trade outcome. "
-                               "Check the agent profile for contact information.")):
+        if not self.question(question_request_mediation()):
             return
         self._run_client_action(
             self._client_worker().request_mediation(self.trade_id),
             _("Requesting mediation..."),
-            _("Mediation requested. Contact the agent to provide your evidence."))
+            msg_mediation_requested())
 
     def _request_claim(self):
         self._run_client_action(
             self._client_worker().request_claim_payout(self.trade_id),
             _("Claiming payout..."),
-            _("Payout claim submitted. The agent will now try to pay your invoice."))
+            msg_payout_claim_submitted())
 
     # ---------- agent actions ----------
 
@@ -1611,12 +1558,7 @@ class EscrowPluginDialog(WindowModalDialog, QtEventListener):
 
         # help button
         info_button = QPushButton(_("Help"))
-        info = _("The Trade Escrow plugin allows you to safely trade with strangers by using a trusted escrow agent as an intermediary. "
-                 "The agent takes custody of the funds until both participants are satisfied, or decides the outcome of the trade after reviewing evidence.")
-        warning = _("The escrow agent is fully trusted and can take your money. Only use escrow agents "
-                    "with a well-established reputation that you trust.")
-        info_msg = f"{info}\n\n{warning}"
-        info_button.clicked.connect(lambda: window.show_message(info_msg))
+        info_button.clicked.connect(lambda: window.show_message(help_text()))
         title_hbox.addWidget(info_button)
 
         # tools button
@@ -1685,28 +1627,8 @@ class EscrowPluginDialog(WindowModalDialog, QtEventListener):
         """
         Check if there is any issue that could cause the plugin to be unreliable and show a warning.
         """
-        self.show_notification(msg=None)
-        if len(self._plugin.config.get_nostr_relays()) < 3:
-            self.show_notification(
-                _("You have configured only a few Nostr relays. To ensure reliable operation, "
-                  "you should add more Nostr relays in the network settings."),
-                critical=True,
-            )
-            return
-        if not self._wallet.has_lightning():
-            self.show_notification(
-                _("This wallet has no Lightning support. Trading requires a wallet "
-                  "with Lightning enabled."),
-                critical=True,
-            )
-            return
-        worker = self._plugin.get_worker_for_wallet(self._wallet)
-        if isinstance(worker, EscrowAgent):
-            if not worker.get_profile():
-                self.show_notification(
-                    msg=_("Configure your Escrow Agent profile to become visible to other users."),
-                    critical=False,
-                )
+        msg, critical = plugin_status_warning(self._plugin, self._wallet)
+        self.show_notification(msg, critical=critical)
 
     def show_notification(self, msg: Optional[str], *, critical: bool = False):
         """
@@ -1832,7 +1754,11 @@ class EscrowPluginDialog(WindowModalDialog, QtEventListener):
         d = EscrowAgentProfileDialog(self.main_window, self._plugin, profile)
         if d.exec():
             new_profile = d.get_profile()
-            worker.save_profile(new_profile)
+            try:
+                worker.save_profile(new_profile)
+            except (ValueError, UserFacingException) as e:
+                self.show_error(_("Invalid profile: {}").format(e))
+                return
             self._trigger_update()
 
     def _create_trade(self):

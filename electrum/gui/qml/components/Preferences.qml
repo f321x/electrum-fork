@@ -197,6 +197,24 @@ Pane {
                         Layout.columnSpan: 2
                         Layout.fillWidth: true
                         spacing: 0
+                        Switch {
+                            id: tradeEscrow
+                            onCheckedChanged: {
+                                if (activeFocus)
+                                    AppController.setPluginEnabled('escrow', checked)
+                            }
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            text: qsTr('Trade Escrow')
+                            wrapMode: Text.Wrap
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.columnSpan: 2
+                        Layout.fillWidth: true
+                        spacing: 0
                         enabled: AppController.isAndroid()
                         Switch {
                             id: setMaxBrightnessOnQrDisplay
@@ -510,5 +528,6 @@ Pane {
         useRecoverableChannels.checked = Config.useRecoverableChannels
         syncLabels.checked = AppController.isPluginEnabled('labels')
         psbtNostr.checked = AppController.isPluginEnabled('psbt_nostr')
+        tradeEscrow.checked = AppController.isPluginEnabled('escrow')
     }
 }

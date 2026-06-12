@@ -3,7 +3,7 @@
   "fullname": "Trade Escrow Plugin",
   "description": "Trade anything safely with strangers by using a trusted intermediary as escrow agent.",
   "author": "f321x",
-  "available_for": ["qt"],
+  "available_for": ["qt", "qml"],
   "icon": "escrow-icon.png",
   "version": "0.0.1"
 }

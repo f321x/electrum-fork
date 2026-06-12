@@ -264,6 +264,36 @@ Item {
             currentIndex = -1
         }
 
+        // menu entries contributed by plugins, rebuilt on every open so that
+        // enabling/disabling a plugin at runtime is picked up
+        property var _pluginMenuItems: []
+        onAboutToShow: {
+            for (let i = 0; i < _pluginMenuItems.length; i++) {
+                menu.removeItem(_pluginMenuItems[i])
+                _pluginMenuItems[i].destroy()
+            }
+            _pluginMenuItems = []
+            var components = app.pluginsComponentsByName('wallet_menu_item')
+            if (!components.length)
+                return
+            // insert before the first separator (above 'Other wallets')
+            var insertIndex = menu.count
+            for (let i = 0; i < menu.count; i++) {
+                if (menu.itemAt(i) instanceof MenuSeparator) {
+                    insertIndex = i
+                    break
+                }
+            }
+            for (let i = 0; i < components.length; i++) {
+                var item = components[i].createObject(menu)
+                if (!item)
+                    continue
+                menu.insertItem(insertIndex + _pluginMenuItems.length, item)
+                _pluginMenuItems.push(item)
+            }
+            updateImplicitWidth()
+        }
+
         // determine widest element and store in implicitChildrenWidth
         function updateImplicitWidth() {
             for (let i = 0; i < menu.count; i++) {
