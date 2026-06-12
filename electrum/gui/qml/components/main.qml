@@ -755,6 +755,12 @@ ApplicationWindow
         }
         function onPluginLoaded(name) {
             console.log('plugin ' + name + ' loaded')
+            if (name in app.pluginobjects) {
+                // plugin was re-enabled: replace the loader, its bindings
+                // reference the previous (now closed) plugin instance
+                app.pluginobjects[name].destroy()
+                delete app.pluginobjects[name]
+            }
             var loader = AppController.plugin(name).loader
             if (loader == undefined)
                 return

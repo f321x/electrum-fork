@@ -337,6 +337,10 @@ class QEAppController(BaseCrashReporter, QObject):
             self._plugins.enable(plugin)
             # note: all enabled plugins will receive this hook:
             run_hook('init_qml', self._app)
+            if self._app_started:
+                # instantiate the plugin's QML loader component. At startup this
+                # is done for all enabled plugins in startup_finished().
+                self.pluginLoaded.emit(plugin)
         else:
             self._plugins.disable(plugin)
 
