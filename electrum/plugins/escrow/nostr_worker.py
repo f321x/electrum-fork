@@ -242,13 +242,20 @@ class EscrowNostrWorker(Logger, EventListener):
                 asyncio.create_task(output_queue.put(None))
         return self._add_job(job=_job)
 
-    def _broadcast_event(self, nostr_event: 'nEvent'):
+    def _broadcast_event(self, nostr_event: 'nEvent', on_result: Optional[Callable[[bool], None]] = None):
+        """Queues the event for broadcast. on_result is called with whether at least one
+        relay accepted the event (but not at all if the job gets dropped, e.g. on shutdown)."""
         async def _job(manager: 'aionostr.Manager'):
+            success = False
             try:
                 event_id = await manager.add_event(nostr_event)
                 self.logger.debug(f"nostr event {event_id} broadcast")
+                success = True
             except asyncio.TimeoutError:
                 self.logger.warning(f"broadcasting event {nostr_event.id} timed out")
+            finally:
+                if on_result:
+                    on_result(success)
         self._add_job(job=_job)
 
     @staticmethod
@@ -259,14 +266,17 @@ class EscrowNostrWorker(Logger, EventListener):
         tags: list,
         signing_key: PrivateKey,
         expiration_ts: Optional[int] = None,
+        created_at: Optional[int] = None,
     ) -> nEvent:
         if isinstance(content, dict):
             content = json.dumps(content)
+        optional_fields = {'created_at': created_at} if created_at is not None else {}
         event = nEvent(
             content=content,
             kind=kind,
             tags=tags,
             pubkey=signing_key.public_key.hex(),
+            **optional_fields,
         )
         if expiration_ts:
             event = event.add_expiration_tag(expiration_ts=expiration_ts)
@@ -404,6 +414,27 @@ class EscrowNostrWorker(Logger, EventListener):
                 if job_id:
                     self.cancel_job(job_id)
                     job_id = None
+
+    def broadcast_replaceable_event(
+        self,
+        *,
+        kind: int,
+        content: str,
+        d_tag: str,
+        signing_key: PrivateKey,
+        created_at: Optional[int] = None,
+        on_result: Optional[Callable[[bool], None]] = None,
+    ) -> None:
+        """Broadcasts a parameterized replaceable event (NIP-01): relays keep the
+        event with the newest created_at per (pubkey, kind, d tag)."""
+        event = self._prepare_event(
+            kind=kind,
+            content=content,
+            tags=[['d', d_tag]],
+            signing_key=signing_key,
+            created_at=created_at,
+        )
+        self._broadcast_event(event, on_result=on_result)
 
     def broadcast_agent_status_event(self, *, content: dict, tags: list, signing_key: PrivateKey) -> None:
         event = self._prepare_event(

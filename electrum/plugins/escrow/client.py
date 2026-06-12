@@ -1,5 +1,6 @@
 import asyncio
 import dataclasses
+import secrets
 import time
 import json
 from collections import defaultdict
@@ -451,7 +452,13 @@ class EscrowClient(EscrowWorker):
         Returns a new private key to be used for the next trade.
         Uses a persistent counter so keys are never reused, even for abandoned trades.
         """
-        key_id = self.storage.get('trade_key_counter', 0)
+        key_id = self.storage.get('trade_key_counter')
+        if key_id is None:
+            # start at a random offset: a wallet that trades before its old state
+            # backup was recovered from nostr (or while it is unrecoverable) must not
+            # reuse the key ids of its previous life, otherwise the merged states
+            # could contain different trades sharing a trade key
+            key_id = secrets.randbelow(0x4000_0000)
         self.storage['trade_key_counter'] = key_id + 1
         self.wallet.save_db()
         privkey = self.get_nostr_privkey_for_wallet(self.wallet, key_id=key_id)
