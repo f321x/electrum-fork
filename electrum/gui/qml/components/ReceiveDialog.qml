@@ -26,6 +26,34 @@ ElDialog {
 
     padding: 0
 
+    // ask for notification permission while still in the foreground, so the
+    // keep-alive notification can be shown if the user backgrounds the app
+    on_Bolt11Changed: {
+        if (_bolt11)
+            AppController.requestNotificationsPermission()
+    }
+
+    onClosed: AppController.stopLnKeepAliveService()
+
+    // when the app is backgrounded while displaying a lightning invoice, start
+    // an android foreground service to keep the process alive, so the payment
+    // can still be received. note: the Qt.ApplicationSuspended handler runs just
+    // before the Qt event loop is suspended.
+    Connections {
+        target: Qt.application
+        enabled: AppController.isAndroid()
+        function onStateChanged() {
+            if (Qt.application.state == Qt.ApplicationSuspended) {
+                if (dialog._bolt11) {
+                    AppController.startLnKeepAliveService(dialog.key, request.expiration,
+                        qsTr('Waiting to receive lightning payment'))
+                }
+            } else if (Qt.application.state == Qt.ApplicationActive) {
+                AppController.stopLnKeepAliveService()
+            }
+        }
+    }
+
     function getPaidTxid() {
         return request.paidTxid
     }

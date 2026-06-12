@@ -101,7 +101,7 @@ fullscreen = False
 #
 
 # (list) Permissions
-android.permissions = INTERNET, CAMERA, WRITE_EXTERNAL_STORAGE, POST_NOTIFICATIONS, USE_BIOMETRIC
+android.permissions = INTERNET, CAMERA, WRITE_EXTERNAL_STORAGE, POST_NOTIFICATIONS, USE_BIOMETRIC, FOREGROUND_SERVICE, FOREGROUND_SERVICE_SPECIAL_USE
 
 # (int) Android API to use  (compileSdkVersion)
 # note: when changing, Dockerfile also needs to be changed to install corresponding build tools
@@ -250,6 +250,11 @@ p4a.local_recipes = %(source.dir)s/contrib/android/p4a_recipes/
 
 # (str) Bootstrap to use for android builds
 p4a.bootstrap = qt6
+
+# (str) extra command line arguments to pass when invoking pythonforandroid (p4a)
+# declare the keep-alive foreground service (electrum/gui/qml/java_classes/org/electrum/keepalive/)
+# in the manifest, running in the main app process (see qeapp.py startLnKeepAliveService)
+p4a.extra_args = --native-service org.electrum.keepalive.KeepAliveService:specialUse:waiting_for_lightning_payment
 
 # (int) port number to specify an explicit --port= p4a argument (eg for bootstrap flask)
 #p4a.port =
