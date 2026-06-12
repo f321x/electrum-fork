@@ -78,8 +78,9 @@ plugins=<Plugins>, parent=None)`. Only stores references; namespace is built laz
   allowed to close the app (unlike desktop, where it closes a tab): it prints like
   other exceptions.
 
-**Namespace** — refreshed (wallet-dependent entries re-injected) before every
-execution, so it always tracks `Daemon.currentWallet`; user-assigned variables persist:
+**Namespace** — wallet-dependent entries (`wallet`, `channels`) are re-injected
+when the open wallet changes (checked lazily before execution), mirroring the Qt
+console's behavior on wallet load; user-assigned variables persist otherwise:
 - `wallet` (`QEWallet.wallet`, the `Abstract_Wallet`), `channels`,
 - `network`, `config`, `daemon`, `plugins`, `electrum`, `util`, `bitcoin`, `lnutil`,
 - `app` (the `ElectrumQmlApplication`, giving access to the QE wrappers),

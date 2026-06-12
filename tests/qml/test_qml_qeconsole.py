@@ -169,3 +169,13 @@ class TestConsole(QETestCase):
         c = self._console()
         c.runCommand('wallet is None')
         self.assertIn('True\n', c.output)
+
+    @qt_test
+    def test_user_assigned_wallet_var_persists(self):
+        c = self._console()
+        # 'wallet' is only re-injected into the namespace when the open
+        # wallet changes, so a user assignment must survive other commands
+        c.runCommand('wallet = "test"')
+        c.runCommand('1 + 1')
+        c.runCommand('wallet')
+        self.assertIn("'test'\n", c.output)
