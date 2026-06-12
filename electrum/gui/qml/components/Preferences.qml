@@ -467,7 +467,7 @@ Pane {
 
                     PrefsHeading {
                         Layout.columnSpan: 2
-                        text: qsTr('Advanced')
+                        text: qsTr('Advanced (for developers)')
                     }
 
                     RowLayout {
@@ -484,7 +484,25 @@ Pane {
                         }
                         Label {
                             Layout.fillWidth: true
-                            text: qsTr('Enable debug logs (for developers)')
+                            text: qsTr('Enable debug logs')
+                            wrapMode: Text.Wrap
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.columnSpan: 2
+                        Layout.fillWidth: true
+                        spacing: 0
+                        Switch {
+                            id: showConsole
+                            onCheckedChanged: {
+                                if (activeFocus)
+                                    Config.showConsole = checked
+                            }
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            text: qsTr('Show Python console')
                             wrapMode: Text.Wrap
                         }
                     }
@@ -510,5 +528,6 @@ Pane {
         useRecoverableChannels.checked = Config.useRecoverableChannels
         syncLabels.checked = AppController.isPluginEnabled('labels')
         psbtNostr.checked = AppController.isPluginEnabled('psbt_nostr')
+        showConsole.checked = Config.showConsole
     }
 }
