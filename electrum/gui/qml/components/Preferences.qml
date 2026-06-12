@@ -488,6 +488,24 @@ Pane {
                             wrapMode: Text.Wrap
                         }
                     }
+
+                    RowLayout {
+                        Layout.columnSpan: 2
+                        Layout.fillWidth: true
+                        spacing: 0
+                        Switch {
+                            id: showConsole
+                            onCheckedChanged: {
+                                if (activeFocus)
+                                    Config.showConsole = checked
+                            }
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            text: qsTr('Show Python console (for developers)')
+                            wrapMode: Text.Wrap
+                        }
+                    }
                 }
             }
         }
@@ -510,5 +528,6 @@ Pane {
         useRecoverableChannels.checked = Config.useRecoverableChannels
         syncLabels.checked = AppController.isPluginEnabled('labels')
         psbtNostr.checked = AppController.isPluginEnabled('psbt_nostr')
+        showConsole.checked = Config.showConsole
     }
 }
