@@ -141,11 +141,20 @@ class TestConfig(QETestCase):
 
     @qt_test
     def test_show_console(self):
-        prior = self.q.showConsole
+        # the setter emits a signal, which needs a live C++ object. The
+        # class-level instance does not survive the QCoreApplication teardown
+        # of a previously run testcase, so use a fresh instance.
+        prev_instance = QEConfig.instance
+        QEConfig.instance = None
         try:
-            self.q.showConsole = False
-            self.assertFalse(self.q.showConsole)
-            self.q.showConsole = True
-            self.assertTrue(self.q.showConsole)
+            q = QEConfig(SimpleConfig())
+            prior = q.showConsole
+            try:
+                q.showConsole = False
+                self.assertFalse(q.showConsole)
+                q.showConsole = True
+                self.assertTrue(q.showConsole)
+            finally:
+                q.showConsole = prior
         finally:
-            self.q.showConsole = prior
+            QEConfig.instance = prev_instance
