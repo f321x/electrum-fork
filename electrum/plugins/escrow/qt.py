@@ -1558,6 +1558,7 @@ class EscrowPluginDialog(WindowModalDialog, QtEventListener):
         self._notification_label = None  # type: Optional[QLabel]
         self._configure_profile_action = None
         self._agent_mode_action = None
+        self._restore_backup_action = None
         self._agent_pubkey_label = None  # type: Optional[WWLabel]
 
     @classmethod
@@ -1583,7 +1584,8 @@ class EscrowPluginDialog(WindowModalDialog, QtEventListener):
     def on_event_escrow_trades_updated(self, wallet):
         if wallet != self._wallet:
             return
-        self._update_trades_list()
+        # full update: a background backup restore can also change the agent role
+        self._trigger_update()
 
     def _plugin_dialog_main_layout(self, d: WindowModalDialog) -> QHBoxLayout:
         main_layout = QHBoxLayout(d)
@@ -1627,6 +1629,11 @@ class EscrowPluginDialog(WindowModalDialog, QtEventListener):
             default_state=self._plugin.is_escrow_agent(self._wallet),
         )
         self._configure_profile_action = menu.addAction(_("Configure Profile"), self._configure_profile)
+        self._restore_backup_action = menu.addAction(
+            _("Restore from Nostr Backup"), self._restore_backup)
+        self._restore_backup_action.setToolTip(
+            _("Recover the trades of this wallet from the encrypted backup the plugin "
+              "keeps on your Nostr relays, e.g. after restoring the wallet from seed."))
 
         tool_button = QToolButton()
         tool_button.setText(_('Tools'))
@@ -1693,8 +1700,8 @@ class EscrowPluginDialog(WindowModalDialog, QtEventListener):
                 critical=True,
             )
             return
-        if self._plugin.has_agent_worker(self._wallet):
-            worker = self._plugin.get_escrow_worker(self._wallet, worker_type=EscrowAgent)
+        worker = self._plugin.get_worker_for_wallet(self._wallet)
+        if isinstance(worker, EscrowAgent):
             if not worker.get_profile():
                 self.show_notification(
                     msg=_("Configure your Escrow Agent profile to become visible to other users."),
@@ -1727,6 +1734,28 @@ class EscrowPluginDialog(WindowModalDialog, QtEventListener):
         self._wallet = None
         self._notification_label = None
         self._agent_pubkey_label = None
+        self._restore_backup_action = None
+
+    def _restore_backup(self):
+        backup_worker = self._plugin.get_backup_worker(self._wallet)
+        if backup_worker is None:
+            self.show_error(_("State backups require a wallet with Lightning support."))
+            return
+
+        def on_success(num_trades):
+            self._trigger_update()
+            if num_trades:
+                self.show_message(_("Restored {} trades from your Nostr relays.").format(num_trades))
+            else:
+                self.show_message(_("Found a backup, but it contains no trades that are "
+                                    "not already in this wallet."))
+
+        def on_failure(exc_info):
+            self.show_error(str(exc_info[1]))
+
+        run_coro_with_dialog(
+            self, _("Searching for a backup on your Nostr relays..."),
+            backup_worker.restore_from_nostr(), on_success, on_failure)
 
     def _toggle_escrow_agent_mode(self):
         escrow_agent_enabled = self._plugin.is_escrow_agent(self._wallet)
@@ -1745,7 +1774,8 @@ class EscrowPluginDialog(WindowModalDialog, QtEventListener):
         self._update_trades_list()
 
     def _update_visibility(self):
-        is_agent = self._plugin.has_agent_worker(self._wallet)
+        worker = self._plugin.get_worker_for_wallet(self._wallet)
+        is_agent = isinstance(worker, EscrowAgent)
         can_trade = self._wallet.has_lightning()
         if self._new_trade_button:
             self._new_trade_button.setVisible(not is_agent)
@@ -1755,22 +1785,21 @@ class EscrowPluginDialog(WindowModalDialog, QtEventListener):
             self._accept_trade_button.setEnabled(can_trade)
         if self._agent_mode_action:
             self._agent_mode_action.setVisible(can_trade)
+            # a restored backup can change the agent role outside of the toggle
+            self._agent_mode_action.setChecked(self._plugin.is_escrow_agent(self._wallet))
         if self._configure_profile_action:
             self._configure_profile_action.setVisible(is_agent)
         if self._agent_pubkey_label:
             self._agent_pubkey_label.setVisible(is_agent)
             if is_agent:
-                worker = self._plugin.get_escrow_worker(self._wallet, worker_type=EscrowAgent)
                 self._agent_pubkey_label.setText(
                     _("Your public key: {}").format(worker.get_identity_pubkey()))
 
     def _update_trades_list(self):
         self.trades_list.clear()
-        is_agent = self._plugin.has_agent_worker(self._wallet)
-        if is_agent:
-            worker = self._plugin.get_escrow_worker(self._wallet, worker_type=EscrowAgent)
-        else:
-            worker = self._plugin.get_escrow_worker(self._wallet, worker_type=EscrowClient)
+        worker = self._plugin.get_worker_for_wallet(self._wallet)
+        if worker is None:
+            return
 
         trades = list(worker.get_trades().items())
         trades.sort(key=lambda t: t[1].creation_timestamp, reverse=True)
@@ -1786,11 +1815,9 @@ class EscrowPluginDialog(WindowModalDialog, QtEventListener):
         trade_id = item.data(0, Qt.ItemDataRole.UserRole)
         if not trade_id:
             return
-        is_agent = self._plugin.has_agent_worker(self._wallet)
-        if is_agent:
-            worker = self._plugin.get_escrow_worker(self._wallet, worker_type=EscrowAgent)
-        else:
-            worker = self._plugin.get_escrow_worker(self._wallet, worker_type=EscrowClient)
+        worker = self._plugin.get_worker_for_wallet(self._wallet)
+        if worker is None:
+            return
         trade = worker.get_trades().get(trade_id)
         if trade is None:
             return

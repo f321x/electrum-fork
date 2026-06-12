@@ -14,6 +14,7 @@ AGENT_PROFILE_EVENT_KIND = 0  # regular nostr user profile
 AGENT_RELAY_LIST_METADATA_KIND = 10002  # NIP-65 relay list
 EPHEMERAL_REQUEST_EVENT_KIND = 25582
 ENCRYPTED_DIRECT_MESSAGE_KIND = 4
+BACKUP_EVENT_KIND = 30078  # NIP-78 parameterized replaceable application data
 
 STATUS_EVENT_INTERVAL_SEC = 1800  # 30 min
 PROFILE_EVENT_INTERVAL_SEC = 1_209_600  # 2 weeks
@@ -28,6 +29,14 @@ FUNDING_INVOICE_EXPIRY_SEC = 600  # 10 min, funding invoices are paid right away
 PAYOUT_INVOICE_EXPIRY_SEC = 60 * 60 * 24  # payout invoices should live long enough for the agent to retry
 RPC_TIMEOUT_SEC = 30  # how long clients wait for an agent response
 SEEN_EVENT_IDS_CACHE_SIZE = 4096  # replay protection cache of the agent
+BACKUP_VERSION = 1  # backup payload format version
+BACKUP_CHECK_INTERVAL_SEC = 30  # how often we check the state for changes worth backing up
+BACKUP_REPUBLISH_INTERVAL_SEC = 43_200  # 12h, refresh relay copies even without state changes
+BACKUP_FETCH_TIMEOUT_SEC = 25  # how long we collect backup candidates from relays on restore
+BACKUP_FETCH_GRACE_SEC = 5  # how long we keep collecting better candidates after the first hit
+MAX_BACKUP_EVENT_BYTES = 60_000  # stay below common relay event size limits
+BACKUP_TS_MAX_PUBLISH_AHEAD_SEC = 900  # relays commonly reject events dated further ahead
+BACKUP_TS_MAX_RESTORE_AHEAD_SEC = 30 * 86_400  # reject absurdly future-dated backups
 
 class TradeState(IntEnum):
     WAITING_FOR_TAKER = 0

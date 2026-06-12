@@ -12,17 +12,20 @@ from electrum.bolt11 import BOLT11Addr, encode_bolt11_invoice
 from electrum.invoices import Invoice, PR_PAID, PR_UNPAID
 from electrum.json_db import JsonDB
 from electrum.lnutil import LnFeatures, generate_keypair
-from electrum.util import MyEncoder
+from electrum.util import MyEncoder, UserFacingException
 from electrum_ecc import ECPrivkey
 from electrum_aionostr.key import PrivateKey
+from electrum_aionostr.event import Event as nEvent
 
 from electrum.plugins.escrow.agent import (
     EscrowAgent, AgentEscrowTrade, TradeParticipant, TradeParticipants,
 )
+from electrum.plugins.escrow.backup import NostrStateBackup
 from electrum.plugins.escrow.client import EscrowClient, ClientEscrowTrade
 from electrum.plugins.escrow.escrow_worker import (
     TradeContract, EscrowAgentProfile, EscrowWorker, NOSTR_KEY_FAMILY_ESCROW,
 )
+from electrum.plugins.escrow import constants as escrow_constants
 from electrum.plugins.escrow.constants import (
     TradeState, TradePaymentDirection, TradePaymentProtocol, TradeRPC, PROTOCOL_VERSION,
 )
@@ -86,6 +89,7 @@ class MockLNWorker:
 class MockWallet:
     def __init__(self):
         self.lnworker = MockLNWorker()
+        self.network = SimpleNamespace()  # a closed wallet has network = None
         # each mock wallet gets its own lightning master key, like a real wallet
         self.db = {'lightning_xprv': BIP32Node.from_rootseed(os.urandom(32), xtype='standard').to_xprv()}
         self.config = SimpleNamespace(get_nostr_relays=lambda: [])
@@ -142,6 +146,10 @@ class MockNostrWorker:
         self.ephemeral_messages = []  # (content, recipient_pubkey, response_to_id)
         self.dms = []  # (content, recipient_pubkey)
         self.broadcasts = []
+        self.replaceable_events = []  # kwargs of broadcast_replaceable_event
+        self.stored_events = []  # events served to fetch_events queries
+        self.fetch_queries = []
+        self.fetch_jobs_die = True  # whether fetch jobs end after serving stored_events
 
     def send_encrypted_ephemeral_message(self, *, cleartext_content, recipient_pubkey,
                                          signing_key, response_to_id=None):
@@ -154,6 +162,20 @@ class MockNostrWorker:
 
     def broadcast_agent_profile_event(self, **kwargs):
         self.broadcasts.append(kwargs)
+
+    def broadcast_replaceable_event(self, **kwargs):
+        self.replaceable_events.append(kwargs)
+
+    def fetch_events(self, query, output_queue):
+        self.fetch_queries.append(query)
+        for event in self.stored_events:
+            output_queue.put_nowait(event)
+        if self.fetch_jobs_die:
+            output_queue.put_nowait(None)
+        return 'job_id'
+
+    def cancel_job(self, job_id):
+        pass
 
     def last_response(self) -> dict:
         return self.ephemeral_messages[-1][0]
@@ -274,10 +296,10 @@ class TestAgentProfile(ElectrumTestCase):
 class AgentTestCase(ElectrumTestCase):
     """Base with helpers to drive an EscrowAgent through trade flows."""
 
-    def make_agent(self) -> EscrowAgent:
-        wallet = MockWallet()
+    def make_agent(self, wallet: MockWallet = None, storage: dict = None) -> EscrowAgent:
+        wallet = wallet or MockWallet()
         nostr = MockNostrWorker()
-        agent = EscrowAgent(wallet, nostr, storage={})
+        agent = EscrowAgent(wallet, nostr, storage if storage is not None else {})
         self.addCleanup(agent.stop)
         profile = EscrowAgentProfile(
             name='Agent', about='I mediate.', languages=['en'], service_fee_ppm=FEE_PPM)
@@ -911,6 +933,358 @@ class TestNostrKeyDerivation(ElectrumTestCase):
         self.assertEqual(3, len({identity.hex(), key0.hex(), key1.hex()}))
         # a different wallet derives different keys
         self.assertNotEqual(identity.hex(), EscrowWorker.get_nostr_privkey_for_wallet(MockWallet()).hex())
+
+
+class TestNostrBackup(AgentTestCase):
+
+    def make_backup_worker(self, wallet: MockWallet, storage: dict) -> NostrStateBackup:
+        worker = NostrStateBackup(wallet, MockNostrWorker(), storage)
+        self.addCleanup(worker.stop)
+        return worker
+
+    def make_restore_target(self, wallet: MockWallet, event_kwargs_list) -> tuple[NostrStateBackup, dict]:
+        """A backup worker for a fresh wallet restored from the same seed, with the
+        given published backups available on its relays."""
+        wallet2 = MockWallet()
+        wallet2.db['lightning_xprv'] = wallet.db['lightning_xprv']
+        storage2 = {}
+        worker = self.make_backup_worker(wallet2, storage2)
+        worker.nostr_worker.stored_events.extend(self.as_event(kw) for kw in event_kwargs_list)
+        return worker, storage2
+
+    @staticmethod
+    def as_event(broadcast_kwargs: dict) -> nEvent:
+        return nEvent(
+            pubkey=broadcast_kwargs['signing_key'].public_key.hex(),
+            kind=broadcast_kwargs['kind'],
+            content=broadcast_kwargs['content'],
+            tags=[['d', broadcast_kwargs['d_tag']]],
+        )
+
+    async def test_client_backup_restore_roundtrip(self):
+        wallet = MockWallet()
+        storage = {'client_data': {}}
+        client = EscrowClient(wallet, MockNostrWorker(), storage['client_data'])
+        self.addCleanup(client.stop)
+        trade_key = client.get_new_privkey_for_trade()
+        agent_key = PrivateKey()
+        trade = ClientEscrowTrade(
+            state=TradeState.ONGOING,
+            contract=make_contract(agent_key.public_key.hex()),
+            is_maker=True,
+            onchain_fallback_address=make_address(),
+            private_key_hex=trade_key.hex(),
+            payout_due_sat=123,
+        )
+        client._trades['ab' * 32] = trade
+        client.add_escrow_agent(agent_key.public_key.hex())
+
+        backup = self.make_backup_worker(wallet, storage)
+        backup._maybe_publish_backup()
+        self.assertEqual(1, len(backup.nostr_worker.replaceable_events))
+
+        restorer, storage2 = self.make_restore_target(
+            wallet, backup.nostr_worker.replaceable_events)
+        restored_calls = []
+        restorer._on_state_restored = lambda: restored_calls.append(1)
+        num_trades = await restorer.restore_from_nostr()
+        self.assertEqual(1, num_trades)
+        self.assertEqual([1], restored_calls)
+        self.assertGreater(restorer.wallet.save_db_calls, 0)
+
+        restored = storage2['client_data']['escrow_client_trades']['ab' * 32]
+        self.assertIsInstance(restored, ClientEscrowTrade)
+        self.assertEqual(restored.contract.contract_hash(), trade.contract.contract_hash())
+        self.assertEqual(restored.state, TradeState.ONGOING)
+        self.assertEqual(restored.private_key.hex(), trade_key.hex())
+        self.assertEqual(restored.payout_due_sat, 123)
+        # key counter and agent list survive, so future trade keys are never reused
+        self.assertEqual(
+            storage2['client_data']['trade_key_counter'],
+            storage['client_data']['trade_key_counter'])
+        self.assertEqual(storage2['client_data']['agents'], [agent_key.public_key.hex()])
+        self.assertFalse(storage2.get('is_escrow_agent'))
+
+    async def test_agent_backup_excludes_payout_queue(self):
+        wallet = MockWallet()
+        storage = {'is_escrow_agent': True, 'agent_data': {}}
+        agent = self.make_agent(wallet=wallet, storage=storage['agent_data'])
+        trade_id, maker_key, taker_key = self.make_funded_trade(agent)
+        payout_amount = agent._trades[trade_id].contract.payout_amount_sat()
+        self.confirm(agent, trade_id, maker_key)
+        self.confirm(agent, trade_id, taker_key, make_bolt11(payout_amount))
+        self.assertTrue(agent._lightning_invoices_to_pay)  # a payout is queued
+
+        backup = self.make_backup_worker(wallet, storage)
+        backup._maybe_publish_backup()
+        event_kwargs = backup.nostr_worker.replaceable_events[-1]
+        payload = backup._decrypt_payload(event_kwargs['content'])
+        self.assertNotIn('pending_lightning_invoices', payload['data']['agent_data'])
+
+        restorer, storage2 = self.make_restore_target(wallet, [event_kwargs])
+        num_trades = await restorer.restore_from_nostr()
+        self.assertEqual(1, num_trades)
+        self.assertTrue(storage2['is_escrow_agent'])
+        self.assertEqual(storage2['agent_data']['profile']['name'], 'Agent')
+        restored = storage2['agent_data']['escrow_agent_trades'][trade_id]
+        self.assertIsInstance(restored, AgentEscrowTrade)
+        self.assertEqual(restored.state, TradeState.FINISHED)
+        self.assertEqual(restored.trade_participants.taker.payout_due_sat, payout_amount)
+        # the payout queue is not resurrected: a restored (possibly stale) backup must
+        # never pay out automatically, participants claim their allocations again
+        self.assertNotIn('pending_lightning_invoices', storage2['agent_data'])
+
+    async def test_invalid_backups_rejected(self):
+        # without any usable candidate the fetch keeps resubscribing until the deadline,
+        # so shorten it to keep the test fast
+        original_timeout = escrow_constants.BACKUP_FETCH_TIMEOUT_SEC
+        escrow_constants.BACKUP_FETCH_TIMEOUT_SEC = 0.2
+        self.addCleanup(setattr, escrow_constants, 'BACKUP_FETCH_TIMEOUT_SEC', original_timeout)
+        wallet = MockWallet()
+        storage = {'client_data': {'trade_key_counter': 3}}
+        backup = self.make_backup_worker(wallet, storage)
+        backup._maybe_publish_backup()
+        good_kwargs = backup.nostr_worker.replaceable_events[-1]
+
+        # tampered ciphertext fails authentication
+        content = good_kwargs['content']
+        tampered_char = 'A' if content[10] != 'A' else 'B'
+        tampered = {**good_kwargs, 'content': content[:10] + tampered_char + content[11:]}
+        restorer, _storage2 = self.make_restore_target(wallet, [tampered])
+        with self.assertRaises(UserFacingException):
+            await restorer.restore_from_nostr()
+
+        # a backup republished by a different author is ignored
+        foreign = {**good_kwargs, 'signing_key': PrivateKey()}
+        restorer, _storage2 = self.make_restore_target(wallet, [foreign])
+        with self.assertRaises(UserFacingException):
+            await restorer.restore_from_nostr()
+
+        # payloads of a different network or backup version are rejected
+        for key, value in (('network', 'lalaland'), ('version', escrow_constants.BACKUP_VERSION + 1)):
+            payload = backup._build_payload({'client_data': {'trade_key_counter': 3}})
+            payload[key] = value
+            mutated = {**good_kwargs, 'content': backup._encrypt_payload(payload)}
+            restorer, _storage2 = self.make_restore_target(wallet, [mutated])
+            with self.assertRaises(UserFacingException):
+                await restorer.restore_from_nostr()
+
+    async def test_newest_backup_wins(self):
+        wallet = MockWallet()
+        storage = {'client_data': {'trade_key_counter': 1}}
+        backup = self.make_backup_worker(wallet, storage)
+        backup._maybe_publish_backup()
+        storage['client_data']['trade_key_counter'] = 7
+        backup._maybe_publish_backup()
+        old_kwargs, new_kwargs = backup.nostr_worker.replaceable_events
+
+        for served_order in ([old_kwargs, new_kwargs], [new_kwargs, old_kwargs]):
+            restorer, storage2 = self.make_restore_target(wallet, served_order)
+            await restorer.restore_from_nostr()
+            self.assertEqual(storage2['client_data']['trade_key_counter'], 7)
+
+    async def test_restore_merges_into_existing_state(self):
+        # publish a backup with two trades
+        wallet = MockWallet()
+        storage = {'client_data': {'escrow_client_trades': {}, 'trade_key_counter': 3}}
+        agent_pubkey = PrivateKey().public_key.hex()
+        for trade_id in ('aa' * 32, 'bb' * 32):
+            storage['client_data']['escrow_client_trades'][trade_id] = ClientEscrowTrade(
+                state=TradeState.ONGOING,
+                contract=make_contract(agent_pubkey),
+                is_maker=True,
+                onchain_fallback_address=make_address(),
+            )
+        backup = self.make_backup_worker(wallet, storage)
+        backup._maybe_publish_backup()
+
+        # the restoring wallet already has a newer version of one trade and a higher counter
+        restorer, storage2 = self.make_restore_target(
+            wallet, backup.nostr_worker.replaceable_events)
+        local_trade = ClientEscrowTrade(
+            state=TradeState.FINISHED,
+            contract=make_contract(agent_pubkey),
+            is_maker=True,
+            onchain_fallback_address=make_address(),
+        )
+        storage2['client_data'] = {
+            'escrow_client_trades': {'aa' * 32: local_trade},
+            'trade_key_counter': 7,
+        }
+        num_new = await restorer.restore_from_nostr()
+        # only the missing trade was added, local data won everywhere else
+        self.assertEqual(1, num_new)
+        trades = storage2['client_data']['escrow_client_trades']
+        self.assertIs(trades['aa' * 32], local_trade)
+        self.assertEqual(trades['aa' * 32].state, TradeState.FINISHED)
+        self.assertIn('bb' * 32, trades)
+        self.assertEqual(storage2['client_data']['trade_key_counter'], 7)
+
+    async def test_publish_only_on_meaningful_change(self):
+        wallet = MockWallet()
+        storage = {}
+        backup = self.make_backup_worker(wallet, storage)
+        backup._maybe_publish_backup()
+        # empty state is never published, so it cannot overwrite a recoverable backup
+        self.assertEqual(0, len(backup.nostr_worker.replaceable_events))
+        storage['client_data'] = {'trade_key_counter': 1}
+        backup._maybe_publish_backup()
+        backup._maybe_publish_backup()  # unchanged state is not republished
+        self.assertEqual(1, len(backup.nostr_worker.replaceable_events))
+        storage['client_data']['trade_key_counter'] = 2
+        backup._maybe_publish_backup()
+        self.assertEqual(2, len(backup.nostr_worker.replaceable_events))
+
+    async def test_failed_publish_is_retried(self):
+        wallet = MockWallet()
+        storage = {'client_data': {'trade_key_counter': 1}}
+        backup = self.make_backup_worker(wallet, storage)
+        backup._maybe_publish_backup()
+        events = backup.nostr_worker.replaceable_events
+        self.assertEqual(1, len(events))
+        # a confirmed broadcast is not republished while the state is unchanged
+        events[-1]['on_result'](True)
+        backup._maybe_publish_backup()
+        self.assertEqual(1, len(events))
+        # when no relay accepted the event, the next check cycle retries the same state
+        events[-1]['on_result'](False)
+        backup._maybe_publish_backup()
+        self.assertEqual(2, len(events))
+
+    async def test_startup_restore(self):
+        wallet = MockWallet()
+        storage = {'client_data': {'trade_key_counter': 5}}
+        backup = self.make_backup_worker(wallet, storage)
+        backup._maybe_publish_backup()
+
+        restorer, storage2 = self.make_restore_target(
+            wallet, backup.nostr_worker.replaceable_events)
+        self.assertFalse(restorer._publish_allowed)
+        await restorer._try_resolve_remote_state()
+        self.assertEqual(storage2['client_data']['trade_key_counter'], 5)
+        # the remote state is resolved now, so publishing becomes safe
+        self.assertTrue(restorer._publish_allowed)
+        # publishing after the restore must outrank the restored backup on the relays
+        restorer._maybe_publish_backup()
+        published = restorer.nostr_worker.replaceable_events[-1]
+        restored_ts = backup._decrypt_payload(
+            backup.nostr_worker.replaceable_events[-1]['content'])['timestamp']
+        self.assertGreater(published['created_at'], restored_ts)
+
+    async def test_publish_blocked_until_remote_state_resolved(self):
+        original_timeout = escrow_constants.BACKUP_FETCH_TIMEOUT_SEC
+        escrow_constants.BACKUP_FETCH_TIMEOUT_SEC = 0.2
+        self.addCleanup(setattr, escrow_constants, 'BACKUP_FETCH_TIMEOUT_SEC', original_timeout)
+
+        # the fetch job dies without serving anything (e.g. relays unreachable): we must
+        # not consider publishing safe, the relays might still hold a recoverable backup.
+        # This holds even when local state exists, e.g. created while relays were down
+        # or restored from an old wallet file copy.
+        wallet = MockWallet()
+        backup = self.make_backup_worker(wallet, {'client_data': {'trade_key_counter': 1}})
+        await backup._try_resolve_remote_state()
+        self.assertFalse(backup._publish_allowed)
+        self.assertGreater(backup._next_remote_resolve, 0)  # retry scheduled with backoff
+
+        # a subscription surviving the full fetch window without results is conclusive:
+        # no backup exists, publishing is safe
+        backup2 = self.make_backup_worker(MockWallet(), {})
+        backup2.nostr_worker.fetch_jobs_die = False
+        await backup2._try_resolve_remote_state()
+        self.assertTrue(backup2._publish_allowed)
+
+    async def test_unreadable_backup_blocks_publishing(self):
+        original_timeout = escrow_constants.BACKUP_FETCH_TIMEOUT_SEC
+        escrow_constants.BACKUP_FETCH_TIMEOUT_SEC = 0.2
+        self.addCleanup(setattr, escrow_constants, 'BACKUP_FETCH_TIMEOUT_SEC', original_timeout)
+        # the relays hold an authenticated backup from a newer plugin version: it must
+        # never be replaced, so publishing stays disabled even though the fetch window
+        # passed without a usable backup
+        wallet = MockWallet()
+        storage = {'client_data': {'trade_key_counter': 1}}
+        backup = self.make_backup_worker(wallet, storage)
+        payload = backup._build_payload({'client_data': {}})
+        payload['version'] = escrow_constants.BACKUP_VERSION + 1
+        event_kwargs = {
+            'kind': escrow_constants.BACKUP_EVENT_KIND,
+            'content': backup._encrypt_payload(payload),
+            'd_tag': backup._d_tag(),
+            'signing_key': backup._backup_key,
+        }
+        restorer, _storage2 = self.make_restore_target(wallet, [event_kwargs])
+        restorer.nostr_worker.fetch_jobs_die = False
+        await restorer._try_resolve_remote_state()
+        self.assertFalse(restorer._publish_allowed)
+
+    async def test_fresh_wallets_use_random_trade_key_offsets(self):
+        # a wallet trading before its old backup was recovered must not reuse the
+        # key ids of its previous life (the merged states would share trade keys)
+        first_ids = set()
+        for _i in range(2):
+            client = EscrowClient(MockWallet(), MockNostrWorker(), storage={})
+            self.addCleanup(client.stop)
+            client.get_new_privkey_for_trade()
+            first_ids.add(client.storage['trade_key_counter'])
+        self.assertEqual(2, len(first_ids))
+
+    async def test_backup_key_derivation(self):
+        wallet = MockWallet()
+        backup_key = NostrStateBackup.get_backup_privkey_for_wallet(wallet)
+        # deterministic, and distinct from the identity and per-trade keys
+        self.assertEqual(backup_key.hex(), NostrStateBackup.get_backup_privkey_for_wallet(wallet).hex())
+        identity = EscrowWorker.get_nostr_privkey_for_wallet(wallet)
+        trade0 = EscrowWorker.get_nostr_privkey_for_wallet(wallet, key_id=0)
+        self.assertEqual(3, len({backup_key.hex(), identity.hex(), trade0.hex()}))
+        # a different wallet derives a different backup key
+        self.assertNotEqual(
+            backup_key.hex(), NostrStateBackup.get_backup_privkey_for_wallet(MockWallet()).hex())
+
+    async def test_oversized_backup_prunes_finished_trades(self):
+        wallet = MockWallet()
+        storage = {'client_data': {'escrow_client_trades': {}, 'trade_key_counter': 1}}
+        trades = storage['client_data']['escrow_client_trades']
+        agent_pubkey = PrivateKey().public_key.hex()
+        ongoing_id = 'ff' * 32
+        for i in range(5):
+            contract = make_contract(agent_pubkey)
+            contract.text = f'{i}' * 1500
+            is_last = i == 4
+            trades[ongoing_id if is_last else f'{i:02d}' * 16] = ClientEscrowTrade(
+                state=TradeState.ONGOING if is_last else TradeState.FINISHED,
+                contract=contract,
+                is_maker=True,
+                onchain_fallback_address=make_address(),
+                creation_timestamp=1000 + i,
+            )
+        original_limit = escrow_constants.MAX_BACKUP_EVENT_BYTES
+        escrow_constants.MAX_BACKUP_EVENT_BYTES = 6000
+        self.addCleanup(setattr, escrow_constants, 'MAX_BACKUP_EVENT_BYTES', original_limit)
+
+        backup = self.make_backup_worker(wallet, storage)
+        backup._maybe_publish_backup()
+        event_kwargs = backup.nostr_worker.replaceable_events[-1]
+        self.assertLessEqual(len(event_kwargs['content']), 6000)
+        kept = backup._decrypt_payload(event_kwargs['content'])['data']['client_data']['escrow_client_trades']
+        # ongoing trades are never pruned, the oldest finished trades are dropped first
+        self.assertIn(ongoing_id, kept)
+        self.assertNotIn('00' * 16, kept)
+        self.assertLess(len(kept), 5)
+        # the local state is untouched by the pruning
+        self.assertEqual(5, len(trades))
+
+    async def test_meaningful_state_detection(self):
+        has_state = NostrStateBackup._has_meaningful_state
+        self.assertFalse(has_state({}))
+        # the empty skeleton the workers create on startup is not meaningful
+        self.assertFalse(has_state({
+            'client_data': {'escrow_client_trades': {}},
+            'agent_data': {'escrow_agent_trades': {}, 'pending_lightning_invoices': {}},
+        }))
+        self.assertTrue(has_state({'is_escrow_agent': True}))
+        self.assertTrue(has_state({'client_data': {'trade_key_counter': 0}}))
+        self.assertTrue(has_state({'client_data': {'agents': ['ab' * 32]}}))
+        self.assertTrue(has_state({'agent_data': {'profile': {'name': 'x'}}}))
+        self.assertTrue(has_state({'client_data': {'escrow_client_trades': {'a': {}}}}))
 
 
 class TestPersistence(ElectrumTestCase):

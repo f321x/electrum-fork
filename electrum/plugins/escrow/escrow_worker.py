@@ -259,28 +259,36 @@ class EscrowWorker(ABC, Logger):
                 await asyncio.sleep(10)
 
     @staticmethod
-    def get_nostr_privkey_for_wallet(wallet: 'Abstract_Wallet', *, key_id: int = -1) -> PrivateKey:
+    def _derive_nostr_privkey(wallet: 'Abstract_Wallet', path: list) -> PrivateKey:
         """
         Derives a nostr key from the wallet's lightning master key, the same way the
         lightning node key itself is derived (see lnutil.generate_keypair), but on a
         dedicated escrow key family. Note that this requires private key material:
         deriving from e.g. the xpub would allow anyone knowing the xpub (watch-only
         copies, servers) to decrypt escrow traffic and impersonate the wallet.
-        key_id -1 is the wallet's stable escrow identity; each trade should use a fresh
-        key_id >= 0 to prevent trades from getting linked to each other.
         """
         assert wallet.lnworker is not None, "wallet needs lightning support"
-        assert isinstance(key_id, int) and -1 <= key_id < BIP32_PRIME - 1, f"invalid key_id: {key_id}"
         # the same key material LNWallet itself is instantiated from, see wallet.init_lightning
         ln_xprv = wallet.db.get('lightning_xprv') or wallet.db.get('lightning_privkey2')
         assert ln_xprv is not None, "wallet has no lightning keys"
         root = BIP32Node.from_xkey(ln_xprv)
-        child = root.subkey_at_private_derivation([NOSTR_KEY_FAMILY_ESCROW, key_id + 1, 0])
+        child = root.subkey_at_private_derivation(path)
         return PrivateKey(child.eckey.get_secret_bytes())
 
+    @staticmethod
+    def get_nostr_privkey_for_wallet(wallet: 'Abstract_Wallet', *, key_id: int = -1) -> PrivateKey:
+        """
+        key_id -1 is the wallet's stable escrow identity; each trade should use a fresh
+        key_id >= 0 to prevent trades from getting linked to each other. All these paths
+        end in /0, the backup key (see backup.py) is allocated next to the identity at
+        [family, 0, 1].
+        """
+        assert isinstance(key_id, int) and -1 <= key_id < BIP32_PRIME - 1, f"invalid key_id: {key_id}"
+        return EscrowWorker._derive_nostr_privkey(wallet, [NOSTR_KEY_FAMILY_ESCROW, key_id + 1, 0])
+
     @classmethod
-    def create(cls, wallet: 'Abstract_Wallet', nostr_worker: 'EscrowNostrWorker', storage: dict) -> 'EscrowWorker':
-        worker = cls(wallet, nostr_worker, storage)
+    def create(cls, wallet: 'Abstract_Wallet', nostr_worker: 'EscrowNostrWorker', storage: dict, **kwargs) -> 'EscrowWorker':
+        worker = cls(wallet, nostr_worker, storage, **kwargs)
         task = asyncio.run_coroutine_threadsafe(
             worker.main_loop(),
             get_asyncio_loop(),
@@ -300,6 +308,8 @@ class EscrowWorker(ABC, Logger):
 
     def stop(self):
         self.logger.debug("escrow worker stopped")
-        if self.main_task:
-            self.main_task.cancel()
-            self.main_task = None
+        # swap before cancelling so concurrent stop() calls from different threads
+        # cannot race on a half-cleared task reference
+        task, self.main_task = self.main_task, None
+        if task:
+            task.cancel()
