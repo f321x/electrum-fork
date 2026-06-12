@@ -47,8 +47,10 @@ Pane {
             Layout.fillWidth: true
             Layout.margins: constants.paddingMedium
             iconStyle: InfoTextArea.IconStyle.Warn
-            text: qsTr("Do not paste code here that you don't understand. Executing the wrong code could lead to your coins being irreversibly lost.")
-                + ' ' + qsTr('Tap here to hide this message.')
+            textFormat: Text.RichText
+            text: '<b>' + qsTr('Warning!') + '</b><br>'
+                + qsTr("Do not paste code here that you don't understand. Executing the wrong code could lead to your coins being irreversibly lost.")
+                + '<br>' + qsTr('Tap here to hide this message.')
 
             MouseArea {
                 anchors.fill: parent

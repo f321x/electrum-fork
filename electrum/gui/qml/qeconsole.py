@@ -56,6 +56,7 @@ class QEConsole(QObject):
         self._is_json = False
         self._namespace = {}
         self._namespace_initialized = False
+        self._namespace_wallet = object()  # sentinel != any wallet (incl. None)
 
     @pyqtProperty(str, notify=outputChanged)
     def output(self):
@@ -191,12 +192,16 @@ class QEConsole(QObject):
                 if m[0] == '_' or m in ['network', 'wallet', 'config', 'daemon']:
                     continue
                 self._namespace[m] = mkfunc(c._run, m)
-        # refresh wallet-dependent entries so the namespace tracks the current wallet
+        # re-inject wallet-dependent entries when the open wallet changes
+        # (like the Qt console does on wallet load); not on every command,
+        # so user assignments to these names survive unrelated commands
         wallet = self._get_current_wallet()
-        self._namespace.update({
-            'wallet': wallet,
-            'channels': list(wallet.lnworker.channels.values()) if wallet and wallet.lnworker else [],
-        })
+        if wallet is not self._namespace_wallet:
+            self._namespace_wallet = wallet
+            self._namespace.update({
+                'wallet': wallet,
+                'channels': list(wallet.lnworker.channels.values()) if wallet and wallet.lnworker else [],
+            })
 
     def _exec_command(self, command: str) -> None:
         taint_reports_by_console_usage()
