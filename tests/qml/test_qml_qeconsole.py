@@ -156,3 +156,16 @@ class TestConsole(QETestCase):
         r = c.getCompletions('nonexistent_thing_xyz.attr')
         self.assertEqual(r['text'], 'nonexistent_thing_xyz.attr')
         self.assertEqual(r['candidates'], [])
+
+    @qt_test
+    def test_commands_in_namespace(self):
+        c = self._console()
+        # bare command name shows the function hint (commands are wrapped callables)
+        c.runCommand('getinfo')
+        self.assertIn("'getinfo' is a function", c.output)
+
+    @qt_test
+    def test_wallet_in_namespace_without_daemon(self):
+        c = self._console()
+        c.runCommand('wallet is None')
+        self.assertIn('True\n', c.output)
