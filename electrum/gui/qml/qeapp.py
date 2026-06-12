@@ -22,7 +22,8 @@ from electrum.base_crash_reporter import BaseCrashReporter, EarlyExceptionsQueue
 from electrum.network import Network
 from electrum.plugin import run_hook
 from electrum.gui.common_qt.util import get_font_id
-from electrum.util import profiler
+from electrum.invoices import PR_PAID, PR_UNCONFIRMED
+from electrum.util import profiler, EventListener, event_listener
 from electrum.lnurl import SUPPORTED_LNURL_SCHEMES
 
 from .qeconfig import QEConfig
@@ -70,7 +71,7 @@ if 'ANDROID_DATA' in os.environ:
 notification = None
 
 
-class QEAppController(BaseCrashReporter, QObject):
+class QEAppController(BaseCrashReporter, QObject, EventListener):
     _dummy = pyqtSignal()
     userNotify = pyqtSignal(str, str)
     uriReceived = pyqtSignal(str)
@@ -98,6 +99,10 @@ class QEAppController(BaseCrashReporter, QObject):
 
         # map of permissions and grant status _after_ asking user
         self._permissions = {}  # type: dict[str, bool]
+
+        # request key the android keep-alive service is currently waiting for
+        self._keepalive_request_key = None  # type: Optional[str]
+        self.register_callbacks()
 
         # set up notification queue and notification_timer
         self.user_notification_queue = queue.Queue()
@@ -228,6 +233,82 @@ class QEAppController(BaseCrashReporter, QObject):
 
         if permission_result_cb:
             permission_result_cb(grant_result)
+
+    @pyqtSlot()
+    def requestNotificationsPermission(self):
+        if not self.isAndroid():
+            return
+        if not self.hasPermission(permissions.Permission.POST_NOTIFICATIONS) \
+                and self._permissions.get(permissions.Permission.POST_NOTIFICATIONS) is None:
+            self.request_permission(permissions.Permission.POST_NOTIFICATIONS)
+
+    @pyqtSlot(str, 'qint64', str)
+    def startLnKeepAliveService(self, request_key: str, expiration: int, message: str):
+        """Start the android foreground service (showing a notification) that keeps
+        the app process alive, so that the request with `request_key` can still be
+        paid while the app is in the background.
+        Must be called while the app still counts as foreground for android, e.g.
+        from a Qt.ApplicationSuspended handler, which runs just before the Qt event
+        loop is suspended.
+        """
+        if not self.isAndroid():
+            return
+        timeout_s = 0  # 0: service falls back to its internal maximum
+        if expiration > 0:
+            timeout_s = expiration - int(time.time())
+            if timeout_s <= 0:
+                return  # request already expired
+            timeout_s = min(timeout_s, 24 * 3600)  # the service clamps to the same maximum
+        self._keepalive_request_key = request_key
+        try:
+            jKeepAliveService = autoclass('org.electrum.keepalive.KeepAliveService')
+            intent = jIntent(jpythonActivity, jKeepAliveService)
+            intent.putExtra(jString('message'), jString(message))
+            intent.putExtra(jString('channel_name'), jString(_('Waiting for payment')))
+            # pass as string, pyjnius int/long overload selection is not deterministic
+            intent.putExtra(jString('timeout_s'), jString(str(timeout_s)))
+            jpythonActivity.startForegroundService(intent)
+        except Exception as e:
+            self._keepalive_request_key = None
+            self.logger.error(f'could not start keep-alive service: {repr(e)}')
+            return
+        self.logger.debug(f'keep-alive service started for request {request_key}, timeout {timeout_s}s')
+        # the event listener only acts on events arriving after _keepalive_request_key
+        # was set; re-check now in case the request got paid in the meantime
+        qewallet = QEDaemon.instance.currentWallet
+        req = qewallet.wallet.get_request(request_key) if qewallet else None
+        if req and qewallet.wallet.get_invoice_status(req) in (PR_PAID, PR_UNCONFIRMED):
+            self._stop_ln_keepalive_service()
+
+    @pyqtSlot()
+    def stopLnKeepAliveService(self):
+        self._stop_ln_keepalive_service()
+
+    def _stop_ln_keepalive_service(self):
+        # called from the Qt thread (slot) or from the asyncio thread (event listener)
+        if self._keepalive_request_key is None:
+            return
+        self._keepalive_request_key = None
+        if not self.isAndroid():
+            return
+        try:
+            jKeepAliveService = autoclass('org.electrum.keepalive.KeepAliveService')
+            intent = jIntent(jpythonActivity, jKeepAliveService)
+            jpythonActivity.stopService(intent)
+            self.logger.debug('keep-alive service stopped')
+        except Exception as e:
+            self.logger.error(f'could not stop keep-alive service: {repr(e)}')
+
+    @event_listener
+    def on_event_request_status(self, wallet, key, status):
+        # Runs on the asyncio thread (see CallbackManager.trigger_callback). While the
+        # app is backgrounded on android the Qt event loop is suspended, so the service
+        # has to be stopped from here, without going through Qt signals, otherwise it
+        # would keep running until the user returns to the app.
+        if self._keepalive_request_key is None or key != self._keepalive_request_key:
+            return
+        if status in (PR_PAID, PR_UNCONFIRMED):
+            self._stop_ln_keepalive_service()
 
     def on_new_intent(self, intent):
         if not self._app_started:
