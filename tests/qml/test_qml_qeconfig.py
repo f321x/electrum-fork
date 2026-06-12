@@ -138,3 +138,14 @@ class TestConfig(QETestCase):
         self.assertFalse(b.match('1.0000').hasMatch())
         self.assertTrue(b.match('2100000000000000').hasMatch())
         self.assertFalse(b.match('12100000000000000').hasMatch())
+
+    @qt_test
+    def test_show_console(self):
+        prior = self.q.showConsole
+        try:
+            self.q.showConsole = False
+            self.assertFalse(self.q.showConsole)
+            self.q.showConsole = True
+            self.assertTrue(self.q.showConsole)
+        finally:
+            self.q.showConsole = prior
