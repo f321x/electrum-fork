@@ -109,3 +109,50 @@ class TestConsole(QETestCase):
         c.runCommand('1')
         c.clear()
         self.assertEqual(c.output, '')
+
+    @qt_test
+    def test_completion_single_match(self):
+        c = self._console()
+        c.runCommand('zebra_value = 42')
+        r = c.getCompletions('zebr')
+        self.assertEqual(r['text'], 'zebra_value')
+        self.assertEqual(r['candidates'], [])
+
+    @qt_test
+    def test_completion_common_prefix(self):
+        c = self._console()
+        c.runCommand('zebra_one = 1')
+        c.runCommand('zebra_two = 2')
+        r = c.getCompletions('zeb')
+        self.assertEqual(r['text'], 'zebra_')
+        self.assertEqual(r['candidates'], [])
+
+    @qt_test
+    def test_completion_candidates(self):
+        c = self._console()
+        c.runCommand('zebra_one = 1')
+        c.runCommand('zebra_two = 2')
+        r = c.getCompletions('zebra_')
+        self.assertEqual(r['text'], 'zebra_')
+        self.assertEqual(sorted(r['candidates']), ['zebra_one', 'zebra_two'])
+
+    @qt_test
+    def test_completion_attribute_path(self):
+        c = self._console()
+        r = c.getCompletions('util.json_enc')
+        self.assertEqual(r['text'], 'util.json_encode')
+
+    @qt_test
+    def test_completion_preserves_preceding_text(self):
+        c = self._console()
+        c.runCommand('zebra_value = 42')
+        r = c.getCompletions('print(zebr')
+        self.assertEqual(r['text'], 'print(zebra_value')
+        self.assertEqual(r['beginning'], 'print(')
+
+    @qt_test
+    def test_completion_unknown(self):
+        c = self._console()
+        r = c.getCompletions('nonexistent_thing_xyz.attr')
+        self.assertEqual(r['text'], 'nonexistent_thing_xyz.attr')
+        self.assertEqual(r['candidates'], [])
