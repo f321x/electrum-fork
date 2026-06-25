@@ -67,7 +67,9 @@ ElDialog {
                                     : invoice.status == Invoice.Unpaid && invoice.expiration > 0
                                         ? invoice.canPay
                                             ? InfoTextArea.IconStyle.Pending
-                                            : InfoTextArea.IconStyle.Error
+                                            : invoice.userinfoStatus == Invoice.Warning
+                                                ? InfoTextArea.IconStyle.Warn
+                                                : InfoTextArea.IconStyle.Error
                                         : InfoTextArea.IconStyle.Info
                     backgroundColor: constants.darkerDialogBackground
                 }
@@ -225,7 +227,6 @@ ElDialog {
                                 id: fiatValue
                                 Layout.alignment: Qt.AlignRight
                                 visible: Daemon.fx.enabled && !_invoice_amount.isMax && !_invoice_amount.isEmpty
-                                text: Daemon.fx.fiatValue(invoice.amount, false)
                                 font.pixelSize: constants.fontSizeMedium
                                 color: constants.mutedForeground
                             }
@@ -557,12 +558,17 @@ ElDialog {
 
     }
 
+    function setFiatValue() {
+        fiatValue.text = Daemon.fx.fiatValue(invoice.amount, false)
+    }
+
     Component.onCompleted: {
-        if (invoice.amount.isEmpty && !invoice.status == Invoice.Expired) {
+        if (invoice.amount.isEmpty && invoice.status != Invoice.Expired) {
             amountContainer.editmode = true
         } else if (invoice.amount.isMax) {
             amountMax.checked = true
         }
+        setFiatValue()
         if (payImmediately) {
             if (invoice.canPay) {
                 doPay()
@@ -582,6 +588,11 @@ ElDialog {
                 successdialog.open()
             }
         }
+    }
+
+    Connections {
+        target: Daemon.fx
+        function onQuotesUpdated() { setFiatValue() }
     }
 
     FontMetrics {
