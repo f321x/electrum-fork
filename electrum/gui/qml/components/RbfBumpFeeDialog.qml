@@ -177,7 +177,7 @@ ElDialog {
                     Layout.topMargin: constants.paddingMedium
 
                     visible: rbffeebumper.valid
-                    labelText: qsTr('Inputs (%1)').arg(rbffeebumper.inputs.length)
+                    labelText: qsTr('Inputs (%1)').arg(rbffeebumper.inputCount)
                     color: Material.accentColor
                 }
 
@@ -192,6 +192,13 @@ ElDialog {
                         idx: index
                         model: modelData
                     }
+                }
+
+                Label {
+                    Layout.columnSpan: 2
+                    visible: inputs_label.visible && !inputs_label.collapsed && rbffeebumper.inputCount > rbffeebumper.inputs.length
+                    text: qsTr('... and %1 more inputs').arg(rbffeebumper.inputCount - rbffeebumper.inputs.length)
+                    color: constants.mutedForeground
                 }
 
                 ToggleLabel {

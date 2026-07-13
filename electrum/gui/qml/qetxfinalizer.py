@@ -155,6 +155,11 @@ class FeeSlider(QObject):
 
 
 class TxFeeSlider(FeeSlider):
+    # limit on the number of inputs exposed to QML as model items; building
+    # them is expensive and no screen can usefully display thousands of them.
+    # inputCount still reports the real total.
+    INPUTS_DISPLAY_LIMIT = 50
+
     def __init__(self, parent=None):
         super().__init__(parent)
 
@@ -166,6 +171,7 @@ class TxFeeSlider(FeeSlider):
         self._rbf = False
         self._tx = None  # type: Optional[PartialTransaction]
         self._inputs = []
+        self._input_count = 0
         self._outputs = []
         self._finalized_txid = ''
         self._valid = False
@@ -270,6 +276,10 @@ class TxFeeSlider(FeeSlider):
             self._inputs = inputs
             self.inputsChanged.emit()
 
+    @pyqtProperty(int, notify=inputsChanged)
+    def inputCount(self):
+        return self._input_count
+
     outputsChanged = pyqtSignal()
     @pyqtProperty('QVariantList', notify=outputsChanged)
     def outputs(self):
@@ -338,7 +348,8 @@ class TxFeeSlider(FeeSlider):
 
     def update_inputs_from_tx(self, tx: Transaction):
         inputs = []
-        for inp in tx.inputs():
+        self._input_count = len(tx.inputs())
+        for inp in tx.inputs()[:self.INPUTS_DISPLAY_LIMIT]:
             # addr = self.wallet.adb.get_txin_address(txin)
             addr = inp.address
             address_str = '<address unknown>' if addr is None else addr

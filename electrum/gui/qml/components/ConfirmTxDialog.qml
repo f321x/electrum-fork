@@ -223,7 +223,7 @@ ElDialog {
                     Layout.topMargin: constants.paddingMedium
                     visible: finalizer.valid
 
-                    labelText: qsTr('Inputs (%1)').arg(finalizer.inputs.length)
+                    labelText: qsTr('Inputs (%1)').arg(finalizer.inputCount)
                     color: Material.accentColor
                 }
 
@@ -240,6 +240,13 @@ ElDialog {
                         idx: index
                         model: modelData
                     }
+                }
+
+                Label {
+                    Layout.columnSpan: 2
+                    visible: finalizer.valid && !inputs_label.collapsed && finalizer.inputCount > finalizer.inputs.length
+                    text: qsTr('... and %1 more inputs').arg(finalizer.inputCount - finalizer.inputs.length)
+                    color: constants.mutedForeground
                 }
 
                 ToggleLabel {

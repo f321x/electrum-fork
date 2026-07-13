@@ -109,7 +109,7 @@ ElDialog {
                     Layout.topMargin: constants.paddingMedium
 
                     visible: txcanceller.valid
-                    labelText: qsTr('Inputs (%1)').arg(txcanceller.inputs.length)
+                    labelText: qsTr('Inputs (%1)').arg(txcanceller.inputCount)
                     color: Material.accentColor
                 }
 
@@ -124,6 +124,13 @@ ElDialog {
                         idx: index
                         model: modelData
                     }
+                }
+
+                Label {
+                    Layout.columnSpan: 2
+                    visible: inputs_label.visible && !inputs_label.collapsed && txcanceller.inputCount > txcanceller.inputs.length
+                    text: qsTr('... and %1 more inputs').arg(txcanceller.inputCount - txcanceller.inputs.length)
+                    color: constants.mutedForeground
                 }
 
                 ToggleLabel {
