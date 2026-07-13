@@ -170,6 +170,12 @@ class TxFeeSlider(FeeSlider):
         self._finalized_txid = ''
         self._valid = False
         self._warning = ''
+        self._busy = False
+
+    busyChanged = pyqtSignal()
+    @pyqtProperty(bool, notify=busyChanged)
+    def busy(self):
+        return self._busy
 
     feeChanged = pyqtSignal()
     @pyqtProperty(QVariant, notify=feeChanged)
@@ -396,6 +402,8 @@ class QETxFinalizer(TxFeeSlider):
     finished = pyqtSignal([bool, bool, bool], arguments=['signed', 'saved', 'complete'])
     signError = pyqtSignal([str], arguments=['message'])
 
+    _makeTxFinished = pyqtSignal(object, str)
+
     def __init__(
         self,
         parent=None,
@@ -412,6 +420,9 @@ class QETxFinalizer(TxFeeSlider):
         self._effectiveAmount = QEAmount()
         self._extraFee = QEAmount()
         self._canRbf = False
+
+        self._update_pending = False
+        self._makeTxFinished.connect(self._on_make_tx_finished)
 
     addressChanged = pyqtSignal()
     @pyqtProperty(str, notify=addressChanged)
@@ -490,24 +501,54 @@ class QETxFinalizer(TxFeeSlider):
         if not self._wallet:
             self._logger.debug('wallet not set, ignoring update()')
             return
+        if self._busy:
+            # a make_tx is already running in the background; rerun once it
+            # finishes so the result reflects the latest parameters
+            self._update_pending = True
+            return
 
-        try:
-            # make unsigned transaction
-            amount = '!' if self._amount.isMax else self._amount.satsInt
-            tx = self.make_tx(amount=amount)
-        except NotEnoughFunds:
-            self.warning = self._wallet.wallet.get_text_not_enough_funds_mentioning_frozen(for_amount=amount)
+        self._busy = True
+        self.busyChanged.emit()
+        if self._valid:
+            # don't let a stale tx be sent/finalized while the new one is being built
             self._valid = False
             self.validChanged.emit()
+
+        amount = '!' if self._amount.isMax else self._amount.satsInt
+
+        def make_tx_task():
+            # runs in a background thread; for wallets with many UTXOs make_tx
+            # takes seconds and would freeze the GUI thread
+            tx = None
+            warning = ''
+            try:
+                tx = self.make_tx(amount=amount)
+            except NotEnoughFunds:
+                warning = self._wallet.wallet.get_text_not_enough_funds_mentioning_frozen(for_amount=amount)
+            except NoDynamicFeeEstimates:
+                warning = _('No dynamic fee estimates available')
+            except Exception as e:
+                self._logger.error(str(e))
+                warning = repr(e)
+            try:
+                self._makeTxFinished.emit(tx, warning)
+            except RuntimeError:  # wrapped C++ object deleted (dialog closed)
+                pass
+
+        threading.Thread(target=make_tx_task, daemon=True).start()
+
+    def _on_make_tx_finished(self, tx: Optional[PartialTransaction], warning: str):
+        if self._update_pending:
+            # parameters changed while the tx was being built; build again
+            self._update_pending = False
+            self._busy = False
+            self.update()
             return
-        except NoDynamicFeeEstimates:
-            self.warning = _('No dynamic fee estimates available')
-            self._valid = False
-            self.validChanged.emit()
-            return
-        except Exception as e:
-            self._logger.error(str(e))
-            self.warning = repr(e)
+        self._busy = False
+        self.busyChanged.emit()
+
+        if tx is None:
+            self.warning = warning
             self._valid = False
             self.validChanged.emit()
             return

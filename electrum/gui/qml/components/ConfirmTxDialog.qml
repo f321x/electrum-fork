@@ -283,10 +283,16 @@ ElDialog {
                         ? qsTr('Finalize...')
                         : qsTr('Pay...')
                 icon.source: '../../icons/confirmed.png'
-                enabled: finalizer.valid
+                enabled: finalizer.valid && !finalizer.busy
                 onClicked: doAccept()
             }
         }
+    }
+
+    BusyIndicator {
+        anchors.centerIn: parent
+        visible: finalizer.busy
+        running: visible
     }
 
     onClosed: doReject()
