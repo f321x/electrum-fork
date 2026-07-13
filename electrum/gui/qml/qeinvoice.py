@@ -98,8 +98,7 @@ class QEInvoice(QObject, QtEventListener):
     def on_event_payment_succeeded(self, wallet, key):
         if wallet == self._wallet.wallet and key == self.key:
             self.statusChanged.emit()
-            self.determine_can_pay()
-            self.update_userinfo()
+            self.update_userinfo_and_can_pay()
 
     @event_listener
     def on_event_payment_failed(self, wallet, key, reason):
@@ -111,15 +110,13 @@ class QEInvoice(QObject, QtEventListener):
     @event_listener
     def on_event_invoice_status(self, wallet, key, status):
         if self._wallet and wallet == self._wallet.wallet and key == self.key:
-            self.update_userinfo()
-            self.determine_can_pay()
+            self.update_userinfo_and_can_pay()
             self.statusChanged.emit()
 
     @event_listener
     def on_event_channel(self, wallet, channel):
         if self._wallet and wallet == self._wallet.wallet:
-            self.update_userinfo()
-            self.determine_can_pay()
+            self.update_userinfo_and_can_pay()
 
     walletChanged = pyqtSignal()
     @pyqtProperty(QVariant, notify=walletChanged)
@@ -178,8 +175,7 @@ class QEInvoice(QObject, QtEventListener):
 
     @pyqtSlot()
     def _on_amountoverride_value_changed(self):
-        self.update_userinfo()
-        self.determine_can_pay()
+        self.update_userinfo_and_can_pay()
 
     statusChanged = pyqtSignal()
     @pyqtProperty(int, notify=statusChanged)
@@ -297,8 +293,7 @@ class QEInvoice(QObject, QtEventListener):
 
         self.set_lnprops()
 
-        self.update_userinfo()
-        self.determine_can_pay()
+        self.update_userinfo_and_can_pay()
 
         self.invoiceChanged.emit()
         self.statusChanged.emit()
@@ -314,15 +309,25 @@ class QEInvoice(QObject, QtEventListener):
                     self._timer.setInterval(interval)  # msec
                     self._timer.start()
         else:
-            self.update_userinfo()
-            self.determine_can_pay()  # status went to PR_EXPIRED
+            self.update_userinfo_and_can_pay()  # status went to PR_EXPIRED
 
     @pyqtSlot()
     def updateStatusString(self):
         self.statusChanged.emit()
         self.set_status_timer()
 
-    def update_userinfo(self):
+    def update_userinfo_and_can_pay(self):
+        """Updates userinfo and canPay/canSave, running the potentially expensive
+        spendable-balance check (check_can_pay_amount) only once."""
+        can_pay_check = None
+        amount = self.amountOverride if not self.amountOverride.isEmpty else self.amount
+        status = self.status
+        if status in [PR_UNPAID, PR_FAILED] and not (amount.isEmpty and status == PR_UNPAID):
+            can_pay_check = self.check_can_pay_amount(amount)
+        self.update_userinfo(can_pay_check=can_pay_check)
+        self.determine_can_pay(can_pay_check=can_pay_check)
+
+    def update_userinfo(self, *, can_pay_check: Optional[Tuple[Optional[bool], Optional[str]]] = None):
         self.set_userinfo('')
 
         if not self.amountOverride.isEmpty:
@@ -351,7 +356,9 @@ class QEInvoice(QObject, QtEventListener):
             }[_status]
 
         if status in [PR_UNPAID, PR_FAILED]:
-            can_pay, msg = self.check_can_pay_amount(amount)
+            if can_pay_check is None:
+                can_pay_check = self.check_can_pay_amount(amount)
+            can_pay, msg = can_pay_check
             if can_pay is None:
                 userinfo_status = QEInvoice.UserinfoStatus.Warning
             elif can_pay is False:
@@ -364,7 +371,7 @@ class QEInvoice(QObject, QtEventListener):
         else:
             self.set_userinfo(userinfo_for_invoice_status(status))
 
-    def determine_can_pay(self):
+    def determine_can_pay(self, *, can_pay_check: Optional[Tuple[Optional[bool], Optional[str]]] = None):
         self.canPay = False
         self.canSave = False
 
@@ -384,7 +391,9 @@ class QEInvoice(QObject, QtEventListener):
             return
 
         if status in [PR_UNPAID, PR_FAILED]:
-            self.canPay = self.check_can_pay_amount(amount)[0] is True
+            if can_pay_check is None:
+                can_pay_check = self.check_can_pay_amount(amount)
+            self.canPay = can_pay_check[0] is True
 
     def check_can_pay_amount(self, amount: QEAmount) -> Tuple[Optional[bool], Optional[str]]:
         # can_pay bool: None is warning, False is Error
@@ -402,7 +411,8 @@ class QEInvoice(QObject, QtEventListener):
             elif self.address and self.get_max_spendable_onchain() > amount.satsInt:
                 return True, None
         elif self.invoiceType == QEInvoice.Type.OnchainInvoice:
-            if (amount.isMax and self.get_max_spendable_onchain() > 0) or (self.get_max_spendable_onchain() >= amount.satsInt):
+            max_onchain = self.get_max_spendable_onchain()
+            if (amount.isMax and max_onchain > 0) or (max_onchain >= amount.satsInt):
                 return True, None
 
         return False, _('Insufficient balance')
