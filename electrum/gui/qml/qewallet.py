@@ -30,6 +30,7 @@ from .qechannellistmodel import QEChannelListModel
 from .qeinvoicelistmodel import QEInvoiceListModel, QERequestListModel
 from .qetransactionlistmodel import QETransactionListModel
 from .qetypes import QEAmount
+from .util import tx_qr_data_or_empty
 
 if TYPE_CHECKING:
     from electrum.wallet import Abstract_Wallet
@@ -818,7 +819,7 @@ class QEWallet(AuthMixin, QObject, QtEventListener):
     @pyqtSlot(str, result='QVariantList')
     def getSerializedTx(self, txid):
         tx = self.wallet.db.get_transaction(txid)
-        txqr = tx.to_qr_data()
+        txqr = tx_qr_data_or_empty(tx)
         return [str(tx), txqr[0], txqr[1]]
 
     @pyqtSlot(result='QVariantMap')

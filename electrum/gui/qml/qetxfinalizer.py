@@ -25,6 +25,7 @@ from electrum.gui.common_qt.util import QtEventListener
 
 from .qewallet import QEWallet
 from .qetypes import QEAmount
+from .util import tx_qr_data_or_empty
 
 if TYPE_CHECKING:
     from electrum.simple_config import SimpleConfig
@@ -591,7 +592,7 @@ class QETxFinalizer(TxFeeSlider):
 
     @pyqtSlot(result='QVariantList')
     def getSerializedTx(self):
-        txqr = self._tx.to_qr_data()
+        txqr = tx_qr_data_or_empty(self._tx)
         label = ""
         if txid := self._tx.txid():
             label = self._wallet.wallet.get_label_for_txid(txid)

@@ -44,6 +44,7 @@ ElDialog {
                     Layout.leftMargin: constants.paddingMedium
                     Layout.rightMargin: constants.paddingMedium
                     padding: constants.paddingMedium
+                    visible: dialog.text_qr
                     ColumnLayout {
                         width: parent.width
                         QRImage {

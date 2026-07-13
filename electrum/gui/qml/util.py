@@ -2,9 +2,28 @@ import math
 import re
 
 from time import time
-from typing import Tuple
+from typing import Tuple, TYPE_CHECKING
 
 from electrum.i18n import _
+
+if TYPE_CHECKING:
+    from electrum.transaction import Transaction
+
+# max inputs+outputs and max serialized size for which we attempt to generate
+# a QR code of a tx. The base43 encoding done by to_qr_data() gets prohibitively
+# slow for large txs (quadratic in size), and such txs cannot fit in a QR code
+# anyway (max ~3 kB at the highest QR version).
+_TX_QR_MAX_TXIOS = 20
+_TX_QR_MAX_SIZE_BYTES = 3000
+
+
+def tx_qr_data_or_empty(tx: 'Transaction') -> Tuple[str, bool]:
+    """Return tx.to_qr_data(), or ('', False) if the tx is too large for a QR code."""
+    if len(tx.inputs()) + len(tx.outputs()) > _TX_QR_MAX_TXIOS:
+        return '', False
+    if tx.estimated_total_size() > _TX_QR_MAX_SIZE_BYTES:
+        return '', False
+    return tx.to_qr_data()
 
 
 # return delay in msec when expiry time string should be updated

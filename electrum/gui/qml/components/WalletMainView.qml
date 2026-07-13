@@ -93,11 +93,14 @@ Item {
             text: data[0],
             text_qr: data[1],
             text_help: helptext,
-            text_warn: data[2]
-                ? ''
-                : [qsTr('Warning: Some data (prev txs / "full utxos") was left out of the QR code as it would not fit.'),
-                   qsTr('This might cause issues if signing offline.'),
-                   qsTr('As a workaround, copy to clipboard or use the Share option instead.')].join(' '),
+            text_warn: !data[1]
+                ? [qsTr('Warning: The transaction is too large to be shown as a QR code.'),
+                   qsTr('Copy to clipboard or use the Share option instead.')].join(' ')
+                : data[2]
+                    ? ''
+                    : [qsTr('Warning: Some data (prev txs / "full utxos") was left out of the QR code as it would not fit.'),
+                       qsTr('This might cause issues if signing offline.'),
+                       qsTr('As a workaround, copy to clipboard or use the Share option instead.')].join(' '),
             tx_label: data[3]
         })
         dialog.open()
