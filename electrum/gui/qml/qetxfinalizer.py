@@ -312,8 +312,9 @@ class TxFeeSlider(FeeSlider):
     def doUpdate(self):
         self.update()
 
-    def update_from_tx(self, tx: PartialTransaction):
-        tx_size = tx.estimated_size()
+    def update_from_tx(self, tx: PartialTransaction, *, tx_size: Optional[int] = None):
+        if tx_size is None:
+            tx_size = tx.estimated_size()
         fee = tx.get_fee()
         feerate = Decimal(fee) / tx_size  # sat/byte
 
@@ -374,13 +375,15 @@ class TxFeeSlider(FeeSlider):
             })
         self.outputs = outputs
 
-    def update_fee_warning_from_tx(self, *, tx: PartialTransaction, invoice_amt: Optional[int]):
+    def update_fee_warning_from_tx(self, *, tx: PartialTransaction, invoice_amt: Optional[int], tx_size: Optional[int] = None):
+        if tx_size is None:
+            tx_size = tx.estimated_size()
         if invoice_amt is None:
             invoice_amt = sum([txo.value for txo in tx.outputs() if not txo.is_mine])
             if invoice_amt == 0:
                 invoice_amt = tx.output_value()
         fee_warning_tuple = self._wallet.wallet.get_tx_fee_warning(
-            invoice_amt=invoice_amt, tx_size=tx.estimated_size(), fee=tx.get_fee(), txid=tx.txid())
+            invoice_amt=invoice_amt, tx_size=tx_size, fee=tx.get_fee(), txid=tx.txid())
         if fee_warning_tuple:
             allow_send, long_warning, short_warning = fee_warning_tuple
             self.warning = _('Warning') + ': ' + long_warning
@@ -402,7 +405,7 @@ class QETxFinalizer(TxFeeSlider):
     finished = pyqtSignal([bool, bool, bool], arguments=['signed', 'saved', 'complete'])
     signError = pyqtSignal([str], arguments=['message'])
 
-    _makeTxFinished = pyqtSignal(object, str)
+    _makeTxFinished = pyqtSignal(object, int, str)
 
     def __init__(
         self,
@@ -520,24 +523,29 @@ class QETxFinalizer(TxFeeSlider):
             # runs in a background thread; for wallets with many UTXOs make_tx
             # takes seconds and would freeze the GUI thread
             tx = None
+            tx_size = 0
             warning = ''
             try:
                 tx = self.make_tx(amount=amount)
+                # the size estimate is not cached and expensive for large txs,
+                # so compute it here instead of in the GUI-thread continuation
+                tx_size = tx.estimated_size()
             except NotEnoughFunds:
                 warning = self._wallet.wallet.get_text_not_enough_funds_mentioning_frozen(for_amount=amount)
             except NoDynamicFeeEstimates:
                 warning = _('No dynamic fee estimates available')
             except Exception as e:
                 self._logger.error(str(e))
+                tx = None
                 warning = repr(e)
             try:
-                self._makeTxFinished.emit(tx, warning)
+                self._makeTxFinished.emit(tx, tx_size, warning)
             except RuntimeError:  # wrapped C++ object deleted (dialog closed)
                 pass
 
         threading.Thread(target=make_tx_task, daemon=True).start()
 
-    def _on_make_tx_finished(self, tx: Optional[PartialTransaction], warning: str):
+    def _on_make_tx_finished(self, tx: Optional[PartialTransaction], tx_size: int, warning: str):
         if self._update_pending:
             # parameters changed while the tx was being built; build again
             self._update_pending = False
@@ -560,14 +568,14 @@ class QETxFinalizer(TxFeeSlider):
         self._effectiveAmount.satsInt = amount
         self.effectiveAmountChanged.emit()
 
-        self.update_from_tx(tx)
+        self.update_from_tx(tx, tx_size=tx_size)
 
         x_fee = run_hook('get_tx_extra_fee', self._wallet.wallet, tx)
         if x_fee:
             x_fee_address, x_fee_amount = x_fee
             self.extraFee = QEAmount(amount_sat=x_fee_amount)
 
-        self.update_fee_warning_from_tx(tx=tx, invoice_amt=amount)
+        self.update_fee_warning_from_tx(tx=tx, invoice_amt=amount, tx_size=tx_size)
 
         if self._amount.isMax and not self.warning:
             if reserve_sats := self._wallet.wallet.tx_keeps_ln_utxo_reserve(
