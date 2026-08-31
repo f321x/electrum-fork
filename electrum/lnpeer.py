@@ -278,7 +278,10 @@ class Peer(Logger, EventListener):
         if time.time() - self.last_message_time > 30:
             self.send_message('ping', num_pong_bytes=4, byteslen=4)
             self.pong_event.clear()
-            await self.pong_event.wait()
+            try:
+                await util.wait_for2(self.pong_event.wait(), LN_P2P_NETWORK_TIMEOUT)
+            except asyncio.TimeoutError as e:
+                raise GracefulDisconnect("pong timed out") from e
 
     async def _process_message(self, message: bytes) -> None:
         try:
@@ -619,6 +622,7 @@ class Peer(Logger, EventListener):
                 await util.wait_for2(self.initialized, LN_P2P_NETWORK_TIMEOUT)
             except Exception as e:
                 raise GracefulDisconnect(f"Failed to initialize: {e!r}") from e
+            await group.spawn(self._monitor_connection())
             await group.spawn(self._query_gossip())
             await group.spawn(self._process_gossip())
             await group.spawn(self._send_own_gossip())
@@ -626,6 +630,13 @@ class Peer(Logger, EventListener):
             if self.network.lngossip != self.lnworker:
                 await group.spawn(self.htlc_switch())
                 await group.spawn(self._send_onion_messages())
+
+    async def _monitor_connection(self):
+        # this mirrors Interface.monitor_connection.
+        while True:
+            await asyncio.sleep(1)
+            if self.transport.is_closing():
+                raise GracefulDisconnect('transport was closed')
 
     async def _process_gossip(self):
         while True:
