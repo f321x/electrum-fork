@@ -129,7 +129,7 @@ async def node_flag_stats(opt_flag: LnFeatures, presync: False):
         print(f"analyzing {len(nodes.keys())} nodes")
 
         # 1. statistics on graph
-        req_flag = LnFeatures(opt_flag >> 1)
+        req_flag = LnFeatures.from_bits(bit - 1 for bit in opt_flag.bits)
         for n, nv in nodes.items():
             features = LnFeatures(nv.features)
             if features & opt_flag:

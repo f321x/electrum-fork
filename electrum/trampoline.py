@@ -339,7 +339,7 @@ def create_trampoline_route(
         invoice_routing_info: List[bytes] = encode_routing_info(r_tags)
         assert invoice_routing_info == encode_routing_info(decode_routing_info(b''.join(invoice_routing_info)))
         # lnwire invoice_features for trampoline is u64
-        invoice_features = invoice_features & 0xffffffffffffffff
+        invoice_features = int(invoice_features) & 0xffffffffffffffff
         route[-1].invoice_routing_info = invoice_routing_info
         route[-1].invoice_features = invoice_features
         route[-1].outgoing_node_id = invoice_pubkey
@@ -416,7 +416,7 @@ def create_trampoline_onion(
             }
         # legacy
         if i == num_hops - 2 and route_edge.invoice_features:
-            payload["invoice_features"] = {"invoice_features": route_edge.invoice_features}
+            payload["invoice_features"] = {"invoice_features": int(route_edge.invoice_features)}
             routing_info_payload_index = i
             payload["payment_data"] = {
                 "payment_secret": payment_secret,

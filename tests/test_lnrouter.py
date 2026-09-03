@@ -42,7 +42,7 @@ def node_features(extra: LnFeatures = None) -> bytes:
     lnf = LnFeatures(0) | LnFeatures.VAR_ONION_OPT
     if extra:
         lnf |= extra
-    return lnf.to_bytes(8, 'big')
+    return lnf.to_bytes().rjust(8, b'\x00')
 
 
 class Test_LNRouter(ElectrumTestCase):

@@ -5,10 +5,10 @@ from enum import IntFlag, IntEnum
 import enum
 from typing import (
     NamedTuple, List, Tuple, Mapping, Optional, TYPE_CHECKING, Union, Dict, Set, Sequence, FrozenSet,
-    TypedDict,
+    TypedDict, Iterable
 )
-import sys
 import time
+import operator
 from functools import lru_cache
 
 import electrum_ecc as ecc
@@ -29,7 +29,7 @@ from .bitcoin import redeem_script_to_address, address_to_script, construct_witn
     construct_script, NLOCKTIME_BLOCKHEIGHT_MAX
 from .i18n import _
 from .bip32 import BIP32Node, BIP32_PRIME
-from .transaction import BCDataStream, OPPushDataGeneric
+from .transaction import BCDataStream, OPPushDataGeneric, SerializationError
 from .logging import get_logger
 from .fee_policy import FEERATE_PER_KW_MIN_RELAY_LIGHTNING
 from .stored_dict import StoredObject, stored_at
@@ -78,6 +78,27 @@ def hex_to_bytes(arg: Optional[Union[bytes, str]]) -> Optional[bytes]:
 
 def bytes_to_hex(arg: Optional[bytes]) -> Optional[str]:
     return repr(arg.hex()) if arg is not None else None
+
+
+def write_sparse_bits(vds: BCDataStream, bits: Iterable[int]) -> None:
+    """Sparse encoding of a bitvector: the number of set bits, followed by the index
+    of each set bit in ascending order, all as compact_size. Its size is proportional
+    to the number of set bits, unlike the dense bitvector used on the wire."""
+    bits = sorted(bits)
+    vds.write_compact_size(len(bits))
+    for bit in bits:
+        vds.write_compact_size(bit)
+
+
+def read_sparse_bits(vds: BCDataStream) -> Tuple[int, ...]:
+    """Inverse of write_sparse_bits. Returns the indices of the set bits."""
+    bits = []
+    for _ in range(vds.read_compact_size()):
+        bit = vds.read_compact_size()
+        if bits and bit <= bits[-1]:
+            raise SerializationError("sparse bits must be strictly ascending")
+        bits.append(bit)
+    return tuple(bits)
 
 
 def json_to_keypair(arg: Union['OnlyPubkeyKeypair', dict]) -> Union['OnlyPubkeyKeypair', 'Keypair']:
@@ -1461,134 +1482,250 @@ LNFC = LnFeatureContexts
 LNFC_ALL = ~LnFeatureContexts(0)
 LNFC_BOLT12 = LNFC.BOLT12_OFFER | LNFC.BOLT12_INVREQ | LNFC.BOLT12_INVOICE
 
-_ln_feature_direct_dependencies = {}  # type: Dict[LnFeatureContexts, Dict[LnFeatures, FrozenSet[LnFeatures]]]
-_ln_feature_contexts = {}  # type: Dict[LnFeatures, LnFeatureContexts]
+_ln_feature_direct_dependencies = {}  # type: Dict[LnFeatureContexts, Dict[int, FrozenSet[int]]]
+_ln_feature_contexts = {}  # type: Dict[int, LnFeatureContexts]
 
-def _register_transitive_deps(dependant: 'LnFeatures', direct_deps: Set['LnFeatures'], *, contexts: LnFeatureContexts):
+def _register_transitive_deps(dependant: int, direct_deps: Set[int], *, contexts: LnFeatureContexts):
     for context in LnFeatureContexts:
         if context & contexts:
             _ln_feature_direct_dependencies.setdefault(context, {})[dependant] = frozenset(direct_deps)
 
 
-class LnFeatures(IntFlag):
-    OPTION_DATA_LOSS_PROTECT_REQ = 1 << 0
-    OPTION_DATA_LOSS_PROTECT_OPT = 1 << 1
+# Sanity limit on the number of *set* bits in a feature vector (memory usage of
+# LnFeatures is proportional to it). Generous compared to the ~64 bits assigned in BOLT-9.
+MAX_NUM_LN_FEATURE_BITS_SET = 256
+
+
+class _LnFeaturesMeta(type):
+    """Replaces the feature bit indices defined in the class body of LnFeatures
+    with single-feature LnFeatures instances, e.g. LnFeatures.VAR_ONION_OPT."""
+    def __new__(mcs, name, bases, namespace):
+        cls = super().__new__(mcs, name, bases, namespace)
+        for attr_name, bit in namespace.items():
+            if attr_name.isupper() and isinstance(bit, int):
+                cls._bit_names[bit] = attr_name
+                setattr(cls, attr_name, cls.from_bits((bit,)))
+        return cls
+
+
+class LnFeatures(metaclass=_LnFeaturesMeta):
+    """A set of feature bits (see BOLT-9), stored sparsely as the indices of the set bits.
+
+    On the wire, features are a dense big-endian bitvector, see from_bytes/to_bytes.
+    The dense python int is only built on demand (int(features)), so arbitrarily
+    high feature bits are cheap to handle.
+    Single features are class attributes, e.g. LnFeatures.VAR_ONION_OPT (the class
+    body defines their bit index). Feature sets are combined with the set operators
+    (a | b, a & b, a ^ b), and features are removed with a - b.
+    """
+    __slots__ = ('_bits',)
+    _bit_names = {}  # type: Dict[int, str]  # bit index -> feature name, filled by metaclass
+
+    OPTION_DATA_LOSS_PROTECT_REQ = 0
+    OPTION_DATA_LOSS_PROTECT_OPT = 1
     _ln_feature_contexts[OPTION_DATA_LOSS_PROTECT_OPT] = (LNFC.INIT | LnFeatureContexts.NODE_ANN)
     _ln_feature_contexts[OPTION_DATA_LOSS_PROTECT_REQ] = (LNFC.INIT | LnFeatureContexts.NODE_ANN)
 
-    INITIAL_ROUTING_SYNC = 1 << 3
+    INITIAL_ROUTING_SYNC = 3
     _ln_feature_contexts[INITIAL_ROUTING_SYNC] = LNFC.INIT
 
-    OPTION_UPFRONT_SHUTDOWN_SCRIPT_REQ = 1 << 4
-    OPTION_UPFRONT_SHUTDOWN_SCRIPT_OPT = 1 << 5
+    OPTION_UPFRONT_SHUTDOWN_SCRIPT_REQ = 4
+    OPTION_UPFRONT_SHUTDOWN_SCRIPT_OPT = 5
     _ln_feature_contexts[OPTION_UPFRONT_SHUTDOWN_SCRIPT_OPT] = (LNFC.INIT | LNFC.NODE_ANN)
     _ln_feature_contexts[OPTION_UPFRONT_SHUTDOWN_SCRIPT_REQ] = (LNFC.INIT | LNFC.NODE_ANN)
 
-    GOSSIP_QUERIES_REQ = 1 << 6
-    GOSSIP_QUERIES_OPT = 1 << 7
+    GOSSIP_QUERIES_REQ = 6
+    GOSSIP_QUERIES_OPT = 7
     _ln_feature_contexts[GOSSIP_QUERIES_OPT] = (LNFC.INIT | LNFC.NODE_ANN)
     _ln_feature_contexts[GOSSIP_QUERIES_REQ] = (LNFC.INIT | LNFC.NODE_ANN)
 
-    VAR_ONION_REQ = 1 << 8
-    VAR_ONION_OPT = 1 << 9
+    VAR_ONION_REQ = 8
+    VAR_ONION_OPT = 9
     _ln_feature_contexts[VAR_ONION_OPT] = (LNFC.INIT | LNFC.NODE_ANN | LNFC.BOLT11_INVOICE)
     _ln_feature_contexts[VAR_ONION_REQ] = (LNFC.INIT | LNFC.NODE_ANN | LNFC.BOLT11_INVOICE)
 
-    GOSSIP_QUERIES_EX_REQ = 1 << 10
-    GOSSIP_QUERIES_EX_OPT = 1 << 11
+    GOSSIP_QUERIES_EX_REQ = 10
+    GOSSIP_QUERIES_EX_OPT = 11
     _register_transitive_deps(GOSSIP_QUERIES_EX_OPT, {GOSSIP_QUERIES_OPT}, contexts=LNFC_ALL)
     _ln_feature_contexts[GOSSIP_QUERIES_EX_OPT] = (LNFC.INIT | LNFC.NODE_ANN)
     _ln_feature_contexts[GOSSIP_QUERIES_EX_REQ] = (LNFC.INIT | LNFC.NODE_ANN)
 
-    OPTION_STATIC_REMOTEKEY_REQ = 1 << 12
-    OPTION_STATIC_REMOTEKEY_OPT = 1 << 13
+    OPTION_STATIC_REMOTEKEY_REQ = 12
+    OPTION_STATIC_REMOTEKEY_OPT = 13
     _ln_feature_contexts[OPTION_STATIC_REMOTEKEY_OPT] = (LNFC.INIT | LNFC.NODE_ANN)
     _ln_feature_contexts[OPTION_STATIC_REMOTEKEY_REQ] = (LNFC.INIT | LNFC.NODE_ANN)
 
-    PAYMENT_SECRET_REQ = 1 << 14
-    PAYMENT_SECRET_OPT = 1 << 15
+    PAYMENT_SECRET_REQ = 14
+    PAYMENT_SECRET_OPT = 15
     _register_transitive_deps(PAYMENT_SECRET_OPT, {VAR_ONION_OPT}, contexts=LNFC_ALL)
     _ln_feature_contexts[PAYMENT_SECRET_OPT] = (LNFC.INIT | LNFC.NODE_ANN | LNFC.BOLT11_INVOICE)
     _ln_feature_contexts[PAYMENT_SECRET_REQ] = (LNFC.INIT | LNFC.NODE_ANN | LNFC.BOLT11_INVOICE)
 
-    BASIC_MPP_REQ = 1 << 16
-    BASIC_MPP_OPT = 1 << 17
+    BASIC_MPP_REQ = 16
+    BASIC_MPP_OPT = 17
     _register_transitive_deps(BASIC_MPP_OPT, {PAYMENT_SECRET_OPT}, contexts=~LNFC_BOLT12)
     _ln_feature_contexts[BASIC_MPP_OPT] = (LNFC.INIT | LNFC.NODE_ANN | LNFC.BOLT11_INVOICE | LNFC.BOLT12_INVOICE)
     _ln_feature_contexts[BASIC_MPP_REQ] = (LNFC.INIT | LNFC.NODE_ANN | LNFC.BOLT11_INVOICE | LNFC.BOLT12_INVOICE)
 
-    OPTION_SUPPORT_LARGE_CHANNEL_REQ = 1 << 18
-    OPTION_SUPPORT_LARGE_CHANNEL_OPT = 1 << 19
+    OPTION_SUPPORT_LARGE_CHANNEL_REQ = 18
+    OPTION_SUPPORT_LARGE_CHANNEL_OPT = 19
     _ln_feature_contexts[OPTION_SUPPORT_LARGE_CHANNEL_OPT] = (LNFC.INIT | LNFC.NODE_ANN)
     _ln_feature_contexts[OPTION_SUPPORT_LARGE_CHANNEL_REQ] = (LNFC.INIT | LNFC.NODE_ANN)
 
-    OPTION_ANCHORS_REQ = 1 << 22
-    OPTION_ANCHORS_OPT = 1 << 23
+    OPTION_ANCHORS_REQ = 22
+    OPTION_ANCHORS_OPT = 23
     _register_transitive_deps(OPTION_ANCHORS_OPT, {OPTION_STATIC_REMOTEKEY_OPT}, contexts=LNFC_ALL)
     _ln_feature_contexts[OPTION_ANCHORS_REQ] = (LNFC.INIT | LNFC.NODE_ANN)
     _ln_feature_contexts[OPTION_ANCHORS_OPT] = (LNFC.INIT | LNFC.NODE_ANN)
 
     # Temporary number.
-    OPTION_TRAMPOLINE_ROUTING_REQ_ECLAIR = 1 << 148
-    OPTION_TRAMPOLINE_ROUTING_OPT_ECLAIR = 1 << 149
+    OPTION_TRAMPOLINE_ROUTING_REQ_ECLAIR = 148
+    OPTION_TRAMPOLINE_ROUTING_OPT_ECLAIR = 149
     _ln_feature_contexts[OPTION_TRAMPOLINE_ROUTING_REQ_ECLAIR] = (LNFC.INIT | LNFC.NODE_ANN | LNFC.BOLT11_INVOICE | LNFC.BOLT12_INVOICE)
     _ln_feature_contexts[OPTION_TRAMPOLINE_ROUTING_OPT_ECLAIR] = (LNFC.INIT | LNFC.NODE_ANN | LNFC.BOLT11_INVOICE | LNFC.BOLT12_INVOICE)
 
     # We use a different bit because Phoenix cannot do end-to-end multi-trampoline routes
-    OPTION_TRAMPOLINE_ROUTING_REQ_ELECTRUM = 1 << 150
-    OPTION_TRAMPOLINE_ROUTING_OPT_ELECTRUM = 1 << 151
+    OPTION_TRAMPOLINE_ROUTING_REQ_ELECTRUM = 150
+    OPTION_TRAMPOLINE_ROUTING_OPT_ELECTRUM = 151
     _ln_feature_contexts[OPTION_TRAMPOLINE_ROUTING_REQ_ELECTRUM] = (LNFC.INIT | LNFC.NODE_ANN | LNFC.BOLT11_INVOICE | LNFC.BOLT12_INVOICE)
     _ln_feature_contexts[OPTION_TRAMPOLINE_ROUTING_OPT_ELECTRUM] = (LNFC.INIT | LNFC.NODE_ANN | LNFC.BOLT11_INVOICE | LNFC.BOLT12_INVOICE)
 
-    OPTION_ROUTE_BLINDING_REQ = 1 << 24
-    OPTION_ROUTE_BLINDING_OPT = 1 << 25
+    OPTION_ROUTE_BLINDING_REQ = 24
+    OPTION_ROUTE_BLINDING_OPT = 25
     _register_transitive_deps(OPTION_ROUTE_BLINDING_OPT, {VAR_ONION_OPT}, contexts=LNFC_ALL)
     _ln_feature_contexts[OPTION_ROUTE_BLINDING_REQ] = (LNFC.INIT | LNFC.NODE_ANN | LNFC.BOLT11_INVOICE)
     _ln_feature_contexts[OPTION_ROUTE_BLINDING_OPT] = (LNFC.INIT | LNFC.NODE_ANN | LNFC.BOLT11_INVOICE)
 
-    OPTION_SHUTDOWN_ANYSEGWIT_REQ = 1 << 26
-    OPTION_SHUTDOWN_ANYSEGWIT_OPT = 1 << 27
+    OPTION_SHUTDOWN_ANYSEGWIT_REQ = 26
+    OPTION_SHUTDOWN_ANYSEGWIT_OPT = 27
     _ln_feature_contexts[OPTION_SHUTDOWN_ANYSEGWIT_REQ] = (LNFC.INIT | LNFC.NODE_ANN)
     _ln_feature_contexts[OPTION_SHUTDOWN_ANYSEGWIT_OPT] = (LNFC.INIT | LNFC.NODE_ANN)
 
-    OPTION_ONION_MESSAGE_REQ = 1 << 38
-    OPTION_ONION_MESSAGE_OPT = 1 << 39
+    OPTION_ONION_MESSAGE_REQ = 38
+    OPTION_ONION_MESSAGE_OPT = 39
     _ln_feature_contexts[OPTION_ONION_MESSAGE_REQ] = (LNFC.INIT | LNFC.NODE_ANN)
     _ln_feature_contexts[OPTION_ONION_MESSAGE_OPT] = (LNFC.INIT | LNFC.NODE_ANN)
 
-    OPTION_CHANNEL_TYPE_REQ = 1 << 44
-    OPTION_CHANNEL_TYPE_OPT = 1 << 45
+    OPTION_CHANNEL_TYPE_REQ = 44
+    OPTION_CHANNEL_TYPE_OPT = 45
     _ln_feature_contexts[OPTION_CHANNEL_TYPE_REQ] = (LNFC.INIT | LNFC.NODE_ANN)
     _ln_feature_contexts[OPTION_CHANNEL_TYPE_OPT] = (LNFC.INIT | LNFC.NODE_ANN)
 
-    OPTION_SCID_ALIAS_REQ = 1 << 46
-    OPTION_SCID_ALIAS_OPT = 1 << 47
+    OPTION_SCID_ALIAS_REQ = 46
+    OPTION_SCID_ALIAS_OPT = 47
     _ln_feature_contexts[OPTION_SCID_ALIAS_REQ] = (LNFC.INIT | LNFC.NODE_ANN)
     _ln_feature_contexts[OPTION_SCID_ALIAS_OPT] = (LNFC.INIT | LNFC.NODE_ANN)
 
-    OPTION_ZEROCONF_REQ = 1 << 50
-    OPTION_ZEROCONF_OPT = 1 << 51
+    OPTION_ZEROCONF_REQ = 50
+    OPTION_ZEROCONF_OPT = 51
     _register_transitive_deps(OPTION_ZEROCONF_OPT, {OPTION_SCID_ALIAS_OPT}, contexts=LNFC_ALL)
     _ln_feature_contexts[OPTION_ZEROCONF_REQ] = (LNFC.INIT | LNFC.NODE_ANN)
     _ln_feature_contexts[OPTION_ZEROCONF_OPT] = (LNFC.INIT | LNFC.NODE_ANN)
 
+    def __init__(self, features: Union[int, 'LnFeatures'] = 0):
+        """features: a dense bitvector as int (as e.g. stored in the wallet db), or another LnFeatures."""
+        if isinstance(features, LnFeatures):
+            self._bits = features._bits
+        elif isinstance(features, int):
+            assert features >= 0, features
+            if features.bit_count() > MAX_NUM_LN_FEATURE_BITS_SET:  # cheap check before expanding the int
+                raise IncompatibleOrInsaneFeatures(f"too many feature bits set: {features.bit_count()}")
+            self._bits = self._checked_bits(list_enabled_bits(features))
+        else:
+            raise TypeError(f"cannot construct LnFeatures from {type(features)}")
+
+    @staticmethod
+    def _checked_bits(bits: Iterable[int]) -> FrozenSet[int]:
+        bits = frozenset(bits)
+        if len(bits) > MAX_NUM_LN_FEATURE_BITS_SET:
+            raise IncompatibleOrInsaneFeatures(f"too many feature bits set: {len(bits)}")
+        return bits
+
+    @classmethod
+    def from_bits(cls, bits: Iterable[int]) -> 'LnFeatures':
+        """From the indices of the set bits."""
+        self = cls.__new__(cls)
+        self._bits = cls._checked_bits(bits)
+        return self
+
+    @property
+    def bits(self) -> FrozenSet[int]:
+        """The indices of the set bits."""
+        return self._bits
+
+    @classmethod
+    def from_bytes(cls, b: bytes) -> 'LnFeatures':
+        """From the dense big-endian bitvector used on the wire."""
+        return cls(int.from_bytes(b, byteorder='big'))
+
+    def to_bytes(self) -> bytes:
+        """Dense big-endian bitvector of minimal length, as used on the wire."""
+        n = int(self)
+        return n.to_bytes((n.bit_length() + 7) // 8, byteorder='big')
+
+    @classmethod
+    def from_sparse_bytes(cls, b: bytes) -> 'LnFeatures':
+        vds = BCDataStream()
+        vds.write(b)
+        features = cls.from_bits(read_sparse_bits(vds))
+        if vds.can_read_more():
+            raise SerializationError("trailing bytes after sparse feature bits")
+        return features
+
+    def to_sparse_bytes(self) -> bytes:
+        """Sparse encoding, see write_sparse_bits. Size is proportional to the number of set bits."""
+        vds = BCDataStream()
+        write_sparse_bits(vds, self._bits)
+        return bytes(vds.input)
+
+    def to_json(self) -> List[int]:
+        return sorted(self._bits)
+
+    def __int__(self) -> int:
+        """The dense bitvector as int."""
+        return sum(1 << bit for bit in self._bits)
+
+    def __bool__(self) -> bool:
+        return bool(self._bits)
+
+    def __eq__(self, other) -> bool:
+        if not isinstance(other, LnFeatures):
+            return NotImplemented
+        return self._bits == other._bits
+
+    def __hash__(self) -> int:
+        return hash(self._bits)
+
+    def _set_op(self, other, op) -> 'LnFeatures':
+        if isinstance(other, int):
+            other = LnFeatures(other)
+        if not isinstance(other, LnFeatures):
+            return NotImplemented
+        return LnFeatures.from_bits(op(self._bits, other._bits))
+
+    def __or__(self, other) -> 'LnFeatures': return self._set_op(other, operator.or_)
+    def __and__(self, other) -> 'LnFeatures': return self._set_op(other, operator.and_)
+    def __xor__(self, other) -> 'LnFeatures': return self._set_op(other, operator.xor)
+    def __sub__(self, other) -> 'LnFeatures': return self._set_op(other, operator.sub)
+    __ror__ = __or__
+    __rand__ = __and__
+    __rxor__ = __xor__
+
     def validate_transitive_dependencies(self, *, context: LnFeatureContexts) -> bool:
         # for all even bit set, set corresponding odd bit:
-        features = self  # copy
-        flags = list_enabled_bits(features)
-        for flag in flags:
-            if flag % 2 == 0:
-                features |= 1 << get_ln_flag_pair_of_bit(flag)
+        bits = set(self._bits)
+        for bit in self._bits:
+            if bit % 2 == 0:
+                bits.add(get_ln_flag_pair_of_bit(bit))
         # use a single context for CHAN_ANN_*
         if context in (LnFeatureContexts.CHAN_ANN_ALWAYS_EVEN, LnFeatureContexts.CHAN_ANN_ALWAYS_ODD):
             context = LnFeatureContexts.CHAN_ANN_AS_IS
         # Check dependencies. We only check that the direct dependencies of each flag set
         # are satisfied: this implies that transitive dependencies are also satisfied.
-        direct_deps = _ln_feature_direct_dependencies.get(context, {})  # type: dict[LnFeatures, FrozenSet[LnFeatures]]
-        flags = list_enabled_bits(features)
-        for flag in flags:
-            for dependency in direct_deps.get(LnFeatures(1 << flag), frozenset()):
-                if not (dependency & features):
+        direct_deps = _ln_feature_direct_dependencies.get(context, {})  # type: Dict[int, FrozenSet[int]]
+        for bit in bits:
+            for dependency in direct_deps.get(bit, frozenset()):
+                if dependency not in bits:
                     return False
         return True
 
@@ -1614,19 +1751,19 @@ class LnFeatures(IntFlag):
         return self._for_context(LnFeatureContexts.BLINDED_PATH)
 
     def for_channel_announcement(self) -> 'LnFeatures':
-        features = LnFeatures(0)
-        for flag in list_enabled_ln_feature_bits(self):
-            ctxs = _ln_feature_contexts[1 << flag]
+        bits = set()
+        for bit in list_enabled_ln_feature_bits(self):
+            ctxs = _ln_feature_contexts[bit]
             if LnFeatureContexts.CHAN_ANN_AS_IS & ctxs:
-                features |= (1 << flag)
+                bits.add(bit)
             elif LnFeatureContexts.CHAN_ANN_ALWAYS_EVEN & ctxs:
-                if flag % 2 == 0:
-                    features |= (1 << flag)
+                if bit % 2 == 0:
+                    bits.add(bit)
             elif LnFeatureContexts.CHAN_ANN_ALWAYS_ODD & ctxs:
-                if flag % 2 == 0:
-                    flag = get_ln_flag_pair_of_bit(flag)
-                features |= (1 << flag)
-        return features
+                if bit % 2 == 0:
+                    bit = get_ln_flag_pair_of_bit(bit)
+                bits.add(bit)
+        return LnFeatures.from_bits(bits)
 
     def min_len(self) -> int:
         b = int.bit_length(self)
@@ -1641,47 +1778,25 @@ class LnFeatures(IntFlag):
         you can do:
           myfeatures.supports(LnFeatures.VAR_ONION_OPT)
         """
-        if (1 << (feature.bit_length() - 1)) != feature:
+        if len(feature._bits) != 1:
             raise ValueError(f"'feature' cannot be a combination of features: {feature}")
-        if feature.bit_length() % 2 == 0:  # feature is OPT
-            feature_other = feature >> 1
-        else:  # feature is REQ
-            feature_other = feature << 1
-        return (self & feature != 0) or (self & feature_other != 0)
+        (bit,) = feature._bits
+        return bit in self._bits or get_ln_flag_pair_of_bit(bit) in self._bits
 
     def get_names(self) -> Sequence[str]:
-        r = []
-        for flag in list_enabled_bits(self):
-            feature_name = LnFeatures(1 << flag).name
-            r.append(feature_name or f"bit_{flag}")
-        return r
-
-    def to_tlv_bytes(self) -> bytes:
-        if int(self) == 0:
-            return b''
-        a = hex(int(self))[2:]
-        b = (len(a) % 2) * '0' + a
-        d = bytes.fromhex(b)
-        return d
+        return [self._bit_names.get(bit, f"bit_{bit}") for bit in sorted(self._bits)]
 
     def _for_context(self, context: 'LnFeatureContexts') -> 'LnFeatures':
-        features = LnFeatures(0)
-        for flag in list_enabled_ln_feature_bits(self):
-            if context & _ln_feature_contexts[1 << flag]:
-                features |= (1 << flag)
-        return features
-
-    if hasattr(IntFlag, "_numeric_repr_"):  # python 3.11+
-        # performance improvement (avoid base2<->base10), see #8403
-        _numeric_repr_ = hex
+        return LnFeatures.from_bits(
+            bit for bit in list_enabled_ln_feature_bits(self)
+            if context & _ln_feature_contexts[bit])
 
     def __repr__(self):
-        # performance improvement (avoid base2<->base10), see #8403
-        return f"<{self._name_}: {hex(self._value_)}>"
+        return f"<LnFeatures: {self}>"
 
     def __str__(self):
-        # performance improvement (avoid base2<->base10), see #8403
-        return hex(self._value_)
+        return '|'.join(self.get_names())
+
 
 
 @stored_at('/channels/*/channel_type', _type=None)
@@ -1714,7 +1829,7 @@ class ChannelType(IntFlag):
         cflags = list_enabled_bits(self)
         # channel flags must be a SUBSET of peer_features
         for cflag in cflags:
-            feature = LnFeatures(1 << cflag)
+            feature = LnFeatures.from_bits((cflag,))
             if not peer_features.supports(feature):
                 return False
         return True
@@ -1819,10 +1934,13 @@ class GossipForwardingMessage:
         return cls(msg, scid, timestamp, sender_node_id)
 
 
-def list_enabled_ln_feature_bits(features: int) -> tuple[int, ...]:
+def list_enabled_ln_feature_bits(features: Union[int, LnFeatures]) -> tuple[int, ...]:
     """Returns a list of enabled feature bits. If both opt and req are set, only
     req will be included in the result."""
-    all_enabled_bits = list_enabled_bits(features)
+    if isinstance(features, LnFeatures):
+        all_enabled_bits = sorted(features.bits)
+    else:
+        all_enabled_bits = list_enabled_bits(features)
     single_feature_bits: set[int] = set()
     for bit in all_enabled_bits:
         if bit % 2 == 0:  # even bit, always added
@@ -1838,56 +1956,45 @@ class UnknownEvenFeatureBits(IncompatibleOrInsaneFeatures): pass
 class IncompatibleLightningFeatures(IncompatibleOrInsaneFeatures): pass
 
 
-def ln_compare_features(our_features: 'LnFeatures', their_features: int) -> 'LnFeatures':
+def ln_compare_features(our_features: LnFeatures, their_features: LnFeatures) -> LnFeatures:
     """Returns negotiated features.
     Raises IncompatibleLightningFeatures if incompatible.
     """
-    our_flags = set(list_enabled_bits(our_features))
-    their_flags = set(list_enabled_bits(their_features))
+    our_bits = our_features.bits
+    their_bits = their_features.bits
+    negotiated = set(our_bits)
     # check that they have our required features, and disable the optional features they don't have
-    for flag in our_flags:
-        if flag not in their_flags and get_ln_flag_pair_of_bit(flag) not in their_flags:
+    for bit in our_bits:
+        if bit not in their_bits and get_ln_flag_pair_of_bit(bit) not in their_bits:
             # they don't have this feature we wanted :(
-            if flag % 2 == 0:  # even flags are compulsory
-                raise IncompatibleLightningFeatures(f"remote does not support {LnFeatures(1 << flag)!r}")
-            our_features ^= 1 << flag  # disable flag
-        else:
-            # They too have this flag.
-            # For easier feature-bit-testing, if this is an even flag, we also
-            # set the corresponding odd flag now.
-            if flag % 2 == 0 and our_features & (1 << flag):
-                our_features |= 1 << get_ln_flag_pair_of_bit(flag)
+            if bit % 2 == 0:  # even bits are compulsory
+                raise IncompatibleLightningFeatures(f"remote does not support {LnFeatures.from_bits((bit,))!r}")
+            negotiated.discard(bit)
+        elif bit % 2 == 0:
+            # They too have this feature.
+            # For easier feature-bit-testing, if this is an even bit, we also
+            # set the corresponding odd bit now.
+            negotiated.add(get_ln_flag_pair_of_bit(bit))
     # check that we have their required features
-    for flag in their_flags:
-        if flag not in our_flags and get_ln_flag_pair_of_bit(flag) not in our_flags:
+    for bit in their_bits:
+        if bit not in our_bits and get_ln_flag_pair_of_bit(bit) not in our_bits:
             # we don't have this feature they wanted :(
-            if flag % 2 == 0:  # even flags are compulsory
-                raise IncompatibleLightningFeatures(f"remote wanted feature we don't have: {LnFeatures(1 << flag)!r}")
-    return our_features
-
-
-if hasattr(sys, "get_int_max_str_digits"):
-    # check that the user or other library has not lowered the limit (from default)
-    assert sys.get_int_max_str_digits() >= 4300, f"sys.get_int_max_str_digits() too low: {sys.get_int_max_str_digits()}"
+            if bit % 2 == 0:  # even bits are compulsory
+                raise IncompatibleLightningFeatures(f"remote wanted feature we don't have: {LnFeatures.from_bits((bit,))!r}")
+    return LnFeatures.from_bits(negotiated)
 
 
 @lru_cache(maxsize=1000)  # massive speedup for the hot path of channel_db.load_data()
-def validate_features(features: int, *, context: LnFeatureContexts) -> LnFeatures:
+def validate_features(features: Union[LnFeatures, int], *, context: LnFeatureContexts) -> LnFeatures:
     """Raises IncompatibleOrInsaneFeatures if
     - a mandatory feature is listed that we don't recognize, or
     - the features are inconsistent
     For convenience, returns the parsed features.
     """
-    if features.bit_length() > 10_000:
-        # This is an implementation-specific limit for how high feature bits we allow.
-        # Needed as LnFeatures subclasses IntFlag, and uses ints internally.
-        # See https://docs.python.org/3/library/stdtypes.html#integer-string-conversion-length-limitation
-        raise IncompatibleOrInsaneFeatures(f"features bitvector too large: {features.bit_length()=} > 10_000")
     features = LnFeatures(features)
-    enabled_features = list_enabled_bits(features)
-    for fbit in enabled_features:
-        if (1 << fbit) & LN_FEATURES_IMPLEMENTED == 0 and fbit % 2 == 0:
-            raise UnknownEvenFeatureBits(fbit)
+    for bit in sorted(features.bits):
+        if bit % 2 == 0 and bit not in LN_FEATURES_IMPLEMENTED.bits:
+            raise UnknownEvenFeatureBits(bit)
     if not features.validate_transitive_dependencies(context=context):
         raise IncompatibleOrInsaneFeatures(f"not all transitive dependencies are set. "
                                            f"features={features}")

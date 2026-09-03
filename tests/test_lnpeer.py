@@ -2263,7 +2263,7 @@ class TestPeerForwarding(TestPeer):
             if mpp_invoice:
                 dave_w.features |= LnFeatures.BASIC_MPP_OPT
             if disable_trampoline_receiving:
-                dave_w.features &= ~LnFeatures.OPTION_TRAMPOLINE_ROUTING_OPT_ELECTRUM
+                dave_w.features -= LnFeatures.OPTION_TRAMPOLINE_ROUTING_OPT_ELECTRUM
             if not bob_forwarding:
                 bob_w.enable_htlc_forwarding = False
             if alice_uses_trampoline:

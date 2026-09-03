@@ -251,7 +251,7 @@ class MockLNWallet(LNWallet):
 
     def __init__(self, *args, **kwargs):
         LNWallet.__init__(self, *args, **kwargs)
-        self.features &= ~LnFeatures.BASIC_MPP_OPT  # by default, disable MPP
+        self.features -= LnFeatures.BASIC_MPP_OPT  # by default, disable MPP
 
     def _add_channel(self, chan: Channel):
         self._channels[chan.channel_id] = chan

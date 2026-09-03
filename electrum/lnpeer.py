@@ -110,7 +110,7 @@ class Peer(Logger, EventListener):
             self.config.ZEROCONF_TRUSTED_NODE and pubkey != lnworker.trusted_zeroconf_node_id:
             # don't signal zeroconf support if we are client (a trusted node is configured),
             # and Peer is not our trusted node
-            self.features &= ~LnFeatures.OPTION_ZEROCONF_OPT
+            self.features -= LnFeatures.OPTION_ZEROCONF_OPT
         self.their_features = LnFeatures(0)  # type: LnFeatures
         self.node_ids = [self.pubkey, privkey_to_pubkey(self.privkey)]
         assert self.node_ids[0] != self.node_ids[1]
@@ -188,10 +188,9 @@ class Peer(Logger, EventListener):
         if isinstance(self.transport, LNTransport):
             await self.transport.handshake()
         self.logger.info(f"handshake done for {self.transport.peer_addr or self.pubkey.hex()}")
-        features = self.features.for_init_message()
-        flen = features.min_len()
+        features = self.features.for_init_message().to_bytes()
         self.send_message(
-            "init", gflen=0, flen=flen,
+            "init", gflen=0, flen=len(features),
             features=features,
             init_tlvs={
                 'networks':
@@ -415,10 +414,9 @@ class Peer(Logger, EventListener):
         if self._received_init:
             self.logger.info("ALREADY INITIALIZED BUT RECEIVED INIT")
             return
-        _their_features = int.from_bytes(payload['features'], byteorder="big")
-        _their_features |= int.from_bytes(payload['globalfeatures'], byteorder="big")
         try:
-            self.their_features = validate_features(_their_features, context=LnFeatureContexts.INIT)
+            their_features = LnFeatures.from_bytes(payload['features']) | LnFeatures.from_bytes(payload['globalfeatures'])
+            self.their_features = validate_features(their_features, context=LnFeatureContexts.INIT)
         except IncompatibleOrInsaneFeatures as e:
             raise GracefulDisconnect(f"remote sent insane features: {repr(e)}")
         # check if features are compatible, and set self.features to what we negotiated
@@ -1850,8 +1848,8 @@ class Peer(Logger, EventListener):
         from .channel_db import NodeInfo
         timestamp = int(time.time())
         node_id = privkey_to_pubkey(self.privkey)
-        features = self.features.for_node_announcement()
-        flen = features.min_len()
+        features = self.features.for_node_announcement().to_bytes()
+        flen = len(features)
         rgb_color = bytes.fromhex(color_hex)
         alias = bytes(alias, 'utf8')
         alias += bytes(32 - len(alias))

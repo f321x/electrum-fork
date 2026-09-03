@@ -11,10 +11,10 @@ from electrum.lnutil import (
     ScriptHtlc, calc_fees_for_commitment_tx, UpdateAddHtlc, LnFeatures, ln_compare_features,
     IncompatibleLightningFeatures, ChannelType, offered_htlc_trim_threshold_sat, received_htlc_trim_threshold_sat,
     ImportedChannelBackupStorage, OnchainChannelBackupStorage, list_enabled_ln_feature_bits, PaymentFeeBudget,
-    LnFeatureContexts
+    LnFeatureContexts, IncompatibleOrInsaneFeatures, MAX_NUM_LN_FEATURE_BITS_SET,
 )
 from electrum.util import bfh, MyEncoder
-from electrum.transaction import Transaction, PartialTransaction, Sighash
+from electrum.transaction import Transaction, PartialTransaction, Sighash, SerializationError
 from electrum.lnworker import LNWallet
 from electrum.wallet import Standard_Wallet
 from electrum.wallet_db import WalletDB, FINAL_SEED_VERSION
@@ -1097,16 +1097,34 @@ class TestLNUtil(ElectrumTestCase):
         ctype = ChannelType.OPTION_STATIC_REMOTEKEY | ChannelType.OPTION_ANCHORS
         self.assertTrue(ctype.complies_with_features(pfeatures))
 
-    def test_to_tlv_bytes(self):
+    def test_to_bytes(self):
         features = LnFeatures.OPTION_DATA_LOSS_PROTECT_REQ
-        self.assertEqual(features.to_tlv_bytes(), bfh('01'))
+        self.assertEqual(features.to_bytes(), bfh('01'))
         features = LnFeatures.OPTION_ROUTE_BLINDING_OPT
-        self.assertEqual(features.to_tlv_bytes(), bfh('02000000'))
+        self.assertEqual(features.to_bytes(), bfh('02000000'))
         features = LnFeatures.OPTION_DATA_LOSS_PROTECT_REQ |\
             LnFeatures.OPTION_ROUTE_BLINDING_OPT |\
             LnFeatures.BASIC_MPP_OPT
-        self.assertEqual(features.to_tlv_bytes(), bfh('02020001'))
-        self.assertEqual(LnFeatures(0).to_tlv_bytes(), b'')
+        self.assertEqual(features.to_bytes(), bfh('02020001'))
+        self.assertEqual(LnFeatures(0).to_bytes(), b'')
+
+    def test_sparse_bytes(self):
+        features = LnFeatures.OPTION_DATA_LOSS_PROTECT_OPT | LnFeatures.BASIC_MPP_OPT | LnFeatures.from_bits((52973,))
+        self.assertEqual(['OPTION_DATA_LOSS_PROTECT_OPT', 'BASIC_MPP_OPT', 'bit_52973'], features.get_names())
+        self.assertEqual(6622, len(features.to_bytes()))  # dense
+        self.assertEqual(bfh('030111fdedce'), features.to_sparse_bytes())  # count, then bit indices
+        self.assertEqual(features, LnFeatures.from_sparse_bytes(features.to_sparse_bytes()))
+        self.assertEqual(features, LnFeatures.from_bytes(features.to_bytes()))
+        self.assertEqual(b'\x00', LnFeatures(0).to_sparse_bytes())
+        with self.assertRaises(SerializationError):  # bit indices must be ascending
+            LnFeatures.from_sparse_bytes(bfh('021101'))
+
+    def test_max_num_feature_bits_set(self):
+        LnFeatures.from_bits(range(MAX_NUM_LN_FEATURE_BITS_SET))
+        with self.assertRaises(IncompatibleOrInsaneFeatures):
+            LnFeatures.from_bits(range(MAX_NUM_LN_FEATURE_BITS_SET + 1))
+        with self.assertRaises(IncompatibleOrInsaneFeatures):
+            LnFeatures.from_bytes(b'\xff' * 1000)
 
     @as_testnet
     async def test_decode_imported_channel_backup_v0(self):

@@ -322,7 +322,7 @@ class TestLNMsg(ElectrumTestCase):
                              features=(LnFeatures.OPTION_STATIC_REMOTEKEY_OPT |
                                        LnFeatures.GOSSIP_QUERIES_OPT |
                                        LnFeatures.GOSSIP_QUERIES_REQ |
-                                       LnFeatures.OPTION_DATA_LOSS_PROTECT_OPT),
+                                       LnFeatures.OPTION_DATA_LOSS_PROTECT_OPT).to_bytes(),
                          ))
         self.assertEqual(bfh("00100000000220c2"),
                          encode_msg("init", gflen=0, flen=2, features=bfh("20c2")))
@@ -334,7 +334,7 @@ class TestLNMsg(ElectrumTestCase):
                              features=(LnFeatures.OPTION_STATIC_REMOTEKEY_OPT |
                                        LnFeatures.GOSSIP_QUERIES_OPT |
                                        LnFeatures.GOSSIP_QUERIES_REQ |
-                                       LnFeatures.OPTION_DATA_LOSS_PROTECT_OPT),
+                                       LnFeatures.OPTION_DATA_LOSS_PROTECT_OPT).to_bytes(),
                              init_tlvs={
                                  'networks':
                                      {'chains': b'CI\x7f\xd7\xf8&\x95q\x08\xf4\xa3\x0f\xd9\xce\xc3\xae\xbay\x97 \x84\xe9\x0e\xad\x01\xea3\t\x00\x00\x00\x00'}

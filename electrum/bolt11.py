@@ -222,9 +222,9 @@ def encode_bolt11_invoice(addr: 'BOLT11Addr', privkey) -> str:
             finalcltvbits = int_to_data5(v)
             data5 += tagged5('c', finalcltvbits)
         elif k == '9':
-            if v == 0:
+            if not v:
                 continue
-            feature_bits = int_to_data5(v)
+            feature_bits = int_to_data5(int(v))
             data5 += tagged5('9', feature_bits)
         else:
             # FIXME: Support unknown tags?

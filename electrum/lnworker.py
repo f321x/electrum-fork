@@ -2657,11 +2657,11 @@ class LNWallet(Logger):
     def _prepare_invoice_features(self, base_features: LnFeatures, *, amount_msat: Optional[int]) -> LnFeatures:
         if not all((not c.is_open() or c.is_frozen_for_receiving()) or self.is_trampoline_peer(c.node_id) \
                         for c in self.channels.values()):
-            base_features &= ~ LnFeatures.OPTION_TRAMPOLINE_ROUTING_OPT_ELECTRUM
+            base_features -= LnFeatures.OPTION_TRAMPOLINE_ROUTING_OPT_ELECTRUM
         needs_jit: bool = self.receive_requires_jit_channel(amount_msat)
         if needs_jit:
             # jit only works with single htlcs, mpp will cause LSP to open channels for each htlc
-            base_features &= ~ LnFeatures.BASIC_MPP_OPT & ~ LnFeatures.BASIC_MPP_REQ
+            base_features -= LnFeatures.BASIC_MPP_OPT | LnFeatures.BASIC_MPP_REQ
         return base_features
 
     def clear_invoices_cache(self):
