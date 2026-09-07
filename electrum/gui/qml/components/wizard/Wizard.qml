@@ -102,8 +102,8 @@ ElDialog {
         return page
     }
 
-    ColumnLayout {
-        anchors.fill: parent
+    // background taps make ElDialog focus on contentItem, set it so android back handler keeps working
+    contentItem: ColumnLayout {
         spacing: 0
 
         // root Item in Wizard, capture back button here and delegate to main
