@@ -8,11 +8,12 @@ assert Sqlite3Recipe.python_depends == []
 
 class Sqlite3RecipePinned(Sqlite3Recipe):
     version = "3.50.0"
-    # The built-in recipe runs "./configure && make" and defaults to the raw source tree
-    # from github. The "autoconf" tarball from sqlite.org is the amalgamation plus that
-    # same (autosetup) configure script, so it builds the same way.
-    url = 'https://www.sqlite.org/2025/sqlite-autoconf-3500000.tar.gz'
-    sha512sum = "e72f58e96bf7e37e40beaf5c3bdc0c9746aea454d08422ba49a0afba9bedf0a5f85f7fb17c24b1ef2ddf916e97de3bce77e6ddf7e614f5470636317578440467"
+    # The built-in recipe runs "./configure --disable-tcl && make" on the raw source tree
+    # ("canonical" configure mode). The "autoconf" amalgamation tarballs from sqlite.org
+    # use the same autosetup script in "autoconf" mode, which does not know --disable-tcl,
+    # so keep the same source tree as the built-in recipe.
+    url = 'https://github.com/sqlite/sqlite/archive/refs/tags/version-{version}.tar.gz'
+    sha512sum = "7ce8f6f34a99a943229fb86f73bda52b6375f727f0a3d9a643fc34c77031f468986ca5153b55a7f36d06567c1e64dbef165f889ebf137570aa4b5755d85a533e"
 
 
 recipe = Sqlite3RecipePinned()
