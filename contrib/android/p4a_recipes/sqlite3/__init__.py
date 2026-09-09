@@ -1,20 +1,18 @@
-import os
-
 from pythonforandroid.recipes.sqlite3 import Sqlite3Recipe
-from pythonforandroid.util import load_source
-
-util = load_source('util', os.path.join(os.path.dirname(os.path.dirname(__file__)), 'util.py'))
 
 
-assert Sqlite3Recipe._version == "3.35.5"
+assert Sqlite3Recipe._version == "3.50.4"
 assert Sqlite3Recipe.depends == []
 assert Sqlite3Recipe.python_depends == []
 
 
-class Sqlite3RecipePinned(util.InheritedRecipeMixin, Sqlite3Recipe):
+class Sqlite3RecipePinned(Sqlite3Recipe):
     version = "3.50.0"
-    url = 'https://www.sqlite.org/2025/sqlite-amalgamation-3500000.zip'
-    sha512sum = "0fd87f2b8140300ce165600f6708aafef19041a181e9f00ed14f7aeaa3c06805c8c54c53751a9ce74d4d666f018ca6f48e3f5b5c874ccb9e1424a528c92326f0"
+    # The built-in recipe runs "./configure && make" and defaults to the raw source tree
+    # from github. The "autoconf" tarball from sqlite.org is the amalgamation plus that
+    # same (autosetup) configure script, so it builds the same way.
+    url = 'https://www.sqlite.org/2025/sqlite-autoconf-3500000.tar.gz'
+    sha512sum = "e72f58e96bf7e37e40beaf5c3bdc0c9746aea454d08422ba49a0afba9bedf0a5f85f7fb17c24b1ef2ddf916e97de3bce77e6ddf7e614f5470636317578440467"
 
 
 recipe = Sqlite3RecipePinned()
