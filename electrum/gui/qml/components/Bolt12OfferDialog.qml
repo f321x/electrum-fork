@@ -18,7 +18,8 @@ ElDialog {
     padding: 0
 
     property bool commentValid: note.text.length <= 64
-    property bool amountValid: amountBtc.textAsSats.satsInt > 0 && amountBtc.textAsSats.satsInt <= Daemon.currentWallet.lightningCanSend.satsInt
+    property bool amountValid: !amountBtc.textAsSats.isEmpty
+        && amountBtc.textAsSats.lte(Daemon.currentWallet.lightningCanSend)
     property bool valid: commentValid && amountValid
 
     ColumnLayout {
@@ -99,16 +100,16 @@ ElDialog {
                         BtcField {
                             id: amountBtc
                             Layout.preferredWidth: rootLayout.width / 3
+                            msatPrecision: true
                             text: 'amount_msat' in invoiceParser.offerData
-                                ? Config.formatSatsForEditing(invoiceParser.offerData['amount_msat'] / 1000)
+                                ? Config.formatMilliSatsForEditing(invoiceParser.offerData['amount_msat'])
                                 : ''
                             readOnly: 'amount_msat' in invoiceParser.offerData
                             // accent color for fixed-amount offers; also overrides gray-out on disabled
                             color: readOnly ? Material.accentColor : Material.foreground
                             fiatfield: amountFiat
-                            onTextAsSatsChanged: {
-                                if (textAsSats)
-                                    invoiceParser.amountOverride = textAsSats
+                            onValueChanged: {
+                                invoiceParser.amountOverride.copyFrom(textAsSats)
                             }
                         }
                         Label {

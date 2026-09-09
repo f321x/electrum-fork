@@ -26,8 +26,9 @@ GridLayout {
         Layout.preferredHeight: 1
     }
     Label {
+        id: btcLabel
         visible: valid
-        text: amount.msatsInt != 0 ? Config.formatMilliSats(amount, false, redacted) : Config.formatSats(amount, false, redacted)
+        text: Config.formatMilliSats(amount, false, redacted)
         font.family: FixedFont
     }
     Label {
@@ -43,7 +44,7 @@ GridLayout {
         font.pixelSize: constants.fontSizeSmall
     }
 
-    function setFiatValue() {
+    function update() {
         if (showAlt)
             if (historic && timestamp)
                 fiatLabel.text = '(' + Daemon.fx.fiatValueHistoric(amount, timestamp) + ' ' + Daemon.fx.fiatCurrency + ')'
@@ -51,21 +52,23 @@ GridLayout {
                 fiatLabel.text = Daemon.fx.isRecent(timestamp)
                     ? '(' + Daemon.fx.fiatValue(amount) + ' ' + Daemon.fx.fiatCurrency + ')'
                     : ''
+        btcLabel.text = Config.formatMilliSats(amount, false, redacted)
     }
 
-    onAmountChanged: setFiatValue()
+    onAmountChanged: update()
+    onRedactedChanged: update()
 
     Connections {
         target: Daemon.fx
-        function onQuotesUpdated() { setFiatValue() }
+        function onQuotesUpdated() { update() }
     }
 
     Connections {
         target: amount
         function onValueChanged() {
-            setFiatValue()
+            update()
         }
     }
 
-    Component.onCompleted: setFiatValue()
+    Component.onCompleted: update()
 }

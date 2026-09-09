@@ -1,4 +1,5 @@
 import time
+from decimal import Decimal
 from functools import cached_property
 from typing import List, Optional, Union, Dict, Any, Sequence
 
@@ -180,6 +181,17 @@ class BaseInvoice(StoredObject):
         if amount_msat in [None, "!"]:
             return amount_msat
         return int(amount_msat // 1000)
+
+    def get_amount_sat_msat_precision(self):
+        """
+        Returns a satoshi amount as int if no msat precision, as Decimal if msat precision, or '!' or None.
+        """
+        amount_msat = self.amount_msat
+        if amount_msat in [None, "!"]:
+            return amount_msat
+        amount_sat = Decimal(amount_msat) / 1000
+        # return as Decimal if msat precision, else int
+        return amount_sat if amount_sat != Decimal(amount_msat) // 1000 else amount_msat // 1000
 
     def set_amount_msat(self, amount_msat: Union[int, str]) -> None:
         """The GUI uses this to fill the amount for a zero-amount invoice."""

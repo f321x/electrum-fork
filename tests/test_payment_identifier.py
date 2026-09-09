@@ -1,8 +1,11 @@
 import os
 import asyncio
-from unittest.mock import patch
+from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from electrum import SimpleConfig
+from electrum.bolt11 import BOLT11Addr, encode_bolt11_invoice
 from electrum.invoices import Invoice
 from electrum.payment_identifier import (
     maybe_extract_bech32_lightning_payment_identifier, PaymentIdentifier, PaymentIdentifierType,
@@ -115,6 +118,23 @@ class TestPaymentIdentifier(ElectrumTestCase):
         self.assertFalse(pi.need_finalize())
         self.assertFalse(pi.is_multiline())
 
+    @staticmethod
+    def _bolt11_for_amount(amount_msat):
+        return encode_bolt11_invoice(BOLT11Addr(
+            paymenthash=bytes(32),
+            payment_secret=bytes(32),
+            amount=Decimal(amount_msat) / 100_000_000_000,
+            tags=[('d', 'Millisatoshi payment')],
+        ), bytes.fromhex('11' * 32))
+
+    def test_bolt11_millisatoshi_amount(self):
+        for amount_msat, amount_sat in [(1, Decimal('0.001')), (1234, Decimal('1.234'))]:
+            with self.subTest(amount_msat=amount_msat):
+                pi = PaymentIdentifier(None, self._bolt11_for_amount(amount_msat))
+                self.assertTrue(pi.is_valid())
+                self.assertTrue(pi.is_amount_locked())
+                self.assertEqual(amount_sat, pi.get_fields_for_GUI().amount)
+
     def test_bolt12(self):
         offers = [
             ('lno1pqpzacq2qqgwuquxfmcztl0gldv8mxy3sm8x5jscdz27u39fy6luxu8zcdn9j73l3up5nwlwchur9zukwx743mvm0rvftrhskna22pcvtkyhufn5rc97j3gzqffs859lkadpfasgwxj47xvml7jgekez0lpfuwzhegyxsn2lzdx86qpny7xrmgwj6lphxcfauu22kenqnty4tqdlgnh8tyg87lamqe84nmh2vn0a2n908l7z7cfjghjsuusv7k079upfw0x7dpzavqpwj8swx9ee9q9cumg07fk4gvlajyhy6lfjv0cfe9gqxg0gykehtgjkxwzz24rqdssj4fjcm8xhv2rwel04ed4up2h5sf8n6y7scr0q5rt65k06s6u3mvefzer7qq', True),
@@ -146,6 +166,23 @@ class TestPaymentIdentifier(ElectrumTestCase):
             ]:
                 pi = PaymentIdentifier(None, invalid_pi_str)
                 self.assertFalse(pi.is_valid())
+
+    async def test_bolt12_finalize_decimal_amount(self):
+        offer = 'lno1pg257enxv4ezqcneype82um50ynhxgrwdajx293pqglnyxw6q0hzngfdusg8umzuxe8kquuz7pjl90ldj8wadwgs0xlmc'
+        request_invoice = AsyncMock(return_value=(None, b''))
+        self.wallet.lnworker = SimpleNamespace(request_bolt12_invoice=request_invoice)
+        self.wallet.has_lightning = lambda: True
+        pi = PaymentIdentifier(self.wallet, offer)
+        invoice = Invoice.from_bech32(self._bolt11_for_amount(1234))
+        with patch.object(Invoice, 'from_bech32', return_value=invoice):
+            await pi._do_finalize(amount_sat=Decimal('1.234'), comment='Test note')
+
+        request_invoice.assert_awaited_once_with(
+            pi.bolt12_offer, amount_msat=1234, payer_note='Test note',
+        )
+        self.assertIs(type(request_invoice.call_args.kwargs['amount_msat']), int)
+        self.assertEqual(PaymentIdentifierState.AVAILABLE, pi.state)
+        self.assertEqual(Decimal('1.234'), pi.get_fields_for_GUI().amount)
 
     def test_bip21(self):
         bip21 = 'bitcoin:bc1qj3zx2zc4rpv3npzmznxhdxzn0wm7pzqp8p2293?message=unit_test'
@@ -241,8 +278,8 @@ class TestPaymentIdentifier(ElectrumTestCase):
         # Mock lnurl-p response
         mock_lnurl6_data = LNURL6Data(
             callback_url='https://example.com/lnurl-pay',
-            max_sendable_sat=1_000_000,
-            min_sendable_sat=1_000,
+            max_sendable_msat=1_000_000_000,
+            min_sendable_msat=1_000_000,
             metadata_plaintext='Test payment',
             comment_allowed=100,
         )
@@ -262,10 +299,63 @@ class TestPaymentIdentifier(ElectrumTestCase):
         self.assertTrue(pi.need_finalize())
         self.assertIsNotNone(pi.lnurl_data)
         self.assertTrue(isinstance(pi.lnurl_data, LNURL6Data))
-        self.assertEqual(1_000, pi.lnurl_data.min_sendable_sat)
-        self.assertEqual(1_000_000, pi.lnurl_data.max_sendable_sat)
+        self.assertEqual(1_000_000, pi.lnurl_data.min_sendable_msat)
+        self.assertEqual(1_000_000_000, pi.lnurl_data.max_sendable_msat)
         self.assertEqual('Test payment', pi.lnurl_data.metadata_plaintext)
         self.assertEqual(100, pi.lnurl_data.comment_allowed)
+
+    async def _resolve_lnurl_pay_millisatoshi_range(self):
+        pi = PaymentIdentifier(None, 'lnurlp://example.com/pay')
+        data = LNURL6Data(
+            callback_url='https://example.com/lnurl-pay',
+            min_sendable_msat=1001,
+            max_sendable_msat=2002,
+            metadata_plaintext='Millisatoshi payment',
+            comment_allowed=0,
+        )
+        with patch('electrum.payment_identifier.request_lnurl', return_value=data):
+            await pi._do_resolve()
+        self.assertTrue(pi.need_finalize())
+        return pi
+
+    @patch('electrum.payment_identifier.callback_lnurl')
+    async def test_lnurl_finalize_millisatoshi_amount(self, callback):
+        for amount_msat, amount_sat in [(1001, Decimal('1.001')), (2002, Decimal('2.002'))]:
+            with self.subTest(amount_msat=amount_msat):
+                pi = await self._resolve_lnurl_pay_millisatoshi_range()
+                fields = pi.get_fields_for_GUI()
+                self.assertEqual(Decimal('1.001'), fields.amount)
+                self.assertEqual((Decimal('1.001'), Decimal('2.002')), fields.amount_range)
+                callback.reset_mock()
+                callback.return_value = {'pr': self._bolt11_for_amount(amount_msat)}
+
+                await pi._do_finalize(amount_sat=amount_sat)
+
+                callback.assert_awaited_once_with(pi.lnurl_data.callback_url, params={'amount': amount_msat})
+                self.assertIs(type(callback.call_args.kwargs['params']['amount']), int)
+                self.assertEqual(PaymentIdentifierState.AVAILABLE, pi.state)
+                self.assertEqual(amount_sat, pi.get_fields_for_GUI().amount)
+
+    @patch('electrum.payment_identifier.callback_lnurl')
+    async def test_lnurl_finalize_millisatoshi_bounds(self, callback):
+        for amount_sat in [Decimal('1.000'), Decimal('2.003')]:
+            with self.subTest(amount_sat=amount_sat):
+                pi = await self._resolve_lnurl_pay_millisatoshi_range()
+                await pi._do_finalize(amount_sat=amount_sat)
+                self.assertEqual(PaymentIdentifierState.INVALID_AMOUNT, pi.state)
+                self.assertIn('1.001', pi.get_error())
+                self.assertIn('2.002', pi.get_error())
+        callback.assert_not_awaited()
+
+    @patch('electrum.payment_identifier.send_exception_to_crash_reporter')
+    @patch('electrum.payment_identifier.callback_lnurl')
+    async def test_lnurl_finalize_rejects_millisatoshi_mismatch(self, callback, crash_reporter):
+        pi = await self._resolve_lnurl_pay_millisatoshi_range()
+        callback.return_value = {'pr': self._bolt11_for_amount(1002)}
+        await pi._do_finalize(amount_sat=Decimal('1.001'))
+        self.assertEqual(PaymentIdentifierState.ERROR, pi.state)
+        self.assertIn('wrong amount', pi.get_error())
+        self.assertIsNone(pi.lightning_invoice)
 
     @patch('electrum.payment_identifier.request_lnurl')
     def test_lnurl_withdraw_resolve(self, mock_request_lnurl):
@@ -279,8 +369,8 @@ class TestPaymentIdentifier(ElectrumTestCase):
             callback_url='https://example.com/lnurl-withdraw',
             k1='test-k1-value',
             default_description='Test withdrawal',
-            min_withdrawable_sat=1_000,
-            max_withdrawable_sat=500_000,
+            min_withdrawable_msat=1_000,
+            max_withdrawable_msat=500_000,
         )
         mock_request_lnurl.return_value = mock_lnurl3_data
 
@@ -298,8 +388,8 @@ class TestPaymentIdentifier(ElectrumTestCase):
         self.assertIsNotNone(pi.lnurl_data)
         self.assertEqual('test-k1-value', pi.lnurl_data.k1)
         self.assertEqual('Test withdrawal', pi.lnurl_data.default_description)
-        self.assertEqual(1000, pi.lnurl_data.min_withdrawable_sat)
-        self.assertEqual(500000, pi.lnurl_data.max_withdrawable_sat)
+        self.assertEqual(1000, pi.lnurl_data.min_withdrawable_msat)
+        self.assertEqual(500000, pi.lnurl_data.max_withdrawable_msat)
 
     @patch('electrum.payment_identifier.request_lnurl')
     def test_lnurl_resolve_error(self, mock_request_lnurl):
@@ -382,6 +472,13 @@ class TestPaymentIdentifier(ElectrumTestCase):
         self.assertTrue(all(lambda x: isinstance(x, PartialTxOutput) for x in pi.multiline_outputs))
         self.assertEqual(1000, pi.multiline_outputs[0].value)
         self.assertEqual(0, pi.multiline_outputs[1].value)
+
+        pi_str = '\n'.join([
+            'bc1qj3zx2zc4rpv3npzmznxhdxzn0wm7pzqp8p2293,0.01',
+            'bc1q66ex4c3vek4cdmrfjxtssmtguvs3r30pf42jpj,0.000001',  # msat precision should invalidate multiline
+        ])
+        pi = PaymentIdentifier(self.wallet, pi_str)
+        self.assertFalse(pi.is_valid())
 
     def test_spk(self):
         address = 'bc1qj3zx2zc4rpv3npzmznxhdxzn0wm7pzqp8p2293'
