@@ -235,10 +235,12 @@ RUN cd /opt \
 # install python-for-android
 ENV P4A_CHECKOUT_COMMIT="a9602faed875c9689a4d0635f0de0b2ab15dfdd9"
 # ^ from branch electrum_202602_qtmultimedia (note: careful with force-pushing! see #8162)
+COPY --chown=user contrib/android/patches/p4a-qt6-ndk-api.patch /opt/p4a-qt6-ndk-api.patch
 RUN cd /opt \
     && git clone https://github.com/f321x/spesmilo-python-for-android-fork-fork python-for-android \
     && cd python-for-android \
     && git checkout "${P4A_CHECKOUT_COMMIT}^{commit}" \
+    && git apply /opt/p4a-qt6-ndk-api.patch \
     && /opt/venv/bin/python3 -m pip install --no-build-isolation --no-dependencies -e .
 
 # build env vars

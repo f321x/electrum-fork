@@ -113,6 +113,7 @@ android.api = 36
 android.target_sdk_version = 36
 
 # (int) Minimum API required. You will need to set the android.ndk_api to be as low as this value.
+# TODO: remove the Qt AAudio compatibility patch when raising this to API 28.
 android.minapi = 26
 
 # (str) Android NDK version to use
