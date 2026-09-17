@@ -18,6 +18,7 @@ ElDialog {
     property alias description: message.text
     property alias expiry: expires.currentValue
     property bool isLightning: false
+    property bool isOffer: false
 
     property bool _canReceiveLightningAmount: Daemon.currentWallet.lightningCanReceive.msatsInt > amountBtc.textAsSats.msatsInt
 
@@ -115,6 +116,13 @@ ElDialog {
                 enabled: Daemon.currentWallet.isLightning && (_canReceiveLightningAmount || Daemon.currentWallet.canGetZeroconfChannel)
                 text: qsTr('Lightning')
                 icon.source: '../../icons/lightning.png'
+                pressAndHoldIndicator: true
+                onPressAndHold: {
+                    // long-press creates a reusable Lightning offer instead of a single invoice
+                    AppController.haptic()
+                    dialog.isOffer = true
+                    doAccept()
+                }
                 onClicked: {
                     if (_canReceiveLightningAmount) {
                         // can receive on existing channel

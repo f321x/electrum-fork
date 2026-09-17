@@ -94,6 +94,10 @@ Item {
         Daemon.currentWallet.createRequest(amount, description, expiry, lightning, reuse_address)
     }
 
+    function createOffer(amount, description, expiry) {
+        Daemon.currentWallet.createOffer(amount, description, expiry)
+    }
+
     function startSweep() {
         var dialog = sweepDialog.createObject(app)
         dialog.accepted.connect(function() {
@@ -396,6 +400,20 @@ Item {
             })
             dialog.open()
         }
+        onBolt12Offer: {
+            closeSendDialog()
+            var dialog = bolt12OfferDialog.createObject(app, {
+                invoiceParser: invoiceParser
+            })
+            dialog.open()
+        }
+        onBolt12Invoice: {
+            closeSendDialog()
+            var dialog = invoiceDialog.createObject(app, {
+                invoice: invoiceParser
+            })
+            dialog.open()
+        }
     }
 
     Bitcoin {
@@ -429,6 +447,24 @@ Item {
             openRequest(key)
         }
         function onRequestCreateError(error) {
+            console.log(error)
+            var dialog = app.messageDialog.createObject(app, {
+                title: qsTr('Error'),
+                iconSource: Qt.resolvedUrl('../../icons/warning.png'),
+                text: error
+            })
+            dialog.open()
+        }
+        function onOfferCreateSuccess(offer, amountSat, message) {
+            // reuse the same receive view as bolt11 requests, in offer mode
+            var dialog = receiveDialog.createObject(app, {
+                offer: offer,
+                offerAmountSat: amountSat,
+                offerMessage: message
+            })
+            dialog.open()
+        }
+        function onOfferCreateError(error) {
             console.log(error)
             var dialog = app.messageDialog.createObject(app, {
                 title: qsTr('Error'),
@@ -583,8 +619,12 @@ Item {
             anchors.centerIn: parent
             onAccepted: {
                 console.log('accepted')
-                createRequest(_receiveDetailsDialog.isLightning, _receiveDetailsDialog.amount,
-                              _receiveDetailsDialog.description, _receiveDetailsDialog.expiry, false)
+                if (_receiveDetailsDialog.isOffer) {
+                    createOffer(_receiveDetailsDialog.amount, _receiveDetailsDialog.description, _receiveDetailsDialog.expiry)
+                } else {
+                    createRequest(_receiveDetailsDialog.isLightning, _receiveDetailsDialog.amount,
+                                  _receiveDetailsDialog.description, _receiveDetailsDialog.expiry, false)
+                }
             }
             onRejected: {
                 console.log('rejected')
@@ -697,6 +737,16 @@ Item {
     Component {
         id: lnurlWithdrawDialog
         LnurlWithdrawRequestDialog {
+            width: parent.width * 0.9
+            anchors.centerIn: parent
+
+            onClosed: destroy()
+        }
+    }
+
+    Component {
+        id: bolt12OfferDialog
+        Bolt12OfferDialog {
             width: parent.width * 0.9
             anchors.centerIn: parent
 
