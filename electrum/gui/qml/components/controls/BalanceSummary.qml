@@ -17,8 +17,8 @@ Item {
     function setBalances() {
         let hide = Config.hideAmounts
         root.formattedConfirmedBalance = Config.formatSats(Daemon.currentWallet.confirmedBalance, false, hide)
-        root.formattedTotalBalance = Config.formatSats(Daemon.currentWallet.totalBalance, false, hide)
-        root.formattedLightningBalance = Config.formatSats(Daemon.currentWallet.lightningBalance, false, hide)
+        root.formattedTotalBalance = Config.formatMilliSats(Daemon.currentWallet.totalBalance, false, hide)
+        root.formattedLightningBalance = Config.formatMilliSats(Daemon.currentWallet.lightningBalance, false, hide)
         if (Daemon.fx.enabled) {
             root.formattedTotalBalanceFiat = Daemon.fx.fiatValue(Daemon.currentWallet.totalBalance, false)
         }
