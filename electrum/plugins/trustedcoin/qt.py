@@ -27,7 +27,7 @@ from functools import partial
 import os
 from typing import TYPE_CHECKING
 
-from PyQt6.QtGui import QPixmap, QMovie, QColor
+from PyQt6.QtGui import QMovie, QColor
 from PyQt6.QtCore import QObject, pyqtSignal, QSize, Qt
 from PyQt6.QtWidgets import (QTextEdit, QVBoxLayout, QLabel, QGridLayout, QHBoxLayout,
                              QRadioButton, QCheckBox, QPushButton, QWidget)
@@ -46,7 +46,7 @@ from electrum.gui.qt.amountedit import AmountEdit
 from electrum.gui.qt.main_window import StatusBarButton
 from electrum.gui.qt.wizard.wallet import (WCCreateSeed, WCConfirmSeed, WCHaveSeed, WCEnterExt, WCConfirmExt,
                                            WalletWizardComponent)
-from electrum.gui.qt.util import read_QIcon_from_bytes
+from electrum.gui.qt.util import read_QIcon_from_bytes, read_QPixmap_from_bytes
 
 from .common_qt import TrustedcoinPluginQObject
 from .trustedcoin import TrustedCoinPlugin, DISCLAIMER
@@ -182,7 +182,7 @@ class Plugin(TrustedCoinPlugin):
         hbox = QHBoxLayout()
 
         logo = QLabel()
-        logo.setPixmap(QPixmap(self.icon_path("trustedcoin-status.png")))
+        logo.setPixmap(read_QPixmap_from_bytes(self.read_file("trustedcoin-status.png")))
         msg = _('This wallet is protected by TrustedCoin\'s two-factor authentication.') + '<br/>'\
               + _("For more information, visit") + " <a href=\"https://api.trustedcoin.com/#/electrum-help\">https://api.trustedcoin.com/#/electrum-help</a>"
         label = QLabel(msg)
@@ -418,7 +418,7 @@ class WCShowConfirmOTP(WalletWizardComponent):
         self.authlabelnew = WWLabel(_('Then, enter your Google Authenticator code:'))
         self.authlabelexist = WWLabel(_('Google Authenticator code:'))
 
-        self.spinner = QMovie(icon_path('spinner.gif'))
+        self.spinner = QMovie(icon_path('spinner.gif'), b"gif")
         self.spinner.setScaledSize(QSize(24, 24))
         self.spinner.setBackgroundColor(QColor('black'))
         self.spinner_l = QLabel()

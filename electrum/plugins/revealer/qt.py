@@ -707,7 +707,7 @@ class Plugin(RevealerPlugin):
                 painter.drawLine(base_img.width()-(dist_h), 0,  base_img.width()-(dist_h), base_img.height())
 
                 painter.drawImage(((total_distance_h))+11, ((total_distance_h))+11,
-                                  QImage(internal_plugin_icon_path(self.name, 'electrumb.png')).scaledToWidth(round(2.1*total_distance_h), Qt.TransformationMode.SmoothTransformation))
+                                  QImage(internal_plugin_icon_path(self.name, 'electrumb.png'), "PNG").scaledToWidth(round(2.1*total_distance_h), Qt.TransformationMode.SmoothTransformation))
 
                 painter.setPen(QPen(Qt.GlobalColor.white, border_thick*8))
                 painter.drawLine(int(base_img.width()-total_distance_h-(border_thick*8)/2-(border_thick/2)-2),
@@ -733,7 +733,7 @@ class Plugin(RevealerPlugin):
                 painter.drawLine(dist_h, 0,  dist_h, base_img.height())
                 painter.drawLine(0, base_img.height()-dist_v, base_img.width(), base_img.height()-(dist_v))
                 painter.drawLine(base_img.width()-(dist_h), 0,  base_img.width()-(dist_h), base_img.height())
-                logo = QImage(internal_plugin_icon_path(self.name, 'revealer_c.png')).scaledToWidth(round(1.3*(total_distance_h)))
+                logo = QImage(internal_plugin_icon_path(self.name, 'revealer_c.png'), "PNG").scaledToWidth(round(1.3*(total_distance_h)))
                 painter.drawImage(int(total_distance_h+border_thick), int(total_distance_h+border_thick), logo)
 
                 #frame around logo

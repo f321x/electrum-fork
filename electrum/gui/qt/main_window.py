@@ -38,7 +38,7 @@ from typing import Optional, TYPE_CHECKING, Sequence, Union, Dict, Mapping, Call
 import concurrent.futures
 import inspect
 
-from PyQt6.QtGui import QPixmap, QKeySequence, QIcon, QCursor, QFont, QFontMetrics, QAction, QShortcut
+from PyQt6.QtGui import QKeySequence, QIcon, QCursor, QFont, QFontMetrics, QAction, QShortcut
 from PyQt6.QtCore import Qt, QRect, QStringListModel, QSize, pyqtSignal, QTimer
 from PyQt6.QtWidgets import (QMessageBox, QTabWidget, QMenuBar, QFileDialog, QCheckBox, QLabel,
                              QVBoxLayout, QGridLayout, QLineEdit, QHBoxLayout, QPushButton, QScrollArea, QTextEdit,
@@ -86,7 +86,7 @@ from .qrcodewidget import QRDialog
 from .qrtextedit import ShowQRTextEdit, ScanQRTextEdit, ScanShowQRTextEdit
 from .transaction_dialog import show_transaction
 from .fee_slider import FeeSlider, FeeComboBox
-from .util import (read_QIcon, ColorScheme, text_dialog, icon_path, WaitingDialog,
+from .util import (read_QIcon, ColorScheme, text_dialog, read_QPixmap, WaitingDialog,
                    WindowModalDialog, HelpLabel, Buttons,
                    OkButton, InfoButton, WWLabel, CancelButton,
                    CloseButton, MessageBoxMixin, EnterButton, import_meta_gui, export_meta_gui,
@@ -942,7 +942,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, Logger, QtEventListener):
 
     def notify(self, message):
         if self.tray:
-            self.tray.showMessage("Electrum", message, read_QIcon("electrum_dark_icon"), 20000)
+            self.tray.showMessage("Electrum", message, read_QIcon("electrum_dark_icon.png"), 20000)
 
     def timer_actions(self):
         # refresh invoices and requests because they show ETA
@@ -2975,7 +2975,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, Logger, QtEventListener):
             msg = (_("Transaction added to wallet history.") + '\n\n' +
                    _("Note: this is an offline transaction, if you want the network "
                      "to see it, you need to broadcast it."))
-            win.msg_box(QPixmap(icon_path("offline_tx.png")), None, _('Success'), msg)
+            win.msg_box(read_QPixmap("offline_tx.png"), None, _('Success'), msg)
             return True
 
     def show_cert_mismatch_error(self):

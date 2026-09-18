@@ -26,7 +26,6 @@
 from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (QVBoxLayout, QCheckBox, QHBoxLayout, QLineEdit,
                              QLabel, QCompleter, QDialog, QStyledItemDelegate,
                              QWidget, QPushButton)
@@ -38,7 +37,7 @@ from electrum import slip39
 from electrum.util import ChoiceItem
 
 from .util import (
-    Buttons, OkButton, WWLabel, ButtonsTextEdit, icon_path, EnterButton,
+    Buttons, OkButton, WWLabel, ButtonsTextEdit, read_QPixmap, EnterButton,
     CloseButton, WindowModalDialog, ColorScheme, font_height, ChoiceWidget,
 )
 from .qrtextedit import ShowQRTextEdit, ScanQRTextEdit
@@ -136,7 +135,7 @@ class SeedWidget(QWidget):
         hbox = QHBoxLayout()
         if icon:
             logo = QLabel()
-            logo.setPixmap(QPixmap(icon_path("seed.png"))
+            logo.setPixmap(read_QPixmap("seed.png")
                            .scaledToWidth(64, mode=Qt.TransformationMode.SmoothTransformation))
             logo.setMaximumWidth(60)
             hbox.addWidget(logo)

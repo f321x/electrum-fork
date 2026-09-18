@@ -168,7 +168,7 @@ class HistoryNode(CustomNode):
             return QVariant(get_item_key(tx_item))
         if role not in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole, MyTreeView.ROLE_CLIPBOARD_DATA):
             if col == HistoryColumns.STATUS and role == Qt.ItemDataRole.DecorationRole:
-                icon = "lightning" if is_lightning else TX_ICONS[status]
+                icon = "lightning.png" if is_lightning else TX_ICONS[status]
                 return QVariant(read_QIcon(icon))
             elif col == HistoryColumns.STATUS and role == Qt.ItemDataRole.ToolTipRole:
                 if is_lightning:

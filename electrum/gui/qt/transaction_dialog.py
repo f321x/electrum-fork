@@ -33,7 +33,7 @@ from functools import partial
 from decimal import Decimal
 
 from PyQt6.QtCore import QSize, Qt, QUrl, QPoint, pyqtSignal
-from PyQt6.QtGui import QTextCharFormat, QBrush, QFont, QPixmap, QTextCursor, QAction
+from PyQt6.QtGui import QTextCharFormat, QBrush, QFont, QTextCursor, QAction
 from PyQt6.QtWidgets import (QDialog, QLabel, QPushButton, QHBoxLayout, QVBoxLayout, QWidget,
                              QToolButton, QMenu, QTextBrowser,
                              QSizePolicy)
@@ -52,7 +52,7 @@ from electrum.util import (get_asyncio_loop, UI_UNIT_NAME_TXSIZE_VBYTES, delta_t
 from electrum.network import Network
 from electrum.wallet import TxSighashRiskLevel, TxSighashDanger
 
-from .util import (MessageBoxMixin, read_QIcon, Buttons, icon_path,
+from .util import (MessageBoxMixin, read_QIcon, Buttons, read_QPixmap,
                    MONOSPACE_FONT, ColorScheme, ButtonsLineEdit, ShowQRLineEdit, text_dialog,
                    char_width_in_lineedit, TRANSACTION_FILE_EXTENSION_FILTER_SEPARATE,
                    TRANSACTION_FILE_EXTENSION_FILTER_ONLY_COMPLETE_TX,
@@ -116,7 +116,7 @@ class TxInOutWidget(QWidget):
         self.sighash_label.setStyleSheet('font-weight: bold')
         self.sighash_danger = TxSighashDanger()
         self.inputs_warning_icon = QLabel()
-        pixmap = QPixmap(icon_path("warning"))
+        pixmap = read_QPixmap("warning.png")
         pixmap_size = round(2 * char_width_in_lineedit())
         pixmap = pixmap.scaled(pixmap_size, pixmap_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         self.inputs_warning_icon.setPixmap(pixmap)
@@ -1021,7 +1021,7 @@ class TxDialog(QDialog, MessageBoxMixin):
         self.fee_label = TxDetailLabel()
         fee_hbox.addWidget(self.fee_label)
         self.fee_warning_icon = QLabel()
-        pixmap = QPixmap(icon_path("warning"))
+        pixmap = read_QPixmap("warning.png")
         pixmap_size = round(2 * char_width_in_lineedit())
         pixmap = pixmap.scaled(pixmap_size, pixmap_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         self.fee_warning_icon.setPixmap(pixmap)

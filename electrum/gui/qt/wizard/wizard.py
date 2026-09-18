@@ -4,13 +4,12 @@ from abc import abstractmethod
 from typing import TYPE_CHECKING, Optional
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, pyqtSlot, QSize, QMetaObject
-from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (QDialog, QPushButton, QWidget, QLabel, QVBoxLayout, QScrollArea,
                              QHBoxLayout, QLayout)
 
 from electrum.i18n import _
 from electrum.logging import get_logger
-from electrum.gui.qt.util import Buttons, icon_path, MessageBoxMixin, WWLabel, ResizableStackedWidget, AbstractQWidget
+from electrum.gui.qt.util import Buttons, read_QPixmap, MessageBoxMixin, WWLabel, ResizableStackedWidget, AbstractQWidget
 
 if TYPE_CHECKING:
     from electrum.simple_config import SimpleConfig
@@ -71,7 +70,7 @@ class QEAbstractWizard(QDialog, MessageBoxMixin):
         error_layout = QVBoxLayout()
         error_layout.addStretch(1)
         error_icon = QLabel()
-        error_icon.setPixmap(QPixmap(icon_path('warning.png')).scaledToWidth(48, mode=Qt.TransformationMode.SmoothTransformation))
+        error_icon.setPixmap(read_QPixmap('warning.png').scaledToWidth(48, mode=Qt.TransformationMode.SmoothTransformation))
         error_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         error_layout.addWidget(error_icon)
         self.error_msg = WWLabel()
@@ -168,7 +167,7 @@ class QEAbstractWizard(QDialog, MessageBoxMixin):
 
     def set_icon(self, filename):
         prior_filename, self.icon_filename = self.icon_filename, filename
-        self.logo.setPixmap(QPixmap(icon_path(filename))
+        self.logo.setPixmap(read_QPixmap(filename)
                             .scaledToWidth(60, mode=Qt.TransformationMode.SmoothTransformation))
         return prior_filename
 
@@ -196,7 +195,7 @@ class QEAbstractWizard(QDialog, MessageBoxMixin):
         self.please_wait_l.setText(page.busy_msg if page.busy_msg else _("Please wait..."))
         self.error_msg.setText(str(page.error))
         self.error.setVisible(not page.busy and bool(page.error))
-        icon = page.params.get('icon', icon_path('electrum.png'))
+        icon = page.params.get('icon', 'electrum.png')
         if icon:
             if icon != self.icon_filename:
                 self.set_icon(icon)

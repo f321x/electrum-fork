@@ -1,12 +1,11 @@
 from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import QTimer, QEvent
-from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import QLabel, QHBoxLayout, QScrollArea
 
 from electrum.i18n import _
 from electrum.wizard import TermsOfUseWizard
-from electrum.gui.qt.util import icon_path, WWLabel
+from electrum.gui.qt.util import read_QPixmap, WWLabel
 from electrum.gui import messages
 from .wizard import QEAbstractWizard, WizardComponent
 
@@ -35,10 +34,10 @@ class WCTermsOfUseScreen(WizardComponent):
         WizardComponent.__init__(self, parent, wizard, title='')
         self.wizard_title = _('Electrum Terms of Use')
         self.img_label = QLabel()
-        pixmap = QPixmap(icon_path('electrum_darkblue_1.png'))
+        pixmap = read_QPixmap('electrum_darkblue_1.png')
         self.img_label.setPixmap(pixmap)
         self.img_label2 = QLabel()
-        pixmap = QPixmap(icon_path('electrum_text.png'))
+        pixmap = read_QPixmap('electrum_text.png')
         self.img_label2.setPixmap(pixmap)
         hbox_img = QHBoxLayout()
         hbox_img.addStretch(1)

@@ -416,28 +416,28 @@ class ChanFeatChannel(ChannelFeature):
     def tooltip(self) -> str:
         return _("This is a channel")
     def icon(self) -> QIcon:
-        return read_QIcon("lightning")
+        return read_QIcon("lightning.png")
 
 
 class ChanFeatBackup(ChannelFeature):
     def tooltip(self) -> str:
         return _("This is a static channel backup")
     def icon(self) -> QIcon:
-        return read_QIcon("lightning_disconnected")
+        return read_QIcon("lightning_disconnected.png")
 
 
 class ChanFeatTrampoline(ChannelFeature):
     def tooltip(self) -> str:
         return _("The channel peer can route Trampoline payments.")
     def icon(self) -> QIcon:
-        return read_QIcon("kangaroo")
+        return read_QIcon("kangaroo.png")
 
 
 class ChanFeatNoOnchainBackup(ChannelFeature):
     def tooltip(self) -> str:
         return _("This channel cannot be recovered from your seed. You must back it up manually.")
     def icon(self) -> QIcon:
-        return read_QIcon("cloud_no")
+        return read_QIcon("cloud_no.png")
 
 
 

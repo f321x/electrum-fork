@@ -79,7 +79,7 @@ class WalletInfoDialog(WindowModalDialog):
                 grid.addWidget(WWLabel(_('Enabled')), cur_row, 1)
             else:
                 label = IconLabel(text='Enabled, non-recoverable channels')
-                label.setIcon(read_QIcon('cloud_no'))
+                label.setIcon(read_QIcon('cloud_no.png'))
                 grid.addWidget(label, cur_row, 1)
                 if wallet.get_seed_type() == 'segwit':
                     msg = _("Your channels cannot be recovered from seed, because they were created with an old version of Electrum. "
@@ -164,7 +164,7 @@ class WalletInfoDialog(WindowModalDialog):
                 tab_label = _("Cosigner") + f' {idx+1}' if len(keystores) > 1 else _("Keystore")
                 index = self.keystore_tabs.addTab(ks_w, tab_label)
                 if not ks.is_watching_only():
-                    self.keystore_tabs.setTabIcon(index, read_QIcon('confirmed.svg'))
+                    self.keystore_tabs.setTabIcon(index, read_QIcon('confirmed.png'))
             vbox.addWidget(self.keystore_tabs)
 
         vbox.addStretch(1)

@@ -27,12 +27,12 @@ from typing import TYPE_CHECKING
 
 from PyQt6.QtWidgets import QVBoxLayout, QHBoxLayout, QLabel, QWidget, QGridLayout, QToolButton, QPushButton
 from PyQt6.QtCore import QRect, Qt
-from PyQt6.QtGui import QPen, QPainter, QPixmap
+from PyQt6.QtGui import QPen, QPainter
 
 from electrum.i18n import _
 from electrum.gui.messages import MSG_LN_UTXO_RESERVE
 
-from .util import Buttons, CloseButton, WindowModalDialog, ColorScheme, font_height, AmountLabel, icon_path
+from .util import Buttons, CloseButton, WindowModalDialog, ColorScheme, font_height, AmountLabel, read_QPixmap
 
 if TYPE_CHECKING:
     from .main_window import ElectrumWindow
@@ -123,7 +123,7 @@ class BalanceToolButton(QToolButton, PieChartObject):
         if not self._warning:
             PieChartObject.paintEvent(self, event)
         else:
-            pixmap = QPixmap(icon_path("warning.png"))
+            pixmap = read_QPixmap("warning.png")
             qp = QPainter()
             qp.begin(self)
             qp.drawPixmap(self.R, pixmap)
@@ -215,7 +215,7 @@ class BalanceDialog(WindowModalDialog):
             label.setWordWrap(True)
             logo = QLabel('')
             logo.setPixmap(
-                QPixmap(icon_path("warning.png")).scaledToWidth(
+                read_QPixmap("warning.png").scaledToWidth(
                     25, mode=Qt.TransformationMode.SmoothTransformation)
             )
             logo.setMaximumWidth(28)

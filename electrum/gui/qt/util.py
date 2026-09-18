@@ -132,7 +132,7 @@ class AmountLabel(QLabel):
 class Spinner(QLabel):
     def __init__(self, *args, **kwargs):
         QLabel.__init__(self, *args, **kwargs)
-        self.spinner = QMovie(icon_path('spinner.gif'))
+        self.spinner = QMovie(icon_path('spinner.gif'), b"gif")
         self.spinner.setScaledSize(QSize(20, 20))
         self.spinner.frameChanged.connect(lambda: self.setPixmap(self.spinner.currentPixmap()))
         self.setVisible(False)
@@ -1286,14 +1286,20 @@ def internal_plugin_icon_path(plugin_name, icon_basename: str):
     return resource_path('plugins', plugin_name, icon_basename)
 
 
+def read_QPixmap(icon_basename: str) -> QPixmap:
+    """Only supports PNG icons to reduce Qt parsing surface"""
+    assert icon_basename.endswith(".png"), icon_basename
+    return QPixmap(icon_path(icon_basename), "PNG")
+
+
 @lru_cache(maxsize=1000)
 def read_QIcon(icon_basename: str) -> QIcon:
-    return QIcon(icon_path(icon_basename))
+    return QIcon(read_QPixmap(icon_basename))
 
 
 def read_QPixmap_from_bytes(b: bytes) -> QPixmap:
     qp = QPixmap()
-    qp.loadFromData(b)
+    qp.loadFromData(b, "PNG")
     return qp
 
 

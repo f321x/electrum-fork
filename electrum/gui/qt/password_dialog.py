@@ -27,13 +27,12 @@ import re
 import math
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import QLabel, QGridLayout, QVBoxLayout, QCheckBox
 
 from electrum.i18n import _
 from electrum.plugin import run_hook
 
-from .util import icon_path, WindowModalDialog, OkButton, CancelButton, Buttons, PasswordLineEdit
+from .util import read_QPixmap, WindowModalDialog, OkButton, CancelButton, Buttons, PasswordLineEdit
 
 
 def check_password_strength(password):
@@ -106,7 +105,7 @@ class PasswordLayout(object):
                 lockfile = "lock.png"
             else:
                 lockfile = "unlock.png"
-            logo.setPixmap(QPixmap(icon_path(lockfile))
+            logo.setPixmap(read_QPixmap(lockfile)
                            .scaledToWidth(36, mode=Qt.TransformationMode.SmoothTransformation))
 
         self.new_password_label = QLabel(msgs[0])
