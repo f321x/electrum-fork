@@ -3993,7 +3993,12 @@ class LNWallet(Logger):
         if not success:
             raise Exception('failed to connect')
 
-    def maybe_add_backup_from_tx(self, tx):
+    def maybe_add_backup_from_tx(self, tx: Transaction):
+        if not any(self.wallet.is_mine(self.wallet.adb.get_txin_address(txin)) for txin in tx.inputs()):
+            # only allow funding tx with inputs of our wallet to prevent replay of the channel backup.
+            # note: is_mine can be false if the parent was not yet retrieved from the server.
+            # note: if the channel was funded with wallet-external UTXOs we won't detect the backup.
+            return
         funding_address = None
         node_id_prefix = None
         for i, o in enumerate(tx.outputs()):
