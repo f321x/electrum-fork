@@ -12,7 +12,7 @@ from .util import (
 )
 from .transaction import Transaction, TxOutpoint
 from .logging import Logger
-from .address_synchronizer import TX_HEIGHT_LOCAL
+from .address_synchronizer import TX_HEIGHT_LOCAL, AddressSynchronizer
 from .lnutil import REDEEM_AFTER_DOUBLE_SPENT_DELAY
 from .lnsweep import KeepWatchingTXO, SweepInfo, MaybeSweepInfo
 
@@ -110,10 +110,21 @@ class LNWatcher(Logger, EventListener):
         await self.trigger_callbacks()
 
     @event_listener
-    async def on_event_adb_added_tx(self, adb, tx_hash, tx):
-        # called if we add local tx
+    async def on_event_adb_added_tx(self, adb: AddressSynchronizer, tx_hash: str, tx: Transaction):
+        # called for every tx added to the adb: by the synchronizer, or if we add a local tx
         if adb != self.adb:
             return
+
+        self.lnworker.maybe_add_backup_from_tx(tx)
+        # tx might be the parent of a funding tx that was synced earlier,
+        # when its input was not yet known to be ours. re-check its spenders.
+        for n, txo in enumerate(tx.outputs()):
+            if not self.lnworker.wallet.is_mine(txo.address):
+                continue
+            spender_txid = adb.get_spender(f"{tx_hash}:{n}")
+            if spender := adb.db.get_transaction(spender_txid):
+                self.lnworker.maybe_add_backup_from_tx(spender)
+
         await self.trigger_callbacks()
 
     @event_listener
