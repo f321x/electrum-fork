@@ -34,6 +34,7 @@ class LNWatcher(Logger, EventListener):
         self.callbacks = {}  # type: Dict[str, Callable[[], Awaitable[None]]]  # address -> lambda function
         self.network = None
         self.register_callbacks()
+        self._maybe_funding_txids = asyncio.Queue()  # type: asyncio.Queue[str]
         self._pending_force_closes = {}  # type: Dict['AbstractChannel', int]  # chan -> lowest remote htlc timeout height
         self.taskgroup = OldTaskGroup()
         self._last_callback_trigger_ts = 0
@@ -51,6 +52,7 @@ class LNWatcher(Logger, EventListener):
         self.logger.debug("starting taskgroup")
         try:
             async with self.taskgroup as group:
+                await group.spawn(self._discover_onchain_backups())
                 await group.spawn(self._callback_loop())  # keeps group alive
         except Exception:
             self.logger.exception("taskgroup crashed")
@@ -71,6 +73,19 @@ class LNWatcher(Logger, EventListener):
             if time_since_last_cb_trigger > max_delay:
                 await self.trigger_callbacks()
             await asyncio.sleep(self.CALLBACK_LOOP_POLL_INTERVAL_SEC)
+
+    async def _discover_onchain_backups(self):
+        """For onchain channel backup discovery we need to be able to associate the funding tx
+        with our wallet. This is only reliably possible once the wallet is fully synchronized, hence this task."""
+        while True:
+            txid = await self._maybe_funding_txids.get()
+            while not self.lnworker.wallet.is_up_to_date():
+                await self.lnworker.wallet.up_to_date_changed_event.wait()
+            if tx := self.adb.get_transaction(txid):
+                try:
+                    self.lnworker.maybe_add_backup_from_tx(tx)
+                except Exception:
+                    self.logger.exception(f"failed to detect onchain backup in {txid}")
 
     def remove_callback(self, address: str) -> None:
         self.callbacks.pop(address, None)
@@ -110,16 +125,17 @@ class LNWatcher(Logger, EventListener):
         await self.trigger_callbacks()
 
     @event_listener
-    async def on_event_adb_added_tx(self, adb, tx_hash, tx):
-        # called if we add local tx
+    async def on_event_adb_added_tx(self, adb, tx_hash: str, tx: Transaction):
+        # called for every tx added to the adb: by the synchronizer, or if we add a local tx
         if adb != self.adb:
             return
         await self.trigger_callbacks()
 
     @event_listener
-    async def on_event_adb_added_verified_tx(self, adb, tx_hash):
+    async def on_event_adb_added_verified_tx(self, adb, tx_hash: str):
         if adb != self.adb:
             return
+        await self._maybe_funding_txids.put(tx_hash)
         await self.trigger_callbacks()
 
     @event_listener
