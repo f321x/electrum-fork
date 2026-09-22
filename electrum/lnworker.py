@@ -3760,6 +3760,7 @@ class LNWallet(Logger):
         with self.lock:
             self._channels.pop(chan_id)
             self.db.get('channels').pop(chan_id.hex())
+        self.lnwatcher.remove_callback(chan.get_funding_address())
         self.wallet.set_reserved_addresses_for_chan(chan, reserved=False)
 
         util.trigger_callback('channels_updated', self.wallet)
@@ -3899,6 +3900,7 @@ class LNWallet(Logger):
         self.wallet.set_reserved_addresses_for_chan(cb, reserved=True)
         self.wallet.save_db()
         util.trigger_callback('channels_updated', self.wallet)
+        self.lnwatcher.remove_callback(cb.get_funding_address())
         self.lnwatcher.add_channel(cb)
         if not cb.can_sweep_their_ctx_to_remote():
             # the user has lost their channel state and cannot locally force close. If they'd request a remote fclose
@@ -3933,6 +3935,7 @@ class LNWallet(Logger):
             raise Exception('Channel not found')
         with self.lock:
             self._channel_backups.pop(channel_id)
+        self.lnwatcher.remove_callback(chan.get_funding_address())
         self.wallet.set_reserved_addresses_for_chan(chan, reserved=False)
         self.wallet.save_db()
         util.trigger_callback('channels_updated', self.wallet)
