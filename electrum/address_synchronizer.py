@@ -366,8 +366,15 @@ class AddressSynchronizer(Logger, EventListener):
                     # give v to txi that spends me
                     next_tx = self.db.get_spent_outpoint(tx_hash, n)
                     if next_tx is not None:
+                        spender_had_txi = bool(self.db.get_txi_addresses(next_tx))
                         self.db.add_txi_addr(next_tx, addr, ser, v)
                         self._add_tx_to_local_history(next_tx)
+                        if not spender_had_txi:
+                            # the spender was added before we knew it spends our coins. re-announce it.
+                            # (e.g. parent synced after child, or gap limit rolled forward)
+                            spender_tx = self.db.get_transaction(next_tx)
+                            assert spender_tx
+                            util.trigger_callback('adb_added_tx', self, next_tx, spender_tx)
             # add to local history
             self._add_tx_to_local_history(tx_hash)
             # save
