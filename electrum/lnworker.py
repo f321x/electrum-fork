@@ -4004,13 +4004,13 @@ class LNWallet(Logger):
         for i, o in enumerate(tx.outputs()):
             script_type = get_script_type_from_output_script(o.scriptpubkey)
             if script_type == 'p2wsh':
-                funding_index = i
-                funding_address = o.address
                 for o2 in tx.outputs():
                     if o2.scriptpubkey.startswith(bytes([opcodes.OP_RETURN])):
                         encrypted_data = o2.scriptpubkey[2:]
-                        data = self.decrypt_cb_data(encrypted_data, funding_address)
+                        data = self.decrypt_cb_data(encrypted_data, o.address)
                         if data.startswith(CB_MAGIC_BYTES):
+                            funding_index = i
+                            funding_address = o.address
                             node_id_prefix = data[len(CB_MAGIC_BYTES):]
         if node_id_prefix is None:
             return
