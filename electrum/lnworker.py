@@ -4016,17 +4016,17 @@ class LNWallet(Logger):
             funding_index=funding_index,
             funding_address=funding_address,
             is_initiator=True)
-        channel_id = cb_storage.channel_id().hex()
-        if channel_id in self.db.get_dict("channels"):
+        channel_id: bytes = cb_storage.channel_id()
+        if channel_id in self.get_channel_objects():
             return
         self.logger.info(f"adding backup from tx")
         d = self.db.get_dict("onchain_channel_backups")
-        d[channel_id] = cb_storage
+        d[channel_id.hex()] = cb_storage
         cb = ChannelBackup(cb_storage, lnworker=self)
         self.wallet.set_reserved_addresses_for_chan(cb, reserved=True)
         self.wallet.save_db()
         with self.lock:
-            self._channel_backups[bfh(channel_id)] = cb
+            self._channel_backups[channel_id] = cb
         util.trigger_callback('channels_updated', self.wallet)
         self.lnwatcher.add_channel(cb)
 
