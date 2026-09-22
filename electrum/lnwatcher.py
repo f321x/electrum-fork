@@ -121,6 +121,7 @@ class LNWatcher(Logger, EventListener):
         # when its input was not yet known to be ours. re-check its spenders.
         for n, txo in enumerate(tx.outputs()):
             if not self.lnworker.wallet.is_mine(txo.address):
+                # FIXME: is_mine can be false
                 continue
             spender_txid = adb.get_spender(f"{tx_hash}:{n}")
             if spender := adb.db.get_transaction(spender_txid):
