@@ -76,6 +76,14 @@ We currently build the release binaries on macOS 11.7.10, and these seem to run 
 - Installing extraneous brew packages can result in build differences.
   For example, pyinstaller seems to pick up and bundle brew-installed `libffi`.
   So having a dedicated "electrum binary builder macOS VM" is recommended.
+- `make_osx.sh` checks out fixed commits of Homebrew and homebrew-core
+  (`HOMEBREW_BREW_COMMIT` and `HOMEBREW_CORE_COMMIT`), and installs formulae from
+  that checkout instead of Homebrew's API. Homebrew has no bottles for macOS 11,
+  so formulae such as `gcc@14` are compiled from source, and builders need the
+  same formula versions. The script fails if an installed formula has a different
+  version than the pinned one.
+  Afterwards, `brew update` refuses to run because homebrew-core is a shallow clone.
+  `brew untap homebrew/core` returns brew to its default setup.
 - Make sure that you are building from a fresh clone of electrum
   (or run e.g. `git clean -ffxd` to rm all local changes).
 

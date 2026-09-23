@@ -84,10 +84,70 @@ python3 -m pip install --no-build-isolation --no-dependencies --no-binary :all: 
     --cache-dir "$PIP_CACHE_DIR" -Ir ./contrib/deterministic-build/requirements-build-mac.txt \
     || fail "Could not install build dependencies (mac)"
 
+info "Pinning Homebrew and homebrew-core to fixed commits."
+# Homebrew has no bottles for macOS 11, so formulae such as gcc@14 are compiled from
+# whatever version homebrew-core has at install time. Check out fixed commits of
+# Homebrew/brew and homebrew-core, and install formulae from that checkout instead of
+# Homebrew's JSON API, so that all builders get the same versions.
+HOMEBREW_BREW_COMMIT="570982948a8a194f0f42f43f4a5bce2d1c9f64cb"
+# ^ tag "7.0.6"
+HOMEBREW_CORE_COMMIT="9bc3acd3016354f69c060234d7b1d4702aea3596"
+export HOMEBREW_NO_AUTO_UPDATE=1
+export HOMEBREW_NO_INSTALL_FROM_API=1
+function checkout_pinned_commit() {
+    local repo_dir="$1"
+    local remote_url="$2"
+    local commit="$3"
+    local branch="$4"
+    if [ ! -d "$repo_dir/.git" ]; then
+        mkdir -p "$repo_dir"
+        git -C "$repo_dir" init -q
+        git -C "$repo_dir" remote add origin "$remote_url"
+    fi
+    if ! git -C "$repo_dir" cat-file -e "${commit}^{commit}" 2>/dev/null; then
+        # The full homebrew-core repository is over 1 GB, so new and shallow clones only fetch
+        # the pinned commit. A fetch without --depth into a shallow clone stalls on GitHub.
+        if [ -z "$(git -C "$repo_dir" rev-parse -q --verify HEAD)" ] \
+                || [ "$(git -C "$repo_dir" rev-parse --is-shallow-repository)" = "true" ]; then
+            git -C "$repo_dir" fetch --depth 1 origin "$commit"
+        else
+            git -C "$repo_dir" fetch origin "$commit"
+        fi
+    fi
+    git -C "$repo_dir" checkout -q --force -B "$branch" "${commit}^{commit}"
+}
+checkout_pinned_commit "$(brew --repository)" "https://github.com/Homebrew/brew" \
+    "$HOMEBREW_BREW_COMMIT" stable
+checkout_pinned_commit "$(brew --repository homebrew/core)" "https://github.com/Homebrew/homebrew-core" \
+    "$HOMEBREW_CORE_COMMIT" main
+
 info "Installing some build-time deps for compilation..."
 # cmake, wget and gcc@14 are required for zxing-cpp.
 # gcc can be removed with a C++ 20 compatible compiler becoming available (newer MacOS version)
 brew install autoconf automake libtool gettext coreutils pkgconfig cmake wget gcc@14
+
+# brew install upgrades outdated formulae to the pinned versions, but it keeps newer
+# versions, and it leaves the dependencies of already installed formulae alone.
+info "Checking installed Homebrew formulae against the pinned homebrew-core."
+MISMATCHED_FORMULAE=$(brew info --json=v2 --installed | python3 -c '
+import json, os, sys
+opt_dir = sys.argv[1]
+for formula in json.load(sys.stdin)["formulae"]:
+    pinned = formula["versions"]["stable"]
+    if formula["revision"]:
+        pinned += "_%d" % formula["revision"]
+    opt_link = os.path.join(opt_dir, formula["name"])
+    installed = os.path.basename(os.path.realpath(opt_link)) if os.path.islink(opt_link) else "not linked"
+    if installed != pinned:
+        print("  %s %s (pinned: %s)" % (formula["name"], installed, pinned))
+' "$(brew --prefix)/opt")
+if [ -n "$MISMATCHED_FORMULAE" ]; then
+    fail "These Homebrew formulae differ from the pinned homebrew-core commit:
+$MISMATCHED_FORMULAE
+Reinstall them at the pinned versions with
+  HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_FROM_API=1 brew reinstall <formula>...
+then run this script again."
+fi
 
 info "Building PyInstaller."
 PYINSTALLER_REPO="https://github.com/pyinstaller/pyinstaller.git"
