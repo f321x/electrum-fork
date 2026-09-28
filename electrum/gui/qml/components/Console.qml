@@ -21,7 +21,6 @@ Pane {
         root._completions = undefined
         PyConsole.runCommand(cmdField.text)
         cmdField.text = ''
-        cmdField.forceActiveFocus()
     }
 
     function complete() {
@@ -29,13 +28,11 @@ Pane {
         cmdField.text = result.text
         cmdField.cursorPosition = cmdField.text.length
         root._completions = result.candidates.length > 0 ? result : undefined
-        cmdField.forceActiveFocus()
     }
 
     function setCommand(text) {
         cmdField.text = text
         cmdField.cursorPosition = text.length
-        cmdField.forceActiveFocus()
     }
 
     ColumnLayout {
@@ -97,6 +94,8 @@ Pane {
                     model: root._completions !== undefined ? root._completions.candidates : []
 
                     Button {
+                        // no button in the console takes focus, so tapping one leaves the keyboard as it is
+                        focusPolicy: Qt.NoFocus
                         text: modelData.split('.').pop()
                         font.family: FixedFont
                         font.pixelSize: constants.fontSizeSmall
@@ -114,6 +113,7 @@ Pane {
             Layout.fillWidth: true
             // the completion buttons' bottom inset already leaves a gap
             Layout.topMargin: completionsBar.visible ? 0 : constants.paddingXSmall
+            Layout.bottomMargin: constants.paddingXSmall
             Layout.leftMargin: constants.paddingMedium
             Layout.rightMargin: constants.paddingMedium
             spacing: constants.paddingXSmall
@@ -135,13 +135,11 @@ Pane {
             }
 
             ToolButton {
+                focusPolicy: Qt.NoFocus
                 icon.source: '../../icons/closebutton.png'
                 icon.color: constants.colorError
                 visible: PyConsole.inConstruct
-                onClicked: {
-                    PyConsole.keyboardInterrupt()
-                    cmdField.forceActiveFocus()
-                }
+                onClicked: PyConsole.keyboardInterrupt()
             }
         }
 
@@ -149,24 +147,28 @@ Pane {
             Layout.fillWidth: true
 
             FlatButton {
+                focusPolicy: Qt.NoFocus
                 Layout.fillWidth: true
                 Layout.preferredWidth: 1
                 text: '▲'
                 onClicked: root.setCommand(PyConsole.getPrevHistoryEntry())
             }
             FlatButton {
+                focusPolicy: Qt.NoFocus
                 Layout.fillWidth: true
                 Layout.preferredWidth: 1
                 text: '▼'
                 onClicked: root.setCommand(PyConsole.getNextHistoryEntry())
             }
             FlatButton {
+                focusPolicy: Qt.NoFocus
                 Layout.fillWidth: true
                 Layout.preferredWidth: 1
                 text: qsTr('Tab')
                 onClicked: root.complete()
             }
             FlatButton {
+                focusPolicy: Qt.NoFocus
                 Layout.fillWidth: true
                 Layout.preferredWidth: 1
                 icon.source: '../../icons/tab_send.png'
@@ -197,10 +199,7 @@ Pane {
 
             // not a MouseArea: a second child item stops the Pane from sizing to its content
             TapHandler {
-                onTapped: {
-                    warningOverlay.visible = false
-                    cmdField.forceActiveFocus()
-                }
+                onTapped: warningOverlay.visible = false
             }
         }
     }
