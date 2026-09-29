@@ -1256,10 +1256,10 @@ class Network(Logger, NetworkRetryManager[ServerAddr]):
 
     @log_exceptions
     async def stop(self, *, full_shutdown: bool = True):
-        if full_shutdown:
-            await self.nostr.stop()
         if not self._was_started:
             self.logger.info("not stopping network as it was never started")
+            if full_shutdown:
+                await self.nostr.stop()  # sessions can exist without a started network
             return
         self.logger.info("stopping network")
         # timeout: if full_shutdown, it is up to the caller to time us out,
@@ -1269,6 +1269,7 @@ class Network(Logger, NetworkRetryManager[ServerAddr]):
                 await group.spawn(self.taskgroup.cancel_remaining())
                 if full_shutdown:
                     await group.spawn(self.stop_gossip(full_shutdown=full_shutdown))
+                    await group.spawn(self.nostr.stop())
         self.taskgroup = None
         self.interface = None
         self.interfaces = {}

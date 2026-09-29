@@ -6,7 +6,7 @@ from electrum_aionostr import RelayPool, NostrSession
 from .logging import Logger
 from .util import (
     EventListener, event_listener, ca_path, get_asyncio_loop, get_running_loop,
-    make_aiohttp_proxy_connector,
+    make_aiohttp_proxy_connector, ignore_exceptions, log_exceptions,
 )
 
 if TYPE_CHECKING:
@@ -55,6 +55,8 @@ class NostrManager(Logger, EventListener):
             self._pool.set_default_relays(self.config.get_nostr_relays())
         return self._pool.open_session(name=name, extra_relays=extra_relays, use_default_relays=use_default_relays)
 
+    @ignore_exceptions  # do not kill the teardown of the network
+    @log_exceptions
     async def stop(self) -> None:
         self._stopped = True
         self.unregister_callbacks()
@@ -69,13 +71,13 @@ class NostrManager(Logger, EventListener):
 
     @event_listener
     async def on_event_proxy_set(self, *args):
-        if self._pool is None:
+        if self._stopped or self._pool is None:
             return  # the pool gets created with the current proxy
         proxy, connect_timeout = self._get_proxy()
         await self._pool.set_proxy(proxy, connect_timeout=connect_timeout)
 
     @event_listener
     def on_event_nostr_relays_changed(self, *args):
-        if self._pool is None:
+        if self._stopped or self._pool is None:
             return
         self._pool.set_default_relays(self.config.get_nostr_relays())

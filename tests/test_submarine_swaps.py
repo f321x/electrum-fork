@@ -17,7 +17,7 @@ from electrum.plugins.swapserver.server import HttpSwapServer
 from electrum.plugins.swapserver.swapserver import SwapServerPlugin
 from electrum.simple_config import SimpleConfig
 from electrum.submarine_swaps import (
-    SwapManager, SwapData, NostrTransport, SwapServerTransport, LOCKTIME_DELTA_REFUND,
+    SwapManager, SwapData, NostrTransport, SwapServerTransport, SwapServerError, LOCKTIME_DELTA_REFUND,
     MIN_LOCKTIME_DELTA_FOR_CLAIM, SPENDER_FINALITY_DELAY, _construct_swap_scriptcode)
 from electrum_aionostr import PublishError, PublishResult
 from electrum.transaction import (
@@ -867,6 +867,22 @@ class TestNostrTransport(ElectrumTestCase):
         self.assertEqual(2, len(session.published))
         self.assertEqual(session.published[0].id, session.published[1].id)
         self.assertEqual(event_id, session.published[0].id)
+
+    async def test_stop_fails_requests_waiting_for_a_reply(self):
+        """A swap request in flight when the transport stops must not wait forever."""
+        wallet = mock.MagicMock()
+        wallet.config = self.config
+        wallet.db.get_dict.return_value = {}
+        sm = SwapManager(wallet=wallet, lnworker=mock.MagicMock())
+        sm.network = mock.Mock(proxy=None)
+        transport = NostrTransport(self.config, sm, generate_random_keypair())
+        reply = asyncio.get_running_loop().create_future()
+        transport.dm_replies[('server_pubkey', 'event_id')] = reply
+
+        await transport.stop()
+
+        with self.assertRaises(SwapServerError):
+            await reply
 
 
 class TestSwapServerPlugin(ElectrumTestCase):

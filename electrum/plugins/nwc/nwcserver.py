@@ -209,9 +209,9 @@ class NWCServer(Logger, EventListener):
         while True:
             # wait until connections have been set up and network is available
             while (not self.connections
-                         or not self.wallet.network
-                         or not self.wallet.network.is_connected()
-                         or not self.wallet.lnworker):
+                        or not self.wallet.network
+                        or not self.wallet.network.is_connected()
+                        or not self.wallet.lnworker):
                 await asyncio.sleep(5)
 
             if self.nostr_session is None:

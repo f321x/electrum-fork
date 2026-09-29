@@ -172,6 +172,8 @@ class CosignerWallet(Logger):  # children have to inherit EventListener and regi
 
     @log_exceptions
     async def check_direct_messages(self):
+        if self.nostr_session is None:
+            return  # stopped before the wallet finished syncing
         privkey = PrivateKey(bytes.fromhex(self.nostr_privkey))
         query = {
             "kinds": [NOSTR_EVENT_KIND],

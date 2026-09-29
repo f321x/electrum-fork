@@ -1986,6 +1986,9 @@ class NostrTransport(SwapServerTransport):
             self._main_loop_task.cancel()
             self._main_loop_task = None
         await self.taskgroup.cancel_remaining()
+        for fut in self.dm_replies.values():
+            if not fut.done():
+                fut.set_exception(SwapServerError())
         if self.nostr_session is not None:
             # note: main_loop opens it, and it might not have run yet (or have failed).
             # The relays stay connected for a while, the next transport can reuse them.
