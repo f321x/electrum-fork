@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import ssl
 import threading
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Optional, Dict, Sequence, Tuple, Iterable, List, Callable
@@ -16,8 +15,9 @@ from electrum_ecc import ECPrivkey
 
 import electrum_aionostr as aionostr
 import electrum_aionostr.key
+from electrum_aionostr import NostrSession, PublishError, create_event
 from electrum_aionostr.event import Event
-from electrum_aionostr.util import to_nip19
+from electrum_aionostr.util import to_nip19, normalize_url
 
 from collections import defaultdict
 
@@ -35,8 +35,8 @@ from .transaction import (
     match_script_against_template, OPPushDataGeneric, OPPushDataPubkey, TxOutput,
 )
 from .util import (
-    log_exceptions, ignore_exceptions, BelowDustLimit, OldTaskGroup, ca_path, gen_nostr_ann_pow,
-    get_nostr_ann_pow_amount, make_aiohttp_proxy_connector, get_running_loop, get_asyncio_loop, wait_for2,
+    log_exceptions, ignore_exceptions, BelowDustLimit, OldTaskGroup, gen_nostr_ann_pow,
+    get_nostr_ann_pow_amount, get_running_loop, get_asyncio_loop, wait_for2,
     run_sync_function_on_asyncio_thread, trigger_callback, NoDynamicFeeEstimates, UserFacingException, now
 )
 from .lnutil import hex_to_bytes, Keypair, SENT, RECEIVED, MIN_FINAL_CLTV_DELTA_ACCEPTED, PaymentFailure
@@ -58,7 +58,6 @@ if TYPE_CHECKING:
     from .lnworker import LNWallet
     from .lnchannel import Channel
     from .simple_config import SimpleConfig
-    from aiohttp_socks import ProxyConnector
 
 
 SWAP_TX_SIZE = 150  # default tx size, used for mining fee estimation
@@ -1915,11 +1914,9 @@ class NostrTransport(SwapServerTransport):
         SwapServerTransport.__init__(self, config=config, sm=sm)
         self._offers = {}  # type: Dict[str, SwapOffer]
         self.private_key = keypair.privkey
-        self.nostr_private_key = to_nip19('nsec', keypair.privkey.hex())
         self.nostr_pubkey = keypair.pubkey.hex()[2:]
         self.dm_replies = {}  # type: Dict[tuple[str, str], asyncio.Future[dict]]
-        self.ssl_context = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH, cafile=ca_path)
-        self.relay_manager = None  # type: Optional[aionostr.Manager]
+        self.nostr_session = None  # type: Optional[NostrSession]
         self._main_loop_task = None  # type: Optional[asyncio.Task]
         self.taskgroup = OldTaskGroup()
         self._last_swapserver_relays = self._load_last_swapserver_relays()  # type: Optional[Sequence[str]]
@@ -1949,13 +1946,13 @@ class NostrTransport(SwapServerTransport):
     @log_exceptions
     async def main_loop(self):
         self.logger.info(f'starting nostr transport with pubkey: {self.nostr_pubkey}')
-        self.logger.info(f'nostr relays: {self.relays}')
-        self.relay_manager = self.get_relay_manager()
-        await self.relay_manager.connect()
-        connected_relays = self.relay_manager.relays
-        self.logger.info(f'connected relays: {[relay.url for relay in connected_relays]}')
-        if connected_relays:
-            self.is_connected.set()
+        if self.sm.is_server:
+            self.nostr_session = self.network.nostr.open_session(name='swap-server')
+        else:
+            # also use the relays of the swap server we used last time
+            self.nostr_session = self.network.nostr.open_session(
+                name='swap-client', extra_relays=self._last_swapserver_relays or [])
+        self.logger.info(f'nostr relays: {sorted(self.nostr_session.relays)}')
         if self.sm.is_server:
             tasks = [
                 self.check_direct_messages(),
@@ -1967,6 +1964,7 @@ class NostrTransport(SwapServerTransport):
                 self._get_pairs_loop(),
                 self.update_relays()
             ]
+        tasks.append(self._set_connected_when_ready())
         try:
             async with self.taskgroup as group:
                 for task in tasks:
@@ -1983,42 +1981,21 @@ class NostrTransport(SwapServerTransport):
         self.is_connected.clear()
         if self._main_loop_task is not None:
             # note: main_loop is not in the taskgroup below (it owns it), so cancel it here.
-            #       Otherwise it could still be about to connect to the relays, and we would
-            #       not even have a relay_manager to close yet.
+            #       Otherwise it could still be about to open its nostr session, and we would
+            #       not even have a session to close yet.
             self._main_loop_task.cancel()
             self._main_loop_task = None
         await self.taskgroup.cancel_remaining()
-        if self.relay_manager is not None:
-            # note: main_loop sets it, and it might not have run yet (or have failed)
-            await self.relay_manager.close()
+        if self.nostr_session is not None:
+            # note: main_loop opens it, and it might not have run yet (or have failed).
+            # The relays stay connected for a while, the next transport can reuse them.
+            await self.nostr_session.close()
         self.logger.info("nostr transport shut down")
 
-    @property
-    def relays(self):
-        our_relays = self.config.NOSTR_RELAYS.split(',') if self.config.NOSTR_RELAYS else []
-        if self.sm.is_server:
-            return our_relays
-        last_swapserver_relays = self._last_swapserver_relays or []
-        return list(set(our_relays + last_swapserver_relays))
-
-    def get_relay_manager(self) -> aionostr.Manager:
-        assert get_running_loop() == get_asyncio_loop(), f"this must be run on the asyncio thread!"
-        if not self.relay_manager:
-            if self.uses_proxy:
-                proxy = make_aiohttp_proxy_connector(self.network.proxy, self.ssl_context)
-            else:
-                proxy: Optional['ProxyConnector'] = None
-            nostr_logger = self.logger.getChild('aionostr')
-            nostr_logger.setLevel('INFO')  # DEBUG is very verbose with aionostr
-            return aionostr.Manager(
-                self.relays,
-                private_key=self.nostr_private_key,
-                log=nostr_logger,
-                ssl_context=self.ssl_context,
-                proxy=proxy,
-                connect_timeout=self.connect_timeout
-            )
-        return self.relay_manager
+    async def _set_connected_when_ready(self):
+        await self.nostr_session.wait_connected()
+        self.logger.info(f'connected relays: {self.nostr_session.connected_relays()}')
+        self.is_connected.set()
 
     def get_offer(self, pubkey: str) -> Optional[SwapOffer]:
         return self._offers.get(pubkey)
@@ -2052,16 +2029,12 @@ class NostrTransport(SwapServerTransport):
         tags = [['d', f'electrum-swapserver-{self.NOSTR_EVENT_VERSION}'],
                 ['r', 'net:' + constants.net.NET_NAME],
                 ['expiration', str(now() + self.OFFER_UPDATE_INTERVAL_SEC + 10)]]
+        event = create_event(self.private_key, kind=self.USER_STATUS_NIP38, tags=tags, content=json.dumps(offer))
         try:
-            event_id = await aionostr._add_event(
-                self.relay_manager,
-                kind=self.USER_STATUS_NIP38,
-                tags=tags,
-                content=json.dumps(offer),
-                private_key=self.nostr_private_key)
-            self.logger.info(f"published offer {event_id}")
-        except asyncio.TimeoutError as e:
-            self.logger.warning(f"failed to publish swap offer: {str(e)}")
+            await self.nostr_session.publish(event)
+            self.logger.info(f"published offer {event.id}")
+        except PublishError as e:
+            self.logger.warning(f"failed to publish swap offer: {e}")
 
     @ignore_exceptions
     @log_exceptions
@@ -2070,24 +2043,20 @@ class NostrTransport(SwapServerTransport):
         our_private_key = aionostr.key.PrivateKey(self.private_key)
         recv_pubkey_hex = aionostr.util.from_nip19(pubkey)['object'].hex() if pubkey.startswith('npub') else pubkey
         encrypted_msg = our_private_key.encrypt_message(content, recv_pubkey_hex)
-        try:
-            event_id = await aionostr._add_event(
-                self.relay_manager,
-                kind=self.EPHEMERAL_REQUEST,
-                content=encrypted_msg,
-                private_key=self.nostr_private_key,
-                tags=[['p', recv_pubkey_hex]],
-            )
-        except asyncio.TimeoutError:
-            self.logger.warning(f"sending message to {pubkey} failed: timeout. {retries=}")
-            if retries > 0:
-                return await self.send_direct_message(pubkey, content, retries=retries-1)
-            return None
-        return event_id
+        # sign only once: a retry re-sends the same event, so it cannot be handled twice
+        event = create_event(
+            self.private_key, kind=self.EPHEMERAL_REQUEST, content=encrypted_msg, tags=[['p', recv_pubkey_hex]])
+        for retries_left in reversed(range(retries + 1)):
+            try:
+                await self.nostr_session.publish(event)
+                return event.id
+            except PublishError as e:
+                self.logger.warning(f"sending message to {pubkey} failed: {e}. {retries_left=}")
+        return None
 
     @log_exceptions
     async def send_request_to_server(self, method: str, request_data: dict) -> dict:
-        self.logger.debug(f"swapserver req: method: {method} relays: {self.relays}")
+        self.logger.debug(f"swapserver req: method: {method} relays: {sorted(self.nostr_session.relays)}")
         request_data['method'] = method
         server_npub = self.config.SWAPSERVER_NPUB
         server_pubkey = aionostr.util.from_nip19(server_npub)['object'].hex()
@@ -2111,7 +2080,7 @@ class NostrTransport(SwapServerTransport):
             "#r": [f"net:{constants.net.NET_NAME}"],
             "since": now() - 60 * 60,
         }
-        async for event in self.relay_manager.get_events(query, single_event=False, only_stored=False):
+        async for event in self.nostr_session.get_events(query, single_event=False, only_stored=False):
             try:
                 content = json.loads(event.content)
                 if not isinstance(content, dict):
@@ -2193,28 +2162,29 @@ class NostrTransport(SwapServerTransport):
                 #       The relay will learn our IP and see the DM events we send.
                 #       If the swapserver operator is also running one of these relays, they will learn the IP
                 #       of their swap counterparties.
-                await self.relay_manager.update_relays(self.relays)
+                await self.nostr_session.set_extra_relays(latest_known_relays)
 
     async def rebroadcast_event(self, event: Event, server_relays: Sequence[str]):
         """If the relays of the origin server are different from our relays we rebroadcast the
         event to our relays so it gets spread more widely."""
         if not server_relays:
             return
-        rebroadcast_relays = [relay for relay in self.relay_manager.relays if
-                              relay.url not in server_relays]
-        for relay in rebroadcast_relays:
-            try:
-                res = await relay.add_event(event, check_response=True)
-            except Exception as e:
-                self.logger.debug(f"failed to rebroadcast event to {relay.url}: {e}")
-                continue
-            self.logger.debug(f"rebroadcasted event to {relay.url}: {res}")
+        server_relays = {normalize_url(url) for url in server_relays}
+        rebroadcast_relays = [url for url in self.nostr_session.connected_relays() if url not in server_relays]
+        if not rebroadcast_relays:
+            return
+        try:
+            res = await self.nostr_session.publish(event, relays=rebroadcast_relays)
+        except PublishError as e:
+            self.logger.debug(f"failed to rebroadcast event: {e}")
+            return
+        self.logger.debug(f"rebroadcasted event, accepted by {res.url}")
 
     @log_exceptions
     async def check_direct_messages(self):
         privkey = aionostr.key.PrivateKey(self.private_key)
         query = {"kinds": [self.EPHEMERAL_REQUEST], "limit":0, "#p": [self.nostr_pubkey]}
-        async for event in self.relay_manager.get_events(query, single_event=False, only_stored=False):
+        async for event in self.nostr_session.get_events(query, single_event=False, only_stored=False):
             try:
                 content = privkey.decrypt_message(event.content, event.pubkey)
                 content = json.loads(content)

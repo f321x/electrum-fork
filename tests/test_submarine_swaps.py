@@ -19,6 +19,7 @@ from electrum.simple_config import SimpleConfig
 from electrum.submarine_swaps import (
     SwapManager, SwapData, NostrTransport, SwapServerTransport, LOCKTIME_DELTA_REFUND,
     MIN_LOCKTIME_DELTA_FOR_CLAIM, SPENDER_FINALITY_DELAY, _construct_swap_scriptcode)
+from electrum_aionostr import PublishError, PublishResult
 from electrum.transaction import (
     PartialTransaction, PartialTxOutput, Transaction, TxOutput, TxOutpoint)
 from electrum.txbatcher import TxBatcher
@@ -832,6 +833,40 @@ class TestSwapServerShutdown(ElectrumTestCase):
         # and asyncio wraps the per-address refusals when all of them fail.
         with self.assertRaises(OSError):
             await asyncio.open_connection('localhost', port)
+
+
+class TestNostrTransport(ElectrumTestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.config = SimpleConfig({'electrum_path': self.electrum_path})
+
+    async def test_send_direct_message_retry_resends_the_same_event(self):
+        """A retry must not create a second request: the server would handle it twice."""
+        class FlakySession:  # the first publish times out, like a relay that did not answer
+            def __init__(self):
+                self.published = []
+
+            async def publish(self, event, *, relays=None, timeout=None):
+                self.published.append(event)
+                if len(self.published) == 1:
+                    raise PublishError([PublishResult('wss://relay.example', False, 'timeout')])
+                return PublishResult('wss://relay.example', True, '')
+
+        wallet = mock.MagicMock()
+        wallet.config = self.config
+        wallet.db.get_dict.return_value = {}
+        sm = SwapManager(wallet=wallet, lnworker=mock.MagicMock())
+        sm.network = mock.Mock(proxy=None)
+        transport = NostrTransport(self.config, sm, generate_random_keypair())
+        transport.nostr_session = session = FlakySession()
+        server_pubkey = generate_random_keypair().pubkey.hex()[2:]
+
+        event_id = await transport.send_direct_message(server_pubkey, '{"method": "createswap"}', retries=1)
+
+        self.assertEqual(2, len(session.published))
+        self.assertEqual(session.published[0].id, session.published[1].id)
+        self.assertEqual(event_id, session.published[0].id)
 
 
 class TestSwapServerPlugin(ElectrumTestCase):
