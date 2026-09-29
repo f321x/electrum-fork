@@ -24,12 +24,10 @@
 # SOFTWARE.
 import asyncio
 import json
-import ssl
 import time
-from contextlib import asynccontextmanager
 
 import electrum_ecc as ecc
-import electrum_aionostr as aionostr
+from electrum_aionostr import NostrSession, create_event
 from electrum_aionostr.key import PrivateKey
 from typing import Dict, TYPE_CHECKING, Union, List, Tuple, Optional, Callable
 
@@ -40,14 +38,12 @@ from electrum.logging import Logger
 from electrum.plugin import BasePlugin
 from electrum.transaction import PartialTransaction, tx_from_any
 from electrum.util import (
-    log_exceptions, OldTaskGroup, ca_path, trigger_callback, event_listener, json_decode,
-    make_aiohttp_proxy_connector, run_sync_function_on_asyncio_thread,
+    log_exceptions, OldTaskGroup, trigger_callback, json_decode, run_sync_function_on_asyncio_thread,
 )
 from electrum.wallet import Multisig_Wallet
 
 if TYPE_CHECKING:
     from electrum.wallet import Abstract_Wallet
-    from aiohttp_socks import ProxyConnector
 
 # event kind used for nostr messages (with expiration tag)
 NOSTR_EVENT_KIND = 4
@@ -98,7 +94,6 @@ class CosignerWallet(Logger):  # children have to inherit EventListener and regi
             if v < now() - self.KEEP_DELAY:
                 self.logger.info(f'deleting old event {k}')
                 self.known_events.pop(k)
-        self.ssl_context = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH, cafile=ca_path)
         self.logger.info(f"relays {self.config.NOSTR_RELAYS.split(',')}")
 
         self.cosigner_list = []  # type: List[Tuple[str, str]]
@@ -132,21 +127,15 @@ class CosignerWallet(Logger):  # children have to inherit EventListener and regi
 
         self.messages = asyncio.Queue()
         self.taskgroup = OldTaskGroup()
+        self.nostr_session = None  # type: Optional[NostrSession]
         if self.network and self.nostr_pubkey:
             asyncio.run_coroutine_threadsafe(self.main_loop(), self.network.asyncio_loop)
-
-    @event_listener
-    async def on_event_proxy_set(self, *args):
-        # note: the callbacks get registered in the child classes of CosignerWallet
-        if not (self.network and self.nostr_pubkey):
-            return
-        await self.stop()
-        self.taskgroup = OldTaskGroup()
-        asyncio.run_coroutine_threadsafe(self.main_loop(), self.network.asyncio_loop)
 
     @log_exceptions
     async def main_loop(self):
         self.logger.info("starting taskgroup.")
+        # open the session right away, sending does not have to wait for the wallet to sync
+        self.nostr_session = self.network.nostr.open_session(name='psbt')
         try:
             # start processing PSBTs only after wallet is_up_to_date
             while not self.wallet.is_up_to_date():
@@ -161,83 +150,69 @@ class CosignerWallet(Logger):  # children have to inherit EventListener and regi
 
     async def stop(self):
         await self.taskgroup.cancel_remaining()
-
-    @asynccontextmanager
-    async def nostr_manager(self):
-        if self.network.proxy and self.network.proxy.enabled:
-            proxy = make_aiohttp_proxy_connector(self.network.proxy, self.ssl_context)
-        else:
-            proxy: Optional['ProxyConnector'] = None
-        manager_logger = self.logger.getChild('aionostr')
-        manager_logger.setLevel("INFO")  # set to INFO because DEBUG is very spammy
-        async with aionostr.Manager(
-                relays=self.config.NOSTR_RELAYS.split(','),
-                private_key=self.nostr_privkey,
-                ssl_context=self.ssl_context,
-                proxy=proxy,
-                log=manager_logger
-        ) as manager:
-            yield manager
+        if self.nostr_session is not None:
+            await self.nostr_session.close()
+            self.nostr_session = None
 
     @log_exceptions
     async def send_direct_messages(self, messages: List[Tuple[str, dict]]):
-        our_private_key: PrivateKey = aionostr.key.PrivateKey(bytes.fromhex(self.nostr_privkey))
-        async with self.nostr_manager() as manager:
-            for pubkey, msg in messages:
-                encrypted_msg: str = our_private_key.encrypt_message(json.dumps(msg), pubkey)
-                eid = await aionostr._add_event(
-                    manager,
-                    kind=NOSTR_EVENT_KIND,
-                    content=encrypted_msg,
-                    private_key=self.nostr_privkey,
-                    tags=[['p', pubkey], ['expiration', str(int(now() + self.KEEP_DELAY))]])
-                self.logger.info(f'message sent to {pubkey}: {eid}')
+        """Raises PublishError if no relay accepted a message."""
+        if self.nostr_session is None:
+            raise Exception(_("Not connected to Nostr"))
+        our_private_key = PrivateKey(bytes.fromhex(self.nostr_privkey))
+        for pubkey, msg in messages:
+            encrypted_msg: str = our_private_key.encrypt_message(json.dumps(msg), pubkey)
+            event = create_event(
+                self.nostr_privkey,
+                kind=NOSTR_EVENT_KIND,
+                content=encrypted_msg,
+                tags=[['p', pubkey], ['expiration', str(int(now() + self.KEEP_DELAY))]])
+            await self.nostr_session.publish(event)
+            self.logger.info(f'message sent to {pubkey}: {event.id}')
 
     @log_exceptions
     async def check_direct_messages(self):
         privkey = PrivateKey(bytes.fromhex(self.nostr_privkey))
-        async with self.nostr_manager() as manager:
-            await manager.connect()
-            query = {
-                "kinds": [NOSTR_EVENT_KIND],
-                "limit": 100,
-                "#p": [self.nostr_pubkey],
-                "since": int(now() - self.KEEP_DELAY),
-            }
-            async for event in manager.get_events(query, single_event=False, only_stored=False):
-                if event.id in self.known_events:
-                    self.logger.info(f'known event {event.id} {util.age(event.created_at)}')
-                    continue
-                if not any(event.pubkey == pubkey for _xpub, pubkey in self.cosigner_list):
-                    self.logger.warning(f"got event from unknown author: {event.pubkey}")
-                    continue
-                if event.created_at > now() + self.KEEP_DELAY:
-                    # might be malicious
-                    continue
-                if event.created_at < now() - self.KEEP_DELAY:
-                    continue
-                self.logger.info(f'new event {event.id}')
-                try:
-                    message = privkey.decrypt_message(event.content, event.pubkey)
-                except Exception as e:
-                    self.logger.info(f'could not decrypt message {event.pubkey}')
-                    self.known_events[event.id] = now()
-                    continue
-                try:
-                    message = json_decode(message)
-                    if not isinstance(message, dict):
-                        raise Exception("malformed message, not dict")
-                    tx_hex = message.get('tx')
-                    label = message.get('label', '')
-                    tx = tx_from_any(tx_hex)
-                except Exception as e:
-                    self.logger.info(_("Unable to deserialize the transaction:") + "\n" + str(e))
-                    self.known_events[event.id] = now()
-                    continue
-                self.logger.info(f"received PSBT from {event.pubkey}")
-                trigger_callback('psbt_nostr_received', self.wallet, event.pubkey, event.id, tx, label)
-                await self.pending.wait()
-                self.pending.clear()
+        query = {
+            "kinds": [NOSTR_EVENT_KIND],
+            "limit": 100,
+            "#p": [self.nostr_pubkey],
+            "since": int(now() - self.KEEP_DELAY),
+        }
+        async for event in self.nostr_session.get_events(query, single_event=False, only_stored=False):
+            if event.id in self.known_events:
+                self.logger.info(f'known event {event.id} {util.age(event.created_at)}')
+                continue
+            if not any(event.pubkey == pubkey for _xpub, pubkey in self.cosigner_list):
+                self.logger.warning(f"got event from unknown author: {event.pubkey}")
+                continue
+            if event.created_at > now() + self.KEEP_DELAY:
+                # might be malicious
+                continue
+            if event.created_at < now() - self.KEEP_DELAY:
+                continue
+            self.logger.info(f'new event {event.id}')
+            try:
+                message = privkey.decrypt_message(event.content, event.pubkey)
+            except Exception as e:
+                self.logger.info(f'could not decrypt message {event.pubkey}')
+                self.known_events[event.id] = now()
+                continue
+            try:
+                message = json_decode(message)
+                if not isinstance(message, dict):
+                    raise Exception("malformed message, not dict")
+                tx_hex = message.get('tx')
+                label = message.get('label', '')
+                tx = tx_from_any(tx_hex)
+            except Exception as e:
+                self.logger.info(_("Unable to deserialize the transaction:") + "\n" + str(e))
+                self.known_events[event.id] = now()
+                continue
+            self.logger.info(f"received PSBT from {event.pubkey}")
+            trigger_callback('psbt_nostr_received', self.wallet, event.pubkey, event.id, tx, label)
+            await self.pending.wait()
+            self.pending.clear()
 
     def diagnostic_name(self):
         return self.wallet.diagnostic_name()
