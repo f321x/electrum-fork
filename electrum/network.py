@@ -58,6 +58,7 @@ from .version import PROTOCOL_VERSION_MIN
 from .i18n import _
 from .logging import get_logger, Logger
 from .fee_policy import FeeHistogram, FeeTimeEstimates, FEE_ETA_TARGETS
+from .nostr import NostrManager
 
 
 if TYPE_CHECKING:
@@ -400,6 +401,9 @@ class Network(Logger, NetworkRetryManager[ServerAddr]):
         self.mempool_fees = FeeHistogram()
         self.fee_estimates = FeeTimeEstimates()
         self.last_time_fee_estimates_requested = 0  # zero ensures immediate fees
+
+        # shared nostr relay connections, used by swaps and plugins
+        self.nostr = NostrManager(self)
 
     def has_internet_connection(self) -> bool:
         """Our guess whether the device has Internet-connectivity."""
@@ -1252,6 +1256,8 @@ class Network(Logger, NetworkRetryManager[ServerAddr]):
 
     @log_exceptions
     async def stop(self, *, full_shutdown: bool = True):
+        if full_shutdown:
+            await self.nostr.stop()
         if not self._was_started:
             self.logger.info("not stopping network as it was never started")
             return

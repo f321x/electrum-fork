@@ -419,6 +419,8 @@ class Commands(Logger):
         else:
             cv = self.config.cv.from_key(key)
             cv.set(value)
+        if key == SimpleConfig.NOSTR_RELAYS.key():
+            util.trigger_callback('nostr_relays_changed')
 
     @command('')
     async def setconfig(self, key, value):

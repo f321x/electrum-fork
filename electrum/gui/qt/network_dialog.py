@@ -37,7 +37,7 @@ from electrum.i18n import _
 from electrum.interface import ServerAddr, PREFERRED_NETWORK_PROTOCOL
 from electrum.network import Network, ProxySettings, is_valid_host, is_valid_port
 from electrum.logging import get_logger
-from electrum.util import is_valid_websocket_url
+from electrum.util import is_valid_websocket_url, trigger_callback
 from electrum.gui import messages
 
 from electrum.gui.common_qt.util import QtEventListener, qt_event_listener
@@ -625,15 +625,19 @@ class NostrWidget(QWidget, QtEventListener):
     def add_relay(self):
         relay = self.relay_edit.text()
         self.config.add_nostr_relay(relay)
-        self.update_list()
+        self.on_relays_changed()
 
     def remove_relay(self):
         item = self.relays_list.currentItem()
         if item is None:
             return
         self.config.remove_nostr_relay(item.text())
-        self.update_list()
+        self.on_relays_changed()
 
     def reset_relays(self):
         self.config.NOSTR_RELAYS = None
+        self.on_relays_changed()
+
+    def on_relays_changed(self):
         self.update_list()
+        trigger_callback('nostr_relays_changed')

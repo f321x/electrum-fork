@@ -7,7 +7,7 @@ from PyQt6.QtCore import pyqtProperty, pyqtSignal, pyqtSlot, QObject, QRegularEx
 from electrum.bitcoin import TOTAL_COIN_SUPPLY_LIMIT_IN_BTC
 from electrum.i18n import set_language, get_gui_lang_names
 from electrum.logging import get_logger
-from electrum.util import base_unit_name_to_decimal_point
+from electrum.util import base_unit_name_to_decimal_point, trigger_callback
 from electrum.gui import messages
 
 from .qetypes import QEAmount
@@ -313,6 +313,7 @@ class QEConfig(AuthMixin, QObject):
         if nostr_relays != self.config.NOSTR_RELAYS:
             self.config.NOSTR_RELAYS = nostr_relays if nostr_relays else None
             self.nostrRelaysChanged.emit()
+            trigger_callback('nostr_relays_changed')
 
     swapServerNPubChanged = pyqtSignal()
     @pyqtProperty(str, notify=swapServerNPubChanged)
