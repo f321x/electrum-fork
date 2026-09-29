@@ -2267,4 +2267,7 @@ class NostrTransport(SwapServerTransport):
         except Exception:
             self.logger.exception(f"failed to read last swapserver relays from {storage_path}")
             return None
+        if not (isinstance(relays, list) and all(isinstance(r, str) for r in relays)):
+            self.logger.warning(f"ignoring malformed last swapserver relays in {storage_path}")
+            return None
         return relays
