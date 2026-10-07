@@ -344,9 +344,14 @@ class TestCommandsTestnet(ElectrumTestCase):
             feerate=50, locktime=1972344, wallet=wallet))
         self.assertTrue(op_return in tx.outputs())
         self.assertTrue(txout in tx.outputs())
-        # a malformed script is a user-facing error
-        with self.assertRaises(UserFacingException):
-            await cmds.payto(destination="script(OP_RETURN zz)", amount="0", feerate=50, wallet=wallet)
+        # surrounding whitespace is ignored, like in the GUI
+        tx = tx_from_any(await cmds.payto(
+            destination=" script(OP_RETURN 3210)\n", amount="0", feerate=50, locktime=1972344, wallet=wallet))
+        self.assertTrue(op_return in tx.outputs())
+        # a malformed or empty script is a user-facing error
+        for destination in ("script(OP_RETURN zz)", "script()", "script(   )"):
+            with self.assertRaises(UserFacingException):
+                await cmds.payto(destination=destination, amount="0.001", feerate=50, wallet=wallet)
 
     async def test_payto__confirmed_only(self):
         """test that payto respects 'confirmed_only' config var"""
