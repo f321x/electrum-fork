@@ -55,8 +55,8 @@ def contains(set_or_list: Container[int], el: int) -> bool:
     return el in set_or_list
 
 
-def is_strict_subset(a: FrozenSet[int], b: FrozenSet[int]) -> bool:
-    return a.issubset(b)
+def is_strict_subset(a: AbstractSet[int], b: AbstractSet[int]) -> bool:
+    return a < b
 
 
 def set_difference(a: FrozenSet[int], b: AbstractSet[int]) -> FrozenSet[int]:
