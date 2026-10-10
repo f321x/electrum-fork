@@ -82,6 +82,7 @@ def check_imports():
         import electrum_ecc
         import jsonpatch
         import electrum_aionostr
+        import cbor2
     except ImportError as e:
         sys.exit(f"Error: {str(e)}. Some dependencies are missing. Have you read the README? Or just try '$ python3 -m pip install -r contrib/requirements/requirements.txt'")
     if not ((0, 25, 0) <= aiorpcx._version < (0, 26)):
