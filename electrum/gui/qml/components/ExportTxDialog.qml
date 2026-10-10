@@ -9,11 +9,16 @@ ElDialog {
     id: dialog
 
     required property string text
-    property string text_qr
-    // if text_qr is undefined text will be used
     property string text_help
-    property string text_warn
     property string tx_label
+    property bool legacyPsbtQr: false  // not persisted to config, user can toggle to legacy non-UR QR by tapping QR
+
+    property var _qr: QRIP.getTxQrData(dialog.text, dialog.legacyPsbtQr)
+    readonly property string text_warn: !_qr.data_stripped
+        ? ''
+        : [qsTr('Warning: Some data (prev txs / "full utxos") was left out of the QR code to reduce its size.'),
+           qsTr('This might cause issues if signing offline.'),
+           qsTr('As a workaround, copy to clipboard or use the Share option instead.')].join(' ')
 
     title: qsTr('Share Transaction')
 
@@ -44,15 +49,40 @@ ElDialog {
                     Layout.leftMargin: constants.paddingMedium
                     Layout.rightMargin: constants.paddingMedium
                     padding: constants.paddingMedium
+                    contentHeight: qrLayout.implicitHeight
                     ColumnLayout {
+                        id: qrLayout
                         width: parent.width
                         QRImage {
                             id: qr
-                            qrdata: dialog.text_qr
+                            visible: !dialog._qr.ur_payload
+                            qrdata: dialog._qr.qr_text
                             Layout.alignment: Qt.AlignHCenter
                             Layout.topMargin: constants.paddingMedium
                             Layout.bottomMargin: constants.paddingMedium
                         }
+                        URQRImage {
+                            visible: dialog._qr.ur_payload
+                            urType: dialog._qr.ur_type
+                            payload: dialog._qr.ur_payload
+                            Layout.alignment: Qt.AlignHCenter
+                            Layout.topMargin: constants.paddingMedium
+                            Layout.bottomMargin: constants.paddingMedium
+                        }
+                        Label {
+                            visible: dialog._qr.is_psbt
+                            Layout.alignment: Qt.AlignHCenter
+                            text: dialog.legacyPsbtQr
+                                ? qsTr('Tap to switch to BC-UR')
+                                : qsTr('Tap to switch to the legacy Electrum format')
+                            font.pixelSize: constants.fontSizeSmall
+                            color: constants.mutedForeground
+                        }
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        enabled: dialog._qr.is_psbt
+                        onClicked: dialog.legacyPsbtQr = !dialog.legacyPsbtQr
                     }
                 }
 
