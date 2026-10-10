@@ -51,6 +51,7 @@ from electrum.util import (get_asyncio_loop, UI_UNIT_NAME_TXSIZE_VBYTES, delta_t
                            UserCancelled)
 from electrum.network import Network
 from electrum.wallet import TxSighashRiskLevel, TxSighashDanger
+from electrum.gui.common_qt.util import tx_to_qr_data
 
 from .util import (MessageBoxMixin, read_QIcon, Buttons, icon_path,
                    MONOSPACE_FONT, ColorScheme, ButtonsLineEdit, ShowQRLineEdit, text_dialog,
@@ -61,6 +62,7 @@ from .util import (MessageBoxMixin, read_QIcon, Buttons, icon_path,
                    get_icon_qrcode, VLine, WaitingDialog)
 from .rate_limiter import rate_limited
 from .my_treeview import create_toolbar_with_menu, QMenuWithConfig
+from .qrcodewidget import QRCodeWidget
 
 if TYPE_CHECKING:
     from .main_window import ElectrumWindow
@@ -539,6 +541,8 @@ class TxDialog(QDialog, MessageBoxMixin):
         export_option = export_actions_menu.addConfig(
             self.config.cv.GUI_QT_TX_DIALOG_EXPORT_INCLUDE_GLOBAL_XPUBS)
         self.psbt_only_widgets.append(export_option)
+        export_option = export_actions_menu.addConfig(self.config.cv.GUI_LEGACY_PSBT_QR)
+        self.psbt_only_widgets.append(export_option)
         if self.wallet.has_support_for_slip_19_ownership_proofs():
             export_option = export_actions_menu.addAction(
                 _('Include SLIP-19 ownership proofs'),
@@ -694,17 +698,20 @@ class TxDialog(QDialog, MessageBoxMixin):
             tx = self.tx
         self.main_window.do_copy(str(tx), title=_("Transaction"))
 
-    def show_qr(self, *, tx: Transaction = None):
+    def show_qr(self, *, tx: Optional[Transaction] = None):
         if tx is None:
             tx = self.tx
-        qr_data, data_stripped = tx.to_qr_data(animated=False)
-        help_text = None
-        if data_stripped:
-            help_text = _(
-                """Warning: Some data (prev txs / "full utxos") was left """
-                """out of the QR code as it would not fit. This might cause issues if signing offline. """
-                """As a workaround, try exporting the tx as file or text instead.""")
+        assert tx is not None
         try:
+            qr_data, data_stripped = tx_to_qr_data(
+                tx, config=self.config, legacy_psbt=self.config.GUI_LEGACY_PSBT_QR,
+                error_correction=QRCodeWidget.ERROR_CORRECT_LEVEL)
+            help_text = None
+            if data_stripped:
+                help_text = _(
+                    """Warning: Some data (prev txs / "full utxos") was left """
+                    """out of the QR code to reduce its size. This might cause issues if signing offline. """
+                    """As a workaround, try exporting the tx as file or text instead.""")
             self.main_window.show_qrcode(qr_data, _("Transaction"), parent=self, help_text=help_text)
         except qrcode.exceptions.DataOverflowError:
             self.show_error(_('Failed to display QR code.') + '\n' +
