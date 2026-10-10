@@ -79,12 +79,17 @@ Item {
         }
     }
 
+    function setMaxBrightness() {
+        if (root.visible && AppController.isMaxBrightnessOnQrDisplayEnabled()) {
+            AppController.setMaxScreenBrightness()
+        }
+    }
+
     onVisibleChanged: {
         if (root.visible) {
-            // set max brightness to make qr code easier to scan
-            if (AppController.isMaxBrightnessOnQrDisplayEnabled()) {
-                AppController.setMaxScreenBrightness()
-            }
+            // set max brightness to make qr code easier to scan.
+            // deferred, so it comes after the reset of another QR code hidden in the same update
+            Qt.callLater(root.setMaxBrightness)
         } else {
             AppController.resetScreenBrightness()
         }
