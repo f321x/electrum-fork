@@ -697,9 +697,9 @@ class TxDialog(QDialog, MessageBoxMixin):
     def show_qr(self, *, tx: Transaction = None):
         if tx is None:
             tx = self.tx
-        qr_data, is_complete = tx.to_qr_data()
+        qr_data, data_stripped = tx.to_qr_data(animated=False)
         help_text = None
-        if not is_complete:
+        if data_stripped:
             help_text = _(
                 """Warning: Some data (prev txs / "full utxos") was left """
                 """out of the QR code as it would not fit. This might cause issues if signing offline. """

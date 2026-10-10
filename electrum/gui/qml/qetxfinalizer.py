@@ -592,11 +592,11 @@ class QETxFinalizer(TxFeeSlider):
 
     @pyqtSlot(result='QVariantList')
     def getSerializedTx(self):
-        txqr = self._tx.to_qr_data()
+        txqr = self._tx.to_qr_data(animated=False)
         label = ""
         if txid := self._tx.txid():
             label = self._wallet.wallet.get_label_for_txid(txid)
-        return [str(self._tx), txqr[0], txqr[1], label]
+        return [str(self._tx), txqr[0], not txqr[1], label]
 
 
 class TxMonMixin(QtEventListener):
