@@ -104,8 +104,11 @@ class QrReaderVideoOverlay(QWidget):
         # Starting from here we care about AA
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # Draw all the QR code results
+        # Draw the QR code results that have a message, i.e. the parts of an animated QR code.
+        # Other QR codes are accepted right away, so they would only flicker.
         for res in self.results:
+            if res not in self.validator_results.result_messages:
+                continue
             painter.setWorldTransform(transform_flip * transform, False)
 
             # Draw lines between all of the QR code points
@@ -125,12 +128,12 @@ class QrReaderVideoOverlay(QWidget):
 
                 painter.drawLine(line_from, line_to)
 
-            # Draw the QR code data
+            # Draw the QR code message
             # Note that we reset the world transform to only the scaled transform
             # because otherwise the text could be flipped. We only use transform_flip
             # to map the center point of the result.
             painter.setWorldTransform(transform, False)
-            text = res.data.decode('utf-8', errors='replace')
+            text = self.validator_results.result_messages[res]
             font_metrics = painter.fontMetrics()
             data_metrics = QSize(font_metrics.horizontalAdvance(text), font_metrics.capHeight())
 
