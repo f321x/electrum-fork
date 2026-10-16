@@ -18,8 +18,20 @@ ElDialog {
     padding: 0
 
     property bool commentValid: note.text.length <= 64
-    property bool amountValid: amountBtc.textAsSats.satsInt > 0 && amountBtc.textAsSats.satsInt <= Daemon.currentWallet.lightningCanSend.satsInt
+    property bool amountValid: false
     property bool valid: commentValid && amountValid
+
+    function isValidAmount() {
+        return !amountBtc.textAsSats.isEmpty
+            && amountBtc.textAsSats.lte(Daemon.currentWallet.lightningCanSend)
+    }
+
+    Connections {
+        target: Daemon.currentWallet
+        function onLightningCanSendChanged() {
+            dialog.amountValid = isValidAmount()
+        }
+    }
 
     ColumnLayout {
         width: parent.width
@@ -100,15 +112,16 @@ ElDialog {
                             id: amountBtc
                             Layout.preferredWidth: rootLayout.width / 3
                             text: 'amount_msat' in invoiceParser.offerData
-                                ? Config.formatSatsForEditing(invoiceParser.offerData['amount_msat'] / 1000)
+                                ? Config.formatMilliSatsForEditing(invoiceParser.offerData['amount_msat'])
                                 : ''
                             readOnly: 'amount_msat' in invoiceParser.offerData
                             // accent color for fixed-amount offers; also overrides gray-out on disabled
                             color: readOnly ? Material.accentColor : Material.foreground
                             fiatfield: amountFiat
-                            onTextAsSatsChanged: {
-                                if (textAsSats)
-                                    invoiceParser.amountOverride = textAsSats
+                            msatPrecision: true
+                            onValueChanged: {
+                                invoiceParser.amountOverride = textAsSats
+                                dialog.amountValid = isValidAmount()
                             }
                         }
                         Label {

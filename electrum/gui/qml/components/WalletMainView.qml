@@ -16,9 +16,9 @@ Item {
 
     property var _sendDialog
 
-    property string _request_amount
-    property string _request_description
-    property string _request_expiry
+    // offer parameters, needed again in onOfferCreateSuccess
+    property var _offer_amount: Amount {}
+    property string _offer_description
 
     function openInvoice(key) {
         invoice.key = key
@@ -94,14 +94,14 @@ Item {
         dialog.open()
     }
 
-    function createRequest(lightning, reuse_address) {
-        var qamt = Config.unitsToSats(_request_amount)
-        Daemon.currentWallet.createRequest(qamt, _request_description, _request_expiry, lightning, reuse_address)
+    function createRequest(lightning, amount, description, expiry, reuse_address) {
+        Daemon.currentWallet.createRequest(amount, description, expiry, lightning, reuse_address)
     }
 
-    function createOffer() {
-        var qamt = Config.unitsToSats(_request_amount)
-        Daemon.currentWallet.createOffer(qamt, _request_description, _request_expiry)
+    function createOffer(amount, description, expiry) {
+        _offer_amount.copyFrom(amount)
+        _offer_description = description
+        Daemon.currentWallet.createOffer(amount, description, expiry)
     }
 
     function startSweep() {
@@ -478,11 +478,10 @@ Item {
         }
         function onOfferCreateSuccess(offer) {
             // reuse the same receive view as bolt11 requests, in offer mode
-            var qamt = Config.unitsToSats(_request_amount)
             var dialog = receiveDialog.createObject(app, {
                 offer: offer,
-                offerAmountSat: qamt.satsInt,
-                offerMessage: _request_description
+                offerAmount: _offer_amount,
+                offerMessage: _offer_description
             })
             dialog.open()
         }
@@ -560,9 +559,9 @@ Item {
                 if (invoice.invoiceType == Invoice.LightningInvoice && invoice.address) {
                     // ln invoice with fallback
                     var amountToSend = invoice.amountOverride.isEmpty
-                        ? invoice.amount.satsInt
-                        : invoice.amountOverride.satsInt
-                    if (amountToSend > Daemon.currentWallet.lightningCanSend.satsInt) {
+                        ? invoice.amount
+                        : invoice.amountOverride
+                    if (amountToSend.gt(Daemon.currentWallet.lightningCanSend)) {
                         lninvoiceButPayOnchain = true
                     }
                 }
@@ -610,13 +609,12 @@ Item {
             anchors.centerIn: parent
             onAccepted: {
                 console.log('accepted')
-                _request_amount = _receiveDetailsDialog.amount
-                _request_description = _receiveDetailsDialog.description
-                _request_expiry = _receiveDetailsDialog.expiry
                 if (_receiveDetailsDialog.isOffer) {
-                    createOffer()
+                    createOffer(_receiveDetailsDialog.amount, _receiveDetailsDialog.description,
+                                _receiveDetailsDialog.expiry)
                 } else {
-                    createRequest(_receiveDetailsDialog.isLightning, false)
+                    createRequest(_receiveDetailsDialog.isLightning, _receiveDetailsDialog.amount,
+                                  _receiveDetailsDialog.description, _receiveDetailsDialog.expiry, false)
                 }
             }
             onRejected: {

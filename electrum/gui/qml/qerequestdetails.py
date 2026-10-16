@@ -49,7 +49,7 @@ class QERequestDetails(QObject, QtEventListener):
         self._key = None
         self._req = None
         self._timer = None
-        self._amount = None
+        self._amount = QEAmount()
         self._offer = None  # type: Optional[str]
         self._offer_message = ''
 
@@ -158,7 +158,7 @@ class QERequestDetails(QObject, QtEventListener):
         wallet = self._wallet.wallet
         if not wallet.lnworker:
             return ''
-        amount_sat = self._req.get_amount_sat() or 0 if self._req else 0
+        amount_sat = self._req.get_amount_sat_msat_precision() or 0 if self._req else 0
         can_receive = wallet.lnworker.num_sats_can_receive()
         will_req_zeroconf = wallet.lnworker.receive_requires_jit_channel(amount_msat=amount_sat*1000)
         if self._req and ((can_receive > 0 and amount_sat <= can_receive)
@@ -193,23 +193,20 @@ class QERequestDetails(QObject, QtEventListener):
             self._logger.error(f'payment request key {self._key} unknown in wallet {self._wallet.name}')
             return
 
-        self._amount = QEAmount(from_invoice=self._req)
+        self._amount.copyFrom(QEAmount(from_invoice=self._req))
 
         self.detailsChanged.emit()
         self.statusChanged.emit()
         self.set_status_timer()
 
-    @pyqtSlot(str, 'qint64', str)
-    def setOffer(self, offer: str, amount_sat: int, message: str):
+    @pyqtSlot(str, QEAmount, str)
+    def setOffer(self, offer: str, amount: QEAmount, message: str):
         """Populate from a reusable Lightning offer instead of a persisted request,
         so the same receive view used for bolt11 can also display offers.
         Offers are not persisted (no key) and have no payment status."""
         self._offer = offer
         self._offer_message = message or ''
-        if amount_sat:
-            self._amount = QEAmount(amount_sat=amount_sat, amount_msat=amount_sat * 1000)
-        else:
-            self._amount = QEAmount()
+        self._amount.copyFrom(amount)
         self.detailsChanged.emit()
 
     def set_status_timer(self):
@@ -242,8 +239,8 @@ class QERequestDetails(QObject, QtEventListener):
             self._lnurlData = {
                 'domain': urlparse(lnurldata.callback_url).netloc,
                 'callback_url': lnurldata.callback_url,
-                'min_withdrawable_sat': lnurldata.min_withdrawable_sat,
-                'max_withdrawable_sat': lnurldata.max_withdrawable_sat,
+                'min_withdrawable_msat': QEAmount(amount_msat=lnurldata.min_withdrawable_msat),
+                'max_withdrawable_msat': QEAmount(amount_msat=lnurldata.max_withdrawable_msat),
                 'default_description': lnurldata.default_description,
                 'k1': lnurldata.k1,
             }
@@ -251,14 +248,14 @@ class QERequestDetails(QObject, QtEventListener):
         else:
             raise NotImplementedError("Cannot request withdrawal for this payment identifier type")
 
-    @pyqtSlot(int)
-    def lnurlRequestWithdrawal(self, amount_sat: int) -> None:
+    @pyqtSlot(QEAmount)
+    def lnurlRequestWithdrawal(self, amount: QEAmount) -> None:
         assert self._lnurlData
         self._logger.debug(f'requesting lnurlw: {repr(self._lnurlData)}')
 
         try:
             key = self._wallet.wallet.create_request(
-                amount_sat=amount_sat,
+                amount_msat=amount.msatsInt,
                 message=self._lnurlData.get('default_description', ''),
                 exp_delay=120,
                 address=None,
