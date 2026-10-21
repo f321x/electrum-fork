@@ -28,6 +28,8 @@
 
 import os
 import random
+import bisect
+import graphlib
 import time
 import copy
 import math
@@ -432,6 +434,7 @@ class Abstract_Wallet(ABC, Logger, EventListener):
         self.lock = self.adb.lock
         self._last_full_history = None
         self._tx_parents_cache = {}
+        self._num_parents_of_history = None  # type: Optional[Dict[str, int]]
         self._paid_invoice_keys_cache = set()  # type: Set[str]
         self._coin_price_cache = {}
         self._default_labels = {}
@@ -638,6 +641,7 @@ class Abstract_Wallet(ABC, Logger, EventListener):
     def clear_tx_parents_cache(self):
         with self.lock:
             self._tx_parents_cache.clear()
+            self._num_parents_of_history = None
             self._num_parents.clear()
             self._last_full_history = None
 
@@ -1081,9 +1085,15 @@ class Abstract_Wallet(ABC, Logger, EventListener):
     def get_num_parents(self, txid: str) -> Optional[int]:
         if not self.is_up_to_date():
             return
-        if txid not in self._num_parents:
-            self._num_parents[txid] = len(self.get_tx_parents(txid))
-        return self._num_parents[txid]
+        with self.lock:
+            if txid not in self._num_parents:
+                if self._num_parents_of_history is None:
+                    self._num_parents_of_history = self._compute_num_parents()
+                num_parents = self._num_parents_of_history.get(txid)
+                if num_parents is None:
+                    num_parents = len(self.get_tx_parents(txid))
+                self._num_parents[txid] = num_parents
+            return self._num_parents[txid]
 
     def get_tx_parents(self, txid: str) -> Dict[str, Tuple[List[str], List[str]]]:
         """
@@ -1133,6 +1143,104 @@ class Abstract_Wallet(ABC, Logger, EventListener):
             result[txid] = parents, uncles
             self._tx_parents_cache[txid] = result
             return result
+
+    def _compute_num_parents(self) -> Dict[str, int]:
+        """Returns len(self.get_tx_parents(txid)) for all txs in the wallet history.
+        Ancestor sets are bitsets, to avoid building a dict per tx
+        (quadratic in the number of txs, and worse with address reuse).
+        """
+        with self.lock:
+            history = self._get_history_txids()
+            addr_spends = {}
+            lineage = {txid: self._get_tx_parents_and_reuse(txid, addr_spends) for txid in history}
+        # mined txs, sorted by (height, txpos), are in topological order. unmined ones have no uncles.
+        mined = sorted((txid for txid, (key, _, _) in lineage.items() if key[0] > 0), key=lambda txid: lineage[txid][0])
+        unmined = graphlib.TopologicalSorter({
+            txid: [p for p in parents if p in lineage]
+            for txid, (key, parents, _) in lineage.items() if key[0] <= 0
+        }).static_order()
+        # bitsets are freed after their last use, as most of them are only needed briefly
+        refs = defaultdict(int)  # txid -> number of remaining uses of its bitset
+        max_n = defaultdict(int)  # addr -> number of coins in addr_spends[addr] that are uncles of a tx
+        for key, parents, reuse in lineage.values():
+            for parent in parents:
+                refs[parent] += 1
+            for addr, n in reuse:
+                max_n[addr] = max(max_n[addr], n)
+        for addr, n in max_n.items():
+            for uncle in addr_spends[addr][1][:n]:
+                refs[uncle] += 1
+
+        bits = {}  # txid -> bitset of the tx and its ancestors
+        def use_bits(txid):
+            refs[txid] -= 1
+            return bits.pop(txid, 0) if refs[txid] <= 0 else bits.get(txid, 0)
+
+        num_parents = {}
+        reuse_bits = {}  # addr -> (n, union of the bitsets of the first n txs in addr_spends[addr][1])
+        for i, txid in enumerate(itertools.chain(mined, unmined)):
+            if txid in num_parents:  # mined parent of an unmined tx
+                continue
+            key, parents, reuse = lineage[txid]
+            b = 1 << i
+            for parent in parents:
+                b |= use_bits(parent)
+            for addr, n in reuse:
+                m, rb = reuse_bits.get(addr, (0, 0))
+                if n < m:  # not expected, as mined txs are sorted
+                    m, rb = 0, 0
+                for uncle in addr_spends[addr][1][m:n]:
+                    rb |= use_bits(uncle)
+                reuse_bits[addr] = n, rb
+                b |= rb
+            num_parents[txid] = b.bit_count()
+            if refs[txid] > 0:
+                bits[txid] = b
+        return num_parents
+
+    def _get_history_txids(self) -> Set[str]:
+        """txids of self.get_onchain_history(), which is more expensive to compute"""
+        txids = set()
+        for addr in self.get_addresses() + list(self._accounting_addresses):
+            txids.update(self.adb.get_address_history(addr))
+        return txids
+
+    def _get_tx_parents_and_reuse(
+            self, txid: str, addr_spends: Dict[str, Tuple[List[Tuple[int, int]], List[str]]],
+    ) -> Tuple[Tuple[int, int], List[str], List[Tuple[str, int]]]:
+        """Returns the (height, txpos) of txid, the txids spent by its inputs,
+        and a list of (addr, n) for its input addresses, where the first n coins in addr_spends[addr]
+        were spent before txid. addr_spends is filled as needed, see _get_addr_spends.
+        """
+        tx = self.adb.get_transaction(txid)
+        assert tx, f"cannot find {txid} in db"
+        tx_mined_info = self.adb.get_tx_height(txid)
+        key = tx_mined_info.height(), tx_mined_info.txpos if tx_mined_info.txpos is not None else -1
+        parents = []  # type: List[str]
+        reuse = []  # type: List[Tuple[str, int]]
+        for txin in tx.inputs():
+            parents.append(txin.prevout.txid.hex())
+            # detect address reuse
+            addr = self.adb.get_txin_address(txin)
+            if addr is None:
+                continue
+            if addr not in addr_spends:
+                addr_spends[addr] = self._get_addr_spends(addr)
+            # coins spent by txid itself, or by an unmined tx, are excluded
+            if n := bisect.bisect_left(addr_spends[addr][0], key):
+                reuse.append((addr, n))
+        return key, parents, reuse
+
+    def _get_addr_spends(self, addr: str) -> Tuple[List[Tuple[int, int]], List[str]]:
+        """Returns the coins of addr that were spent by a mined tx, in the order they were spent:
+        the (height, txpos) of the spending txs, and the txids that created the coins.
+        """
+        received, sent = self.adb.get_addr_io(addr)
+        spends = sorted(
+            ((height, txpos), prevout_str.split(':')[0])
+            for prevout_str, (spending_txid, height, txpos) in sent.items()
+            if height > 0)
+        return [key for key, _ in spends], [txid for _, txid in spends]
 
     def get_balance(self, **kwargs):
         """Note: intended for display-purposes.

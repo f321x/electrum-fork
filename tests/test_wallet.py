@@ -507,5 +507,6 @@ class TestTxParents(WalletTestCase):
         self.assertEqual(([f2], [f1]), wallet.get_tx_parents(s2)[s2])
         self.assertEqual(([s3], []), wallet.get_tx_parents(u1)[u1])
         expected = {f1: 1, f2: 1, s1: 2, s2: 3, s3: 4, u1: 5, u2: 6}
+        self.assertEqual(expected, wallet._compute_num_parents())
         for txid, num_parents in expected.items():
             self.assertEqual(num_parents, len(wallet.get_tx_parents(txid)))
