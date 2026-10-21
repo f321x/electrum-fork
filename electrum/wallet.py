@@ -432,8 +432,6 @@ class Abstract_Wallet(ABC, Logger, EventListener):
         for addr in self.get_addresses():
             self.adb.add_address(addr)
         self.lock = self.adb.lock
-        self._last_full_history = None
-        self._tx_parents_cache = {}
         self._num_parents_of_history = None  # type: Optional[Dict[str, int]]
         self._paid_invoice_keys_cache = set()  # type: Set[str]
         self._coin_price_cache = {}
@@ -640,10 +638,8 @@ class Abstract_Wallet(ABC, Logger, EventListener):
 
     def clear_tx_parents_cache(self):
         with self.lock:
-            self._tx_parents_cache.clear()
             self._num_parents_of_history = None
             self._num_parents.clear()
-            self._last_full_history = None
 
     @event_listener
     async def on_event_adb_set_up_to_date(self, adb):
@@ -1097,51 +1093,24 @@ class Abstract_Wallet(ABC, Logger, EventListener):
 
     def get_tx_parents(self, txid: str) -> Dict[str, Tuple[List[str], List[str]]]:
         """
-        returns a flat dict:
-        txid -> list of parent txids
+        returns a flat dict, for txid and its ancestors in the wallet history:
+        txid -> (list of parent txids, list of uncle txids)
+        uncles are the txs that created other coins of an input address,
+        if those were spent before txid (address reuse)
         """
         with self.lock:
-            if self._last_full_history is None:
-                self._last_full_history = self.get_onchain_history()
-                # populate cache in chronological order (confirmed tx only)
-                # todo: get_full_history should return unconfirmed tx topologically sorted
-                for _txid, tx_item in self._last_full_history.items():
-                    if tx_item.tx_mined_status.height() > 0:
-                        self.get_tx_parents(_txid)
-
-            result = self._tx_parents_cache.get(txid, None)
-            if result is not None:
-                return result
-            result = {}   # type: Dict[str, Tuple[List[str], List[str]]]
-            parents = []  # type: List[str]
-            uncles = []   # type: List[str]
-            tx = self.adb.get_transaction(txid)
-            assert tx, f"cannot find {txid} in db"
-            for i, txin in enumerate(tx.inputs()):
-                _txid = txin.prevout.txid.hex()
-                parents.append(_txid)
-                # detect address reuse
-                addr = self.adb.get_txin_address(txin)
-                if addr is None:
+            history = self._get_history_txids()
+            addr_spends = {}
+            result = {}  # type: Dict[str, Tuple[List[str], List[str]]]
+            todo = [txid]
+            while todo:
+                _txid = todo.pop()
+                if _txid in result:
                     continue
-                received, sent = self.adb.get_addr_io(addr)
-                if len(sent) > 1:
-                    my_txid, my_height, my_pos = sent[txin.prevout.to_str()]
-                    assert my_txid == txid
-                    for k, v in sent.items():
-                        if k != txin.prevout.to_str():
-                            reuse_txid, reuse_height, reuse_pos = v
-                            if reuse_height <= 0:  # exclude not-yet-mined (we need topological ordering)
-                                continue
-                            if (reuse_height, reuse_pos) < (my_height, my_pos):
-                                uncle_txid, uncle_index = k.split(':')
-                                uncles.append(uncle_txid)
-
-            for _txid in parents + uncles:
-                if _txid in self._last_full_history.keys():
-                    result.update(self.get_tx_parents(_txid))
-            result[txid] = parents, uncles
-            self._tx_parents_cache[txid] = result
+                key, parents, reuse = self._get_tx_parents_and_reuse(_txid, addr_spends)
+                uncles = [u for addr, n in reuse for u in addr_spends[addr][1][:n]]
+                result[_txid] = parents, uncles
+                todo.extend(x for x in parents + uncles if x in history and x not in result)
             return result
 
     def _compute_num_parents(self) -> Dict[str, int]:
