@@ -52,12 +52,20 @@ def _ensure_translation_keeps_format_string_syntax_similar(translator):
     If not, translations are rejected by falling back to the source string.
     """
     sf = string.Formatter()
+
+    def get_replacement_fields(s: str) -> list[tuple]:
+        # sf.parse() yields tuples (literal_text, field_name, format_spec, conversion).
+        # Chunks that are only literal text (e.g. the text after the last replacement field,
+        # or around escaped "{{" braces) have field_name=None. Skip them, so that e.g.
+        # moving a field to the end of the sentence does not change the field count.
+        return [tupl for tupl in sf.parse(s) if tupl[1] is not None]
+
     @functools.wraps(translator)
     def safe_translator(msg: str, **kwargs):
         translation = translator(msg, **kwargs)
-        parsed1 = list(sf.parse(msg))  # iterable of tuples (literal_text, field_name, format_spec, conversion)
+        parsed1 = get_replacement_fields(msg)
         try:
-            parsed2 = list(sf.parse(translation))
+            parsed2 = get_replacement_fields(translation)
         except ValueError:  # malformed format string in translation
             _logger.warning(
                 f"rejected translation string: failed to parse. original={msg!r}. {translation=!r}",

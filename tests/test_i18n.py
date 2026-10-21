@@ -57,6 +57,20 @@ class TestSyntaxChecks(ElectrumTestCase):
         src, dst = ("{1} aaa {pp} {qq} {0} bbb", "{qq} AAA {0} {1} {pp} BBB")
         self.assertEqual(dst, syntax_check_decorator(lambda x: dst)(src))
 
+    def test_allow_moving_replacement_field_to_or_from_the_end(self):  # language-flexibility
+        src, dst = ("{} addresses", "ADDRESSES: {}")
+        self.assertEqual(dst, syntax_check_decorator(lambda x: dst)(src))
+        src, dst = ("edit {}", "{} EDIT")
+        self.assertEqual(dst, syntax_check_decorator(lambda x: dst)(src))
+        src, dst = ("missing libraries for {}.", "MISSING LIBRARIES FOR {}")
+        self.assertEqual(dst, syntax_check_decorator(lambda x: dst)(src))
+
+    def test_escaped_braces_are_not_replacement_fields(self):
+        src, dst = ("hello {{there}} {}", "HELLO {} THERE")
+        self.assertEqual(dst, syntax_check_decorator(lambda x: dst)(src))
+        src, dst = ("hello {} there", "HELLO {} {{THERE}}")
+        self.assertEqual(dst, syntax_check_decorator(lambda x: dst)(src))
+
     def test_replacement_field_name_cannot_change(self):
         # rejects:
         src, dst = ("hel{}lo there", "HELLO THE{RE}")
