@@ -75,9 +75,7 @@ class TestSyntaxChecks(ElectrumTestCase):
         # rejects:
         src, dst = ("hel{}lo there", "HELLO THE{RE}")
         self.assertEqual(src, syntax_check_decorator(lambda x: dst)(src))
-        src, dst = ("hel{}lo there", "HELLO THE{0}")
-        self.assertEqual(src, syntax_check_decorator(lambda x: dst)(src))
-        src, dst = ("hel{0}lo there", "HELLO THE{}")
+        src, dst = ("hel{}lo there", "HELLO THE{1}")
         self.assertEqual(src, syntax_check_decorator(lambda x: dst)(src))
         src, dst = ("hel{0}lo there", "HELLO THE{RE}")
         self.assertEqual(src, syntax_check_decorator(lambda x: dst)(src))
@@ -107,6 +105,35 @@ class TestSyntaxChecks(ElectrumTestCase):
         self.assertEqual(src, syntax_check_decorator(lambda x: dst)(src))
         src, dst = ("hello there {} {} {} {p} {q}", "HELLO THERE {} {q} {q} {p} {q}")  # drops two values
         self.assertEqual(src, syntax_check_decorator(lambda x: dst)(src))
+
+    def test_auto_and_manual_field_numbering_are_equivalent(self):
+        src, dst = ("hel{}lo there", "HELLO THE{0}")
+        self.assertEqual(dst, syntax_check_decorator(lambda x: dst)(src))
+        src, dst = ("hel{0}lo there", "HELLO THE{}")
+        self.assertEqual(dst, syntax_check_decorator(lambda x: dst)(src))
+        src, dst = ("hello {} {p}", "HELLO {p} {0}")
+        self.assertEqual(dst, syntax_check_decorator(lambda x: dst)(src))
+        src, dst = ("hello {.real} {}", "HELLO {0.real} {1}")
+        self.assertEqual(dst, syntax_check_decorator(lambda x: dst)(src))
+
+    def test_allow_reordering_auto_numbered_fields(self):  # language-flexibility
+        src, dst = ("sent {} to {}", "TO {1} SENT {0}")
+        self.assertEqual(dst, syntax_check_decorator(lambda x: dst)(src))
+        # rejects:
+        src, dst = ("sent {} to {}", "SENT {0} TO {2}")
+        self.assertEqual(src, syntax_check_decorator(lambda x: dst)(src))
+        src, dst = ("hello {.real} {}", "HELLO {} {.real}")  # attribute lookup moved to the other argument
+        self.assertEqual(src, syntax_check_decorator(lambda x: dst)(src))
+
+    def test_mixing_auto_and_manual_field_numbering(self):
+        # str.format() raises ValueError for these
+        src, dst = ("sent {} to {}", "SENT {} TO {1}")
+        self.assertEqual(src, syntax_check_decorator(lambda x: dst)(src))
+        src, dst = ("sent {0} to {1}", "SENT {} TO {1}")
+        self.assertEqual(src, syntax_check_decorator(lambda x: dst)(src))
+        src, dst = ("sent {} to {1}", "SENT {} TO {1}")
+        with self.assertRaises(ValueError):
+            syntax_check_decorator(lambda x: dst)(src)
 
     def test_allow_reordering_fields_with_different_conversions(self):
         src, dst = ("hello {0!r} {0}", "HELLO {0} {0!r}")

@@ -54,12 +54,32 @@ def _ensure_translation_keeps_format_string_syntax_similar(translator):
     """
     sf = string.Formatter()
 
-    def get_replacement_fields(s: str) -> list[tuple]:
+    def get_replacement_fields(s: str) -> list[tuple[str, str, Optional[str]]]:
+        """Returns the replacement fields of format string `s`, as (field_name, format_spec, conversion).
+        Automatic field numbering is made explicit, e.g. "{} {}" is treated as "{0} {1}",
+        so that translators can re-order these fields too.
+        Raises ValueError if `s` is malformed, or mixes automatic and manual field numbering.
+        note: replacement fields nested inside a format_spec are not numbered.
+        """
+        fields = []
+        next_auto_idx = 0
+        has_manual_idx = False
         # sf.parse() yields tuples (literal_text, field_name, format_spec, conversion).
-        # Chunks that are only literal text (e.g. the text after the last replacement field,
-        # or around escaped "{{" braces) have field_name=None. Skip them, so that e.g.
-        # moving a field to the end of the sentence does not change the field count.
-        return [tupl for tupl in sf.parse(s) if tupl[1] is not None]
+        for _literal_text, field_name, format_spec, conversion in sf.parse(s):
+            # Chunks that are only literal text (e.g. the text after the last replacement field,
+            # or around escaped "{{" braces) have field_name=None. Skip them, so that e.g.
+            # moving a field to the end of the sentence does not change the field count.
+            if field_name is None:
+                continue
+            if field_name == "" or field_name[0] in ".[":  # automatic numbering, e.g. "{}", "{.attr}", "{[key]}"
+                field_name = f"{next_auto_idx}{field_name}"
+                next_auto_idx += 1
+            elif field_name[0].isdigit():
+                has_manual_idx = True
+            fields.append((field_name, format_spec, conversion))
+        if next_auto_idx > 0 and has_manual_idx:  # str.format() would raise
+            raise ValueError("cannot switch from automatic field numbering to manual field specification")
+        return fields
 
     @functools.wraps(translator)
     def safe_translator(msg: str, **kwargs):
@@ -83,9 +103,7 @@ def _ensure_translation_keeps_format_string_syntax_similar(translator):
         # can make str.format() raise, and a format_spec can contain nested replacement fields.
         # note: each field must be used as often as in the source string. Otherwise e.g. "{} {p} {p}"
         #       could become "{} {} {p}", which raises IndexError.
-        fields1 = Counter(tupl[1:] for tupl in parsed1)  # (field_name, format_spec, conversion)
-        fields2 = Counter(tupl[1:] for tupl in parsed2)
-        if fields1 != fields2:
+        if Counter(parsed1) != Counter(parsed2):
             _logger.warning(
                 f"rejected translation string: replacement fields mismatch. original={msg!r}. {translation=!r}",
                 only_once=True)
