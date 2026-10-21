@@ -85,9 +85,6 @@ class TestSyntaxChecks(ElectrumTestCase):
         self.assertEqual(src, syntax_check_decorator(lambda x: dst)(src))
         src, dst = ("hel{RE}lo there", "HELLO THE{0}")
         self.assertEqual(src, syntax_check_decorator(lambda x: dst)(src))
-        # we only check the set of field_names is invariant, so this is allowed:
-        src, dst = ("hello there {} {} {} {p} {q}", "HELLO THERE {} {q} {q} {p} {q}")
-        self.assertEqual(dst, syntax_check_decorator(lambda x: dst)(src))
 
     def test_replacement_field_count_cannot_change(self):
         # rejects:
@@ -105,6 +102,15 @@ class TestSyntaxChecks(ElectrumTestCase):
         self.assertEqual(src, syntax_check_decorator(lambda x: dst)(src))
         src, dst = ("hello there {p} {0}", "HELLO THERE {p}")
         self.assertEqual(src, syntax_check_decorator(lambda x: dst)(src))
+        # same total count and same set of field_names, but each field must be used as often as in the source:
+        src, dst = ("hello {} {p} {p}", "HELLO {} {} {p}")  # raises IndexError when formatted
+        self.assertEqual(src, syntax_check_decorator(lambda x: dst)(src))
+        src, dst = ("hello there {} {} {} {p} {q}", "HELLO THERE {} {q} {q} {p} {q}")  # drops two values
+        self.assertEqual(src, syntax_check_decorator(lambda x: dst)(src))
+
+    def test_allow_reordering_fields_with_different_conversions(self):
+        src, dst = ("hello {0!r} {0}", "HELLO {0} {0!r}")
+        self.assertEqual(dst, syntax_check_decorator(lambda x: dst)(src))
 
     def test_format_spec_cannot_change(self):
         # rejects:
