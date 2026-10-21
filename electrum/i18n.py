@@ -77,12 +77,14 @@ def _ensure_translation_keeps_format_string_syntax_similar(translator):
                 f"rejected translation string: num replacement fields mismatch. original={msg!r}. {translation=!r}",
                 only_once=True)
             return msg
-        # set of "field_name"s must not change. (re-ordering is explicitly allowed):
-        field_names1 = set(tupl[1] for tupl in parsed1)
-        field_names2 = set(tupl[1] for tupl in parsed2)
-        if field_names1 != field_names2:
+        # set of "field_name"s must not change. (re-ordering is explicitly allowed)
+        # Same for the "format_spec" and "conversion" of each field. A changed format_spec or conversion
+        # can make str.format() raise, and a format_spec can contain nested replacement fields.
+        fields1 = set(tupl[1:] for tupl in parsed1)  # (field_name, format_spec, conversion)
+        fields2 = set(tupl[1:] for tupl in parsed2)
+        if fields1 != fields2:
             _logger.warning(
-                f"rejected translation string: set of field_names mismatch. original={msg!r}. {translation=!r}",
+                f"rejected translation string: set of fields mismatch. original={msg!r}. {translation=!r}",
                 only_once=True)
             return msg
         # checks done.

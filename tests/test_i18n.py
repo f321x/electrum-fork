@@ -105,3 +105,29 @@ class TestSyntaxChecks(ElectrumTestCase):
         self.assertEqual(src, syntax_check_decorator(lambda x: dst)(src))
         src, dst = ("hello there {p} {0}", "HELLO THERE {p}")
         self.assertEqual(src, syntax_check_decorator(lambda x: dst)(src))
+
+    def test_format_spec_cannot_change(self):
+        # rejects:
+        src, dst = ("hello {}", "HELLO {:d}")  # raises ValueError if formatted with a str
+        self.assertEqual(src, syntax_check_decorator(lambda x: dst)(src))
+        src, dst = ("hello {}", "HELLO {:>999999999}")  # huge padding
+        self.assertEqual(src, syntax_check_decorator(lambda x: dst)(src))
+        src, dst = ("{:2d} minutes", "{:3d} MINUTES")
+        self.assertEqual(src, syntax_check_decorator(lambda x: dst)(src))
+        src, dst = ("hello {0}", "HELLO {0:{0.__class__}}")  # nested replacement field in format_spec
+        self.assertEqual(src, syntax_check_decorator(lambda x: dst)(src))
+        # allowed:
+        src, dst = ("{:2d} minutes", "{:2d} MINUTES")
+        self.assertEqual(dst, syntax_check_decorator(lambda x: dst)(src))
+
+    def test_conversion_cannot_change(self):
+        # rejects:
+        src, dst = ("hello {}", "HELLO {!r}")
+        self.assertEqual(src, syntax_check_decorator(lambda x: dst)(src))
+        src, dst = ("hello {!r}", "HELLO {!s}")
+        self.assertEqual(src, syntax_check_decorator(lambda x: dst)(src))
+        src, dst = ("hello {}", "HELLO {!z}")  # raises ValueError when formatted
+        self.assertEqual(src, syntax_check_decorator(lambda x: dst)(src))
+        # allowed:
+        src, dst = ("hello {!r}", "HELLO {!r}")
+        self.assertEqual(dst, syntax_check_decorator(lambda x: dst)(src))
