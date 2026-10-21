@@ -63,11 +63,6 @@ def xor_into(target: List[int], source: bytes) -> None:
         target[i] ^= source[i]
 
 
-def xor_with(a: bytes, b: bytes) -> bytes:
-    assert len(a) == len(b)
-    return (int.from_bytes(a, 'little') ^ int.from_bytes(b, 'little')).to_bytes(len(a), 'little')
-
-
 def take_first(s: AnyStr, count: int) -> AnyStr:
     return s[0:count]
 
