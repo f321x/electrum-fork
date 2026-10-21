@@ -1098,9 +1098,10 @@ class Abstract_Wallet(ABC, Logger, EventListener):
             """
             received, sent = self.adb.get_addr_io(addr_)
             spends = sorted(
-                ((height, txpos), prevout_str.split(':')[0])
+                [((height, txpos), prevout_str.split(':')[0])
                     for prevout_str, (spending_txid, height, txpos) in sent.items()
-                    if height > 0
+                    if height > 0],
+                key=lambda spend: spend[0],
             )
             return [key for key, _ in spends], [txid for _, txid in spends]
 
