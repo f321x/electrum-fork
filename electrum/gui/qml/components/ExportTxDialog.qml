@@ -9,11 +9,15 @@ ElDialog {
     id: dialog
 
     required property string text
-    property string text_qr
-    // if text_qr is undefined text will be used
     property string text_help
-    property string text_warn
     property string tx_label
+
+    property var _qr: QRIP.getTxQrData(dialog.text)
+    readonly property string text_warn: !_qr.data_stripped
+        ? ''
+        : [qsTr('Warning: Some data (prev txs / "full utxos") was left out of the QR code to reduce its size.'),
+           qsTr('This might cause issues if signing offline.'),
+           qsTr('As a workaround, copy to clipboard or use the Share option instead.')].join(' ')
 
     title: qsTr('Share Transaction')
 
@@ -48,7 +52,16 @@ ElDialog {
                         width: parent.width
                         QRImage {
                             id: qr
-                            qrdata: dialog.text_qr
+                            visible: !dialog._qr.ur_payload
+                            qrdata: dialog._qr.qr_text
+                            Layout.alignment: Qt.AlignHCenter
+                            Layout.topMargin: constants.paddingMedium
+                            Layout.bottomMargin: constants.paddingMedium
+                        }
+                        URQRImage {
+                            visible: dialog._qr.ur_payload
+                            urType: dialog._qr.ur_type
+                            payload: dialog._qr.ur_payload
                             Layout.alignment: Qt.AlignHCenter
                             Layout.topMargin: constants.paddingMedium
                             Layout.bottomMargin: constants.paddingMedium
