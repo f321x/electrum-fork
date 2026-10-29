@@ -69,6 +69,9 @@ echo "== version: $ver"
 
 run version_info > "$TMP/version_info.json" || err "'version_info' failed"
 cat "$TMP/version_info.json"
+# version_info's qt.version is PyQt's compile-time Qt (QT_VERSION_STR); the bundled Qt is what runs
+QTPLIST="$APP/Contents/Frameworks/PyQt6/Qt6/lib/QtCore.framework/Resources/Info.plist"
+echo "== bundled QtCore: $(plutil -extract CFBundleVersion raw "$QTPLIST" 2>/dev/null || echo '?')"
 /usr/bin/python3 - "$TMP/version_info.json" "$APP" <<'EOF' || err "version_info checks failed"
 import json, os, sys
 info = json.load(open(sys.argv[1]))
@@ -113,6 +116,9 @@ if kill -0 "$pid" 2>/dev/null; then
         err "process runs under Rosetta although the native slice was requested"
     fi
     kill "$pid"; wait "$pid" 2>/dev/null || true
+    echo "== GUI log (last 40 lines)"; tail -n 40 "$TMP/gui.log"
+    # a warning for now: no baseline yet of what a healthy start logs
+    if grep -q Traceback "$TMP/gui.log"; then echo "::warning::GUI log contains a Python traceback"; fi
 else
     wait "$pid" 2>/dev/null || true
     cat "$TMP/gui.log"

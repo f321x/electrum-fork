@@ -21,6 +21,13 @@ jobs:
       matrix:
         runner: [macos-26-intel, macos-15-intel]
         attempt: [a, b]
+        # GitHub runs at most 5 macOS jobs at once on free plans; 15-intel a vs b was SAME in run 40849223534
+        exclude:
+          - {runner: macos-15-intel, attempt: b}
+        # builder-independence knobs (macos-battery.sh header): run 1 vs run 2 in one VM
+        include:
+          - {runner: macos-26-intel, attempt: jobs, cpu: "1 4"}
+          - {runner: macos-26-intel, attempt: root, root: "/tmp/eb /tmp/electrum-battery-root-2"}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 360
     steps:
@@ -29,6 +36,13 @@ jobs:
           submodules: recursive
           fetch-depth: 0  # git describe --tags
       - name: Run battery
+        env:
+          BATTERY_CPU_COUNT: ${{ matrix.cpu }}
+          BATTERY_ROOT: ${{ matrix.root }}
+          # version string and bootloader commit as in run 40849223534, so that its apps stay comparable
+          # (the research commits change nothing that goes into the app)
+          BATTERY_VERSION: ff9c5245f
+          BATTERY_COMMIT: ff9c5245f9d4b74e6d2a1c613e8a62658a2e9656
         run: bash contrib/osx/research/macos-battery.sh . "$RUNNER_TEMP/out"
       # results (small) and the unsigned app zips (large) separately, so the results can be fetched alone
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -58,13 +72,18 @@ jobs:
       - name: Compare
         run: |
           for d in out/battery-*; do echo "== $d"; cat "$d/summary.txt" || true; done
-          # a vs b: same image, separate runner VMs; then the two images against each other
-          for pair in "macos-26-intel-a macos-26-intel-b" "macos-15-intel-a macos-15-intel-b" "macos-26-intel-a macos-15-intel-a"; do
+          # a vs b: same image, separate runner VMs; jobs vs a: build job counts 1 and 4 against the
+          # default in another VM; then the two images against each other
+          for pair in "macos-26-intel-a macos-26-intel-b" "macos-26-intel-a macos-26-intel-jobs" "macos-26-intel-a macos-15-intel-a"; do
             set -- $pair
+            A=out/battery-$1; B=out/battery-$2
             echo "== $1 vs $2"
-            for f in $( (cd out/battery-$1 && ls *.manifest; cd ../battery-$2 && ls *.manifest) 2>/dev/null | sort -u); do
-              if cmp -s "out/battery-$1/$f" "out/battery-$2/$f"; then echo "SAME $f"
-              else echo "DIFF $f"; diff "out/battery-$1/$f" "out/battery-$2/$f" | head -10 || true; fi
+            if [ ! -d "$A" ] || [ ! -d "$B" ]; then echo "MISSING artifact $A or $B"; continue; fi
+            for f in $( (ls "$A" "$B" | grep -E '[.]manifest(\.incomplete)?$' | sed 's/[.]incomplete$//') | sort -u); do
+              if [ -e "$A/$f.incomplete" ] || [ -e "$B/$f.incomplete" ]; then echo "INCOMPLETE $f"
+              elif [ ! -f "$A/$f" ] || [ ! -f "$B/$f" ]; then echo "MISSING $f"
+              elif cmp -s "$A/$f" "$B/$f"; then echo "SAME $f"
+              else echo "DIFF $f"; diff "$A/$f" "$B/$f" | head -10 || true; fi
             done
           done
           echo "== codesign probe: macos-26-intel vs macos-15-intel"
@@ -82,6 +101,8 @@ jobs:
           - {runner: macos-26, source: macos-26-intel, app: x86_64, exec: x86_64}  # Rosetta
           - {runner: macos-26-intel, source: macos-26-intel, app: x86_64, exec: x86_64}
           - {runner: macos-15, source: macos-15-intel, app: arm64, exec: arm64}
+          # oldest arm64 macOS on GitHub (14.8); unsupported from 2026-11-02, brownouts before that
+          - {runner: macos-14, source: macos-26-intel, app: arm64, exec: arm64}
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

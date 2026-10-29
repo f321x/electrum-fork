@@ -11,10 +11,24 @@
 # The build runs twice at the same path (builders use a fixed path too), with different TMPDIRs.
 # Each run writes <part>.<run>.manifest; summary.txt says SAME/DIFF/MISSING per pair.
 # To compare two machines, run on both and diff the *.manifest files.
+# resources.txt has wall time and peak memory per build step and the disk use per run, for sizing a VM.
+#
+# Optional knobs. BATTERY_CPU_COUNT and BATTERY_ROOT take one value for both runs, or two
+# space-separated values for run 1 and run 2 (then summary.txt answers whether the value matters):
+#   BATTERY_CPU_COUNT  job count for make, cmake, waf and setuptools' build_ext (default: all CPUs, as
+#                      make_osx.sh). Setting it also makes every setuptools build_ext use its thread pool
+#                      (by default only aiohttp's does), so compare its run 1 with its run 2. The linker's
+#                      threads still follow the VM's CPU count.
+#   BATTERY_ROOT       build root (default /tmp/eb). Another path must not exist yet or be battery-made.
+#   BATTERY_VERSION    replaces `git describe` (the apps' version string, in Info.plist), and
+#   BATTERY_COMMIT     replaces the commit hash that the bootloader embeds. Set both to compare builds of
+#                      checkouts that differ only outside the app (e.g. in these research files) or in tags.
+#                      Matching run-40849223534: BATTERY_VERSION=ff9c5245f
+#                      BATTERY_COMMIT=ff9c5245f9d4b74e6d2a1c613e8a62658a2e9656 (the yml sets these).
 #
 # Side effects: installs the pinned python.org 3.12.10 pkg with sudo (as make_osx.sh does).
-# Everything else is written to <output dir>, /tmp/eb, /tmp/eb-tc1, /tmp/electrum-battery-tc2,
-# /tmp/eb-t1, /tmp/electrum-battery-tmp-2 and /tmp/eb-tools.
+# Everything else is written to <output dir>, /tmp/eb (or BATTERY_ROOT), /tmp/eb-tc1,
+# /tmp/electrum-battery-tc2, /tmp/eb-t1, /tmp/electrum-battery-tmp-2 and /tmp/eb-tools.
 # Bash 3.2 compatible (macOS /bin/bash).
 set -euo pipefail
 
@@ -22,6 +36,9 @@ set -euo pipefail
 SRC=$(cd "$1" && pwd)
 mkdir -p "$2"; OUT=$(cd "$2" && pwd)
 STAGES=${3:-host toolchain build}
+# The caller's environment as far as it can change build output, before this script overrides parts of it.
+ORIG_ENV=$(env | LC_ALL=C sort | grep -E '^(LANG|LC_[A-Z]+|TZ|CC|CXX|CPP|LD|AR|CFLAGS|CXXFLAGS|CPPFLAGS|LDFLAGS|ARCHFLAGS|SDKROOT|DEVELOPER_DIR|MACOSX_DEPLOYMENT_TARGET|MAKEFLAGS|JOBS|CPU_COUNT|PKG_CONFIG[A-Z_]*|CMAKE_[A-Z_]+|PIP_[A-Z_]+|PYTHON[A-Z_]*|RC_[A-Za-z_]+|LD_[A-Z_]+|DYLD_[A-Z_]+|ZERO_AR_DATE|SOURCE_DATE_EPOCH|CPATH|C_INCLUDE_PATH|CPLUS_INCLUDE_PATH|LIBRARY_PATH|CONFIG_SITE|NUMBER_OF_PROCESSORS|PYINSTALLER_[A-Z_]+|DIST_EXTRA_CONFIG|[A-Z0-9]+_NO_EXTENSIONS|USE_SYSTEM_DEPS|AIOHTTP_[A-Z_]+|MULTIDICT_[A-Z_]+|CBOR2_[A-Z_]+|BATTERY_[A-Z_]+|PATH|HOME|USER|SHELL)=' || true)
+ORIG_UMASK=$(umask)
 
 # Same environment as make_osx.sh: SOURCE_DATE_EPOCH, ZERO_AR_DATE, PYTHONHASHSEED, CPU_COUNT, host_strip.
 export GCC_STRIP_BINARIES=1 PYTHONDONTWRITEBYTECODE=1
@@ -31,7 +48,8 @@ export LC_ALL=C TZ=UTC
 export DEVELOPER_DIR=/Library/Developer/CommandLineTools
 export MACOSX_DEPLOYMENT_TARGET=12.0
 
-ROOT=/tmp/eb                                       # build root, the same for both runs
+ROOT_DEFAULT=/tmp/eb                               # build root, the same for both runs
+ROOT=$ROOT_DEFAULT                                 # per run from BATTERY_ROOT, see the build loop
 TMPDIRS="/tmp/eb-t1 /tmp/electrum-battery-tmp-2"   # different lengths on purpose
 TCDIRS="/tmp/eb-tc1 /tmp/electrum-battery-tc2"     # toolchain probes: different paths on purpose
 TOOLS=/tmp/eb-tools
@@ -53,14 +71,68 @@ want() { case " $STAGES " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 log() { echo "== $*" >&2; }
 note() { echo "$*" | tee -a "$OUT/summary.txt"; }
 nth() { local n=$1; shift; set -- $*; eval "echo \${$n}"; }
+# Value of a knob for run $1: $2 is one word (both runs) or two words (run 1, run 2); $3 if $2 is empty.
+per_run() {
+    local run=$1 val=$2 def=$3
+    if [ -z "$val" ]; then echo "$def"; return 0; fi
+    set -- $val
+    if [ $# -ge 2 ]; then nth "$run" "$val"; else echo "$1"; fi
+}
+
+# Resource accounting for sizing a builder VM. mark labels the next measured command in a log;
+# /usr/bin/time -l then appends wall time and "maximum resident set size" (bytes, the maximum over the
+# command's whole process tree, not the sum of concurrent processes) to the same log.
+TIMEL="/usr/bin/time -l"
+mark() { echo "== measure $*" >&2; }
+# Appends one line per measured command found in logs $2... to resources.txt, tagged with run $1.
+resources() {
+    local run=$1; shift
+    awk -v run="$run" '
+        /^== measure / { label = substr($0, 12); real = ""; next }
+        $2 == "real" && $4 == "user" && $6 == "sys" { real = $1; next }
+        $2 == "maximum" && $3 == "resident" && label != "" {
+            printf "run %s  %8.0f s  %6.0f MiB peak RSS  %s\n", run, real, $1 / 1048576, label; label = ""
+        }' "$@" >> "$OUT/resources.txt" 2>/dev/null || true
+}
+# System-wide memory in use (wired + active + compressor, MiB): what a VM's RAM must hold, including macOS.
+mem_used() {
+    vm_stat | awk '/page size of/ { ps = $8 } /^Pages wired down/ { w = $4 } /^Pages active/ { a = $3 }
+        /occupied by compressor/ { c = $5 } END { printf "%d\n", (w + a + c) * ps / 1048576 }'
+}
+# Samples mem_used every 5 s into memory.txt; step() adds "begin"/"end" lines, mem_report() reads them.
+mem_sampler() { while :; do echo "$(date +%s) $(mem_used 2>/dev/null || echo 0)"; sleep 5; done >> "$OUT/memory.txt"; }
+mem_report() {
+    awk '$2 == "begin" { s = substr($0, index($0, "begin") + 6); next }
+        $2 == "end" { if (s in m) printf "%6d MiB system memory in use (peak, 5 s samples)  %s\n", m[s], s; s = ""; next }
+        NF == 2 && $2 ~ /^[0-9]+$/ { if (base == "") base = $2; if (s != "" && $2 > m[s]) m[s] = $2 }
+        END { printf "%6d MiB system memory in use before the first step\n", base }' "$OUT/memory.txt" >> "$OUT/resources.txt" || true
+}
+# rm -rf guard for BATTERY_ROOT: absolute, two levels deep, and the default, new, or made by this script.
+check_root() {
+    case "$1" in /*/*) ;; *) echo "BATTERY_ROOT: need an absolute path below a directory, got '$1'" >&2; exit 1 ;; esac
+    if [ "$1" != "$ROOT_DEFAULT" ] && [ -e "$1" ] && [ ! -e "$1/.battery-root" ]; then
+        echo "BATTERY_ROOT: refusing to delete $1, which this script did not create" >&2; exit 1
+    fi
+}
+# Disk use (KiB) of the build root, its parts, and the tool and toolchain directories, after run $1.
+disk_report() {
+    {
+        echo "run $1 disk use (du -sk, KiB):"
+        du -sk "$ROOT" "$ROOT"/* "$TMPDIR" "$TOOLS" /Library/Frameworks/Python.framework "$DEVELOPER_DIR" 2>/dev/null || true
+        df -k "$ROOT" | tail -1
+    } >> "$OUT/resources.txt"
+}
 
 # Runs "$@" in a subshell with errexit in effect (errexit is ignored in subshells whose status is
 # tested), logging to $LOG. Notes a failure and always returns 0.
 step() {
+    echo "$(date +%s) begin $STEP" >> "$OUT/memory.txt"
     set +e
     ( set -e; "$@" ) > "$LOG" 2>&1
     local rc=$?
     set -e
+    STEP_RC=$rc
+    echo "$(date +%s) end $STEP" >> "$OUT/memory.txt"
     if [ $rc != 0 ]; then note "FAIL $STEP (see $LOG)"; fi
     return 0
 }
@@ -84,6 +156,7 @@ manifest() {
 
 compare() {
     local a="$OUT/$1.1.manifest" b="$OUT/$1.2.manifest"
+    if [ -e "$a.incomplete" ] || [ -e "$b.incomplete" ]; then note "INCOMPLETE $1 (a build step failed, see FAIL above)"; return 0; fi
     if [ ! -s "$a" ] || [ ! -s "$b" ]; then note "MISSING $1"; return 0; fi
     if diff -u "$a" "$b" > "$OUT/$1.diff"; then
         note "SAME $1"; rm -f "$OUT/$1.diff"
@@ -109,11 +182,15 @@ copy_tree() {
     if [ $n -ne $m ]; then echo "copy_tree: copied $m of $n files" >&2; exit 1; fi
 }
 
+# Always (re)installs, as make_osx.sh does: GitHub images already have a 3.12.10 framework, installed
+# from the same pkg but with other choices and a pip reinstall, which run-40849223534 used by mistake.
 install_python() {
-    if [ -x "$PY" ] && "$PY" -c 'import sys; sys.exit(sys.version_info[:3] != (3, 12, 10))'; then return; fi
     mkdir -p "$TOOLS"
-    curl -fsSL -o "$TOOLS/python.pkg" https://www.python.org/ftp/python/3.12.10/python-3.12.10-macos11.pkg
-    echo "$PY_PKG_SHA  $TOOLS/python.pkg" | shasum -a 256 -c
+    if [ ! -f "$TOOLS/python.pkg" ]; then
+        curl -fsSL -o "$TOOLS/python.pkg.part" https://www.python.org/ftp/python/3.12.10/python-3.12.10-macos11.pkg
+        mv "$TOOLS/python.pkg.part" "$TOOLS/python.pkg"
+    fi
+    echo "$PY_PKG_SHA  $TOOLS/python.pkg" | shasum -a 256 -c || { rm -f "$TOOLS/python.pkg"; return 1; }
     sudo installer -pkg "$TOOLS/python.pkg" -target /
 }
 
@@ -169,11 +246,16 @@ audit_ext() {
     done
 }
 
-pipi() { python3 -m pip install -q --no-cache-dir --no-build-isolation --no-dependencies --no-warn-script-location "$@"; }
+pipi() {
+    local last; for last in "$@"; do :; done
+    mark "pip install ${last##*/}"
+    $TIMEL python3 -m pip install -q --no-cache-dir --no-build-isolation --no-dependencies --no-warn-script-location "$@"
+}
 strip_ext() { find "$ROOT/venv/lib/python3.12/site-packages" -type f -name '*.so' -print0 | xargs -0 strip -x; }
 
-rm -f "$OUT"/*.manifest "$OUT"/*.audit "$OUT"/*.diff "$OUT"/*.zip
-: > "$OUT/summary.txt"
+rm -f "$OUT"/*.manifest "$OUT"/*.incomplete "$OUT"/*.audit "$OUT"/*.diff "$OUT"/*.zip
+: > "$OUT/summary.txt"; : > "$OUT/memory.txt"
+echo "# per measured command: wall time, peak RSS (max over its process tree); then memory and disk" > "$OUT/resources.txt"
 
 if want host; then
     log host
@@ -182,9 +264,30 @@ if want host; then
         for p in $(pkgutil --pkgs | grep -i CLTools); do pkgutil --pkg-info "$p" | grep -E '^(package-id|version)'; done
         clang --version | head -1; ld -v 2>&1 | head -1; echo "SDK $(xcrun --show-sdk-version)"
         echo "codesign $(shasum -a 256 /usr/bin/codesign | cut -c1-16)"
-        for t in lipo install_name_tool codesign_allocate pagestuff otool vtool strip cmake brew port; do
+        # codesign's signer lives in Security.framework (dyld shared cache), which point releases update
+        echo "Security.framework $(defaults read /System/Library/Frameworks/Security.framework/Resources/Info CFBundleVersion)"
+        for t in lipo install_name_tool codesign_allocate pagestuff otool vtool strip cmake brew port nproc pkg-config; do
             echo "$t: $(command -v $t || echo -)"
         done
+        echo "== hardware (none of this should change the output)"
+        sysctl hw.model hw.ncpu hw.physicalcpu hw.logicalcpu hw.activecpu hw.memsize kern.hv_vmm_present kern.osversion
+        sysctl machdep.cpu.vendor machdep.cpu.brand_string machdep.cpu.family machdep.cpu.model machdep.cpu.stepping
+        sysctl machdep.cpu.features machdep.cpu.leaf7_features machdep.cpu.extfeatures
+        echo "hw.optional (=1): $(sysctl hw.optional 2>/dev/null | awk '$2 == 1 { k = $1; sub(/^hw[.]optional[.]/, "", k); sub(/:$/, "", k); printf "%s ", k }')"
+        sysctl vm.swapusage; vm_stat; df -k / /tmp/
+        diskutil info / | grep -E 'File System Personality|Volume Name'
+        echo "== builder setup"
+        echo "user $(id -un), HOME $HOME, umask $ORIG_UMASK, /bin/sh is $(readlink /private/var/select/sh || echo '?')"
+        echo "xcode-select -p: $(xcode-select -p || echo -); $(ls -d /Applications/Xcode*.app 2>/dev/null | tr '\n' ' ')"
+        echo "SDKs: $(ls "$DEVELOPER_DIR/SDKs" | tr '\n' ' ')"
+        echo "perl: $(perl -e 'print $^V'), $(git --version), ARG_MAX $(getconf ARG_MAX)"
+        echo "/usr/local/include: $(ls /usr/local/include 2>/dev/null | wc -l | tr -d ' ') entries, /usr/local/lib: $(ls /usr/local/lib 2>/dev/null | wc -l | tr -d ' ') entries"
+        echo "source: $(git -C "$SRC" rev-parse HEAD), describe $(git -C "$SRC" describe --tags --always), $(git -C "$SRC" status --porcelain | wc -l | tr -d ' ') changed files"
+        git -C "$SRC" config --get-regexp '^core\.(autocrlf|eol|filemode|symlinks|ignorecase)$' || true
+        echo "caller environment:"; echo "$ORIG_ENV"
+        # ld(1) documents no thread-count option; look for hidden options or environment variables
+        echo "ld strings matching thread/parallel/jobs/reproducible/LD_/RC_:"
+        strings -a "$(xcrun -f ld)" | grep -iE 'thread|parallel|concurren|jobs|reproduc|^LD_|^RC_' | LC_ALL=C sort -u | head -80
         if [ -e "$DEVELOPER_DIR/usr/include/c++" ]; then echo "WARNING: stale $DEVELOPER_DIR/usr/include/c++"; fi
         clang -x c -v -E /dev/null -o /dev/null 2>&1 | sed -n '/search starts here/,/End of search/p'
         echo 'int main(void){return 0;}' > /tmp/eb-ld.c
@@ -202,6 +305,19 @@ tc_build() {
     clang -O2 -g0 $UNIVERSAL main.c -L"$d" -lfoo -o "$d/prog" $f
     # with debug info: expected to differ (N_OSO stabs name random temp objects); own manifest
     clang -O2 -g $UNIVERSAL -dynamiclib -install_name @rpath/libdbg.dylib lib.c -o "$d.dbg/libdbg.dylib" $f
+    # absolute install name in the (different) build directory, as libtool gives secp256k1 and libusb
+    clang -O2 -g0 $UNIVERSAL -dynamiclib -install_name "$d.abs/libabs.dylib" lib.c -o "$d.abs/libabs.dylib" $f
+}
+
+# What PyInstaller does to a collected dylib: thin it, set its id to @rpath/<name>, re-sign ad hoc.
+# If the results are SAME although the install names differed, the build path does not reach LC_UUID.
+pyi_normalise() { # <fat dylib> <output dir>
+    local a
+    for a in $(lipo -archs "$1"); do
+        lipo "$1" -thin "$a" -output "$2/libabs-$a.dylib"
+        install_name_tool -id @rpath/libabs.dylib "$2/libabs-$a.dylib"
+        /usr/bin/codesign -s - --force --all-architectures --timestamp "$2/libabs-$a.dylib"
+    done
 }
 
 if want toolchain; then
@@ -211,15 +327,18 @@ if want toolchain; then
         printf 'int foo(int x){return x*3;}\n' > "$W/lib.c"
         printf '#include <stdio.h>\nint foo(int);\nint main(void){printf("%%d\\n",foo(2));return 0;}\n' > "$W/main.c"
         for ld in default classic; do
-            d="$W/out-$ld"; mkdir -p "$d" "$d.dbg"; f=""
+            d="$W/out-$ld"; mkdir -p "$d" "$d.dbg" "$d.abs" "$d.norm"; f=""
             if [ $ld = classic ]; then f="-Wl,-ld_classic"; fi
             STEP="toolchain run $RUN ($ld linker)" LOG="$W.log/$ld.log" step tc_build
+            STEP="toolchain run $RUN ($ld linker, normalise)" LOG="$W.log/$ld-norm.log" \
+                step pyi_normalise "$d.abs/libabs.dylib" "$d.norm"
         done
         manifest "$W/out-default" > "$OUT/link-default.$RUN.manifest"
         manifest "$W/out-classic" > "$OUT/link-classic.$RUN.manifest"
         { manifest "$W/out-default.dbg"; manifest "$W/out-classic.dbg"; } > "$OUT/link-debug.$RUN.manifest"
+        { manifest "$W/out-default.norm"; manifest "$W/out-classic.norm"; } > "$OUT/link-abspath.$RUN.manifest"
     done
-    compare link-default; compare link-classic; compare link-debug
+    compare link-default; compare link-classic; compare link-debug; compare link-abspath
 
     # Ad-hoc codesign as PyInstaller does it. Compare codesign.txt between hosts (Intel vs Apple
     # silicon, macOS majors): identifiers of fat files with dot-less canonical names carry the
@@ -251,14 +370,17 @@ native_build() {
     export PATH="$TOOLS/bin:$TOOLS/autotools/bin:$PATH" LIBTOOLIZE=glibtoolize
     export DLL_TARGET_DIR="$ROOT/dlls" CC=clang CXX=clang++
     # zxing with Apple clang (instead of gcc@14), both archs in one pass
+    mark zxing
     CMAKE_OSX_ARCHITECTURES="x86_64;arm64" CFLAGS="-O2 -g0" CXXFLAGS="-O2 -g0" \
-        ./contrib/make_zxing.sh
+        $TIMEL ./contrib/make_zxing.sh
+    mark libsecp256k1
     CFLAGS="-O2 -g0 $UNIVERSAL" LDFLAGS="$UNIVERSAL" \
     AUTOCONF_FLAGS="--with-asm=no --disable-dependency-tracking" \
-        ./contrib/make_libsecp256k1.sh
+        $TIMEL ./contrib/make_libsecp256k1.sh
     # make_libusb.sh overwrites LDFLAGS on Darwin; the -arch flags reach the link via CFLAGS.
+    mark libusb
     CFLAGS="-O2 -g0 $UNIVERSAL" AUTOCONF_FLAGS="--disable-dependency-tracking --prefix=$ROOT/usr" \
-        ./contrib/make_libusb.sh
+        $TIMEL ./contrib/make_libusb.sh
 }
 
 pyext_build() {
@@ -287,7 +409,7 @@ app_build() {
     git fetch -q --depth 1 origin $PYINSTALLER_COMMIT; git checkout -q -b pinned "$PYINSTALLER_COMMIT^{commit}"
     rm -f PyInstaller/bootloader/Darwin-*/run*
     echo "const char *electrum_tag = \"tagged by Electrum@$COMMIT\";" >> ./bootloader/src/pyi_main.c
-    (cd bootloader && python3 ./waf all CFLAGS="-static")
+    (cd bootloader && mark waf && $TIMEL python3 ./waf all CFLAGS="-static")
     echo "bootloader archs: $(lipo -archs PyInstaller/bootloader/Darwin-64bit/runw)"
     pipi "$ROOT/pyinstaller"
     cd "$ROOT/electrum"
@@ -302,8 +424,9 @@ app_build() {
         sed -e "s/target_arch='x86_64',.*/target_arch='$arch',/" \
             -e "s/'LSMinimumSystemVersion': '11'/'LSMinimumSystemVersion': '12'/" \
             contrib/osx/pyinstaller.spec > contrib/osx/pyinstaller-$arch.spec
-        ELECTRUM_VERSION=$VERSION pyinstaller --noconfirm --clean --distpath "dist-$arch" --workpath "build-$arch" \
-            contrib/osx/pyinstaller-$arch.spec > "$ROOT/pyinstaller-$arch.log" 2>&1 || echo "FAIL pyinstaller $arch"
+        { mark "pyinstaller $arch"
+          ELECTRUM_VERSION=$VERSION $TIMEL pyinstaller --noconfirm --clean --distpath "dist-$arch" --workpath "build-$arch" \
+            contrib/osx/pyinstaller-$arch.spec; } > "$ROOT/pyinstaller-$arch.log" 2>&1 || echo "FAIL pyinstaller $arch"
     done
 }
 
@@ -343,13 +466,14 @@ replay_test() { # app arch
 
 if want build; then
     install_python; install_tools
-    VERSION=$(git -C "$SRC" describe --tags --always)
-    COMMIT=$(git -C "$SRC" rev-parse HEAD)
+    VERSION=${BATTERY_VERSION:-$(git -C "$SRC" describe --tags --always)}
+    COMMIT=${BATTERY_COMMIT:-$(git -C "$SRC" rev-parse HEAD)}   # goes into the bootloader
     # Proposed flags: python.org's sysconfig CFLAGS with -g -> -g0 and the -arch flags removed
     # (setuptools >= 75.7 replaces sysconfig CFLAGS with an exported CFLAGS), archs via ARCHFLAGS.
     SYSCF=$("$PY" -c 'import sysconfig; print(sysconfig.get_config_var("CFLAGS"))')
     CF=$(echo " $SYSCF " | sed -E 's/ -arch [a-z0-9_]+//g; s/ -g / -g0 /g; s/ -g / -g0 /g; s/^ +//; s/ +$//')
     note "C extension CFLAGS=$CF"
+    note "zlib $("$PY" -c 'import zlib; print(zlib.ZLIB_RUNTIME_VERSION)') (macOS libz; PyInstaller compresses the PKG and PYZ with it)"
     QTW="$TOOLS/qt"
     if [ ! -d "$QTW/fused" ]; then
         rm -rf "$QTW"; mkdir -p "$QTW"
@@ -362,33 +486,69 @@ if want build; then
         "$TOOLS/bin/delocate-merge" "$QTW"/macosx_10_14_x86_64/*.whl "$QTW"/macosx_11_0_arm64/*.whl -w "$QTW/fused"
     fi
     LOGS="$OUT/logs"; mkdir -p "$LOGS"
+    mem_sampler & SAMPLER=$!
+    trap 'kill $SAMPLER 2>/dev/null || true' EXIT
+    BASE_PATH=$PATH; BASE_CPU_COUNT=$CPU_COUNT; PREV_ROOT=""
+    for RUN in 1 2; do   # validate both runs' knob values before spending time on run 1
+        check_root "$(per_run $RUN "${BATTERY_ROOT:-}" "$ROOT_DEFAULT")"
+        case "$(per_run $RUN "${BATTERY_CPU_COUNT:-}" 1)" in *[!0-9]*|0) echo "BATTERY_CPU_COUNT: not a positive number: '${BATTERY_CPU_COUNT:-}'" >&2; exit 1 ;; esac
+    done
     for RUN in 1 2; do
         log "build run $RUN"
         export TMPDIR; TMPDIR=$(nth $RUN $TMPDIRS)
-        rm -rf "$ROOT" "$TMPDIR"; mkdir -p "$ROOT/dlls" "$TMPDIR"
+        ROOT=$(per_run $RUN "${BATTERY_ROOT:-}" "$ROOT_DEFAULT"); check_root "$ROOT"
+        if [ -n "$PREV_ROOT" ] && [ "$PREV_ROOT" != "$ROOT" ]; then rm -rf "$PREV_ROOT"; fi   # disk space
+        PREV_ROOT=$ROOT
+        # Job count: each make_*.sh sources build_tools_util.sh again, which takes CPU_COUNT from nproc (or
+        # sysctl hw.ncpu), so a nproc shim goes first in PATH; waf reads JOBS.
+        NCPU=$(per_run $RUN "${BATTERY_CPU_COUNT:-}" "")
+        PATH=$BASE_PATH; CPU_COUNT=$BASE_CPU_COUNT; unset JOBS DIST_EXTRA_CONFIG
+        if [ -n "$NCPU" ]; then
+            case "$NCPU" in *[!0-9]*|0) echo "BATTERY_CPU_COUNT: not a positive number: '$NCPU'" >&2; exit 1 ;; esac
+            mkdir -p "$TOOLS/ncpu-$NCPU"
+            printf '#!/bin/sh\necho %s\n' "$NCPU" > "$TOOLS/ncpu-$NCPU/nproc"; chmod +x "$TOOLS/ncpu-$NCPU/nproc"
+            PATH="$TOOLS/ncpu-$NCPU:$BASE_PATH"; CPU_COUNT=$NCPU; export JOBS=$NCPU
+            # aiohttp's parallel build_ext uses os.cpu_count() unless build_ext's "parallel" option is set
+            printf '[build_ext]\nparallel = %s\n' "$NCPU" > "$TOOLS/ncpu-$NCPU/setup.cfg"
+            export DIST_EXTRA_CONFIG="$TOOLS/ncpu-$NCPU/setup.cfg"
+        fi
+        note "run $RUN: ROOT=$ROOT, $CPU_COUNT build jobs, hw.ncpu $(sysctl -n hw.ncpu)"
+        rm -rf "$ROOT" "$TMPDIR"; mkdir -p "$ROOT/dlls" "$TMPDIR"; touch "$ROOT/.battery-root"
         copy_tree "$ROOT"
         STEP="native run $RUN" LOG="$LOGS/native.$RUN.log" step native_build
+        NATIVE_RC=$STEP_RC
+        resources $RUN "$LOGS/native.$RUN.log"
         manifest "$ROOT/dlls" > "$OUT/native.$RUN.manifest"
+        if [ "$NATIVE_RC" != 0 ]; then mv "$OUT/native.$RUN.manifest" "$OUT/native.$RUN.manifest.incomplete"; fi
 
         "$PY" -m venv "$ROOT/venv"
         STEP="pyext run $RUN" LOG="$LOGS/pyext.$RUN.log" step pyext_build
+        PYEXT_RC=$STEP_RC
+        resources $RUN "$LOGS/pyext.$RUN.log"
         mkdir -p "$ROOT/so"
         (cd "$ROOT/venv/lib/python3.12/site-packages" && find . -name '*.so' -print0 | copy_files "$ROOT/so") || true
         manifest "$ROOT/so" > "$OUT/pyext.$RUN.manifest"
+        if [ "$PYEXT_RC" != 0 ]; then mv "$OUT/pyext.$RUN.manifest" "$OUT/pyext.$RUN.manifest.incomplete"; fi
         audit_ext "$ROOT/so" > "$OUT/pyext.$RUN.audit"
         if [ -s "$OUT/pyext.$RUN.audit" ]; then note "AUDIT pyext run $RUN: $(wc -l < "$OUT/pyext.$RUN.audit") problems"; fi
 
         if [ -f "$(echo "$ROOT"/dlls/libsecp256k1.*.dylib)" ] && [ -f "$ROOT/dlls/libZXing.dylib" ]; then
             STEP="app run $RUN" LOG="$LOGS/app.$RUN.log" step app_build
+            APP_RC=$STEP_RC
+            resources $RUN "$LOGS/app.$RUN.log"
             grep -E '^(bootloader archs|FAIL)' "$LOGS/app.$RUN.log" | sed "s/^/run $RUN: /" | tee -a "$OUT/summary.txt" || true
         else
-            note "SKIP app run $RUN: native libs missing"
+            note "SKIP app run $RUN: native libs missing"; APP_RC=1
         fi
         for arch in x86_64 arm64; do
             app="$ROOT/electrum/dist-$arch/Electrum.app"
+            cp "$ROOT/pyinstaller-$arch.log" "$LOGS/pyinstaller-$arch.$RUN.log" 2>/dev/null || true
             if [ ! -d "$app" ]; then note "MISSING $arch app run $RUN"; continue; fi
-            cp "$ROOT/pyinstaller-$arch.log" "$LOGS/pyinstaller-$arch.$RUN.log" || true
+            resources $RUN "$LOGS/pyinstaller-$arch.$RUN.log"
             manifest "$app" > "$OUT/app-$arch.$RUN.manifest"
+            if [ "$APP_RC" != 0 ] || grep -q "^FAIL pyinstaller $arch" "$LOGS/app.$RUN.log"; then
+                mv "$OUT/app-$arch.$RUN.manifest" "$OUT/app-$arch.$RUN.manifest.incomplete"
+            fi
             audit_app "$app" "$arch" > "$OUT/app-$arch.$RUN.audit"
             if [ -s "$OUT/app-$arch.$RUN.audit" ]; then note "AUDIT app-$arch run $RUN: $(wc -l < "$OUT/app-$arch.$RUN.audit") problems"; fi
             if [ "$RUN" = 1 ]; then
@@ -396,7 +556,16 @@ if want build; then
                 STEP="replay test $arch" LOG="$LOGS/replay-$arch.log" step replay_test "$app" "$arch"
             fi
         done
+        disk_report $RUN
     done
+    kill $SAMPLER 2>/dev/null || true
+    mem_report
+    if [ "$(per_run 1 "${BATTERY_ROOT:-}" "$ROOT_DEFAULT")" != "$(per_run 2 "${BATTERY_ROOT:-}" "$ROOT_DEFAULT")" ]; then
+        note "NOTE: the two runs used different roots. Expected DIFFs: native (libtool puts the root into the"
+        note "  install names of libsecp256k1 and libusb), and in both apps trezor-*.dist-info/RECORD (hash of a"
+        note "  console script whose #! line names the venv) plus Contents/_CodeSignature/CodeResources. Any other"
+        note "  app file that differs, e.g. by LC_UUID, is a further path leak."
+    fi
     compare native; compare pyext; compare app-x86_64; compare app-arm64
 fi
 
