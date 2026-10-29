@@ -74,7 +74,7 @@ manifest() {
             for a in $archs; do
                 minos=$(vtool -arch "$a" -show-build "$f" 2>/dev/null | awk '$1=="minos"{print $2; exit}') || true
                 uuid=$(dwarfdump --arch "$a" --uuid "$f" 2>/dev/null | awk '{print $2; exit}') || true
-                id=$(codesign -d --arch "$a" "$f" 2>&1 | awk -F= '/^Identifier=/{print $2}') || true
+                id=$(codesign -dv --arch "$a" "$f" 2>&1 | awk -F= '/^Identifier=/{print $2}') || true
                 line="$line [$a minos=$minos uuid=$uuid id=$id]"
             done
         fi
@@ -92,13 +92,21 @@ compare() {
     fi
 }
 
+# Copies NUL-separated relative paths from stdin, below the current directory, to directory $1.
+# tar, not cpio: macOS cpio (bsdcpio) skips every file if the destination path contains a symlink
+# (/tmp -> private/tmp) and still exits 0.
+copy_files() { COPYFILE_DISABLE=1 tar --null -T - -cf - | tar -xpf - -C "$1"; }
+
 # Copy the checkout including submodules, without .git, to $1/electrum.
 copy_tree() {
     if [ ! -d "$SRC/electrum/plugins/keepkey/keepkeylib/keepkeylib" ] || [ ! -d "$SRC/electrum/locale/locale" ]; then
         echo "submodules missing: run 'git submodule update --init' in $SRC" >&2; exit 1
     fi
     mkdir -p "$1/electrum"
-    (cd "$SRC" && git ls-files -z --recurse-submodules | cpio -0 -pdm "$1/electrum" 2>/dev/null)
+    (cd "$SRC" && git ls-files -z --recurse-submodules | copy_files "$1/electrum")
+    n=$(cd "$SRC" && git ls-files --recurse-submodules | wc -l)
+    m=$(cd "$1/electrum" && find . \( -type f -o -type l \) | wc -l)
+    if [ $n -ne $m ]; then echo "copy_tree: copied $m of $n files" >&2; exit 1; fi
 }
 
 install_python() {
@@ -365,7 +373,7 @@ if want build; then
         "$PY" -m venv "$ROOT/venv"
         STEP="pyext run $RUN" LOG="$LOGS/pyext.$RUN.log" step pyext_build
         mkdir -p "$ROOT/so"
-        (cd "$ROOT/venv/lib/python3.12/site-packages" && find . -name '*.so' -print0 | cpio -0 -pdm "$ROOT/so" 2>/dev/null) || true
+        (cd "$ROOT/venv/lib/python3.12/site-packages" && find . -name '*.so' -print0 | copy_files "$ROOT/so") || true
         manifest "$ROOT/so" > "$OUT/pyext.$RUN.manifest"
         audit_ext "$ROOT/so" > "$OUT/pyext.$RUN.audit"
         if [ -s "$OUT/pyext.$RUN.audit" ]; then note "AUDIT pyext run $RUN: $(wc -l < "$OUT/pyext.$RUN.audit") problems"; fi
