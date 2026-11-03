@@ -1,72 +1,197 @@
 #!/usr/bin/env bash
+#
+# Builds the unsigned macOS apps and DMGs, one per architecture:
+#   dist/x86_64/Electrum.app  and  dist/electrum-$VERSION-x86_64-unsigned.dmg
+#   dist/arm64/Electrum.app   and  dist/electrum-$VERSION-arm64-unsigned.dmg
+# Both apps come from one build environment with universal2 (x86_64 + arm64) binaries;
+# PyInstaller thins each app to its architecture.
 
 set -e
+
+# Run in a clean environment. Otherwise compiler, Python and pip settings from the caller's shell,
+# or locale variables forwarded by ssh, would reach the build. Proxy settings are kept: all
+# downloads are pinned by hash or commit, so they cannot change the output.
+if [ -z "$ELECTRUM_MAKE_OSX_CLEAN_ENV" ]; then
+    exec /usr/bin/env -i ELECTRUM_MAKE_OSX_CLEAN_ENV=1 \
+        HOME="$HOME" USER="$USER" LOGNAME="$LOGNAME" TERM="${TERM:-dumb}" \
+        https_proxy="${https_proxy:-$HTTPS_PROXY}" all_proxy="${all_proxy:-$ALL_PROXY}" no_proxy="${no_proxy:-$NO_PROXY}" \
+        /bin/bash "$(realpath "$0")" "$@"
+fi
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export LC_ALL=C TZ=UTC
+export DEVELOPER_DIR=/Library/Developer/CommandLineTools
+export MACOSX_DEPLOYMENT_TARGET=12.0
+export PIP_CONFIG_FILE=/dev/null  # no pip.conf
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null  # no gitconfig
+export PYTHONDONTWRITEBYTECODE=1  # don't create __pycache__/ folders with .pyc files
+export CONFIG_SITE=/dev/null  # autoconf: no config.site from /usr/local
+export GCC_STRIP_BINARIES=1
 
 # Parameterize
 PYTHON_VERSION=3.12.10
 PY_VER_MAJOR="3.12"  # as it appears in fs paths
 PACKAGE=Electrum
-GIT_REPO=https://github.com/spesmilo/electrum
-
-export GCC_STRIP_BINARIES="1"
-export PYTHONDONTWRITEBYTECODE=1  # don't create __pycache__/ folders with .pyc files
-
+ARCHS="x86_64 arm64"
+# The builder setup, see contrib/osx/README.md
+BUILDER_MACOS_MAJOR=15
+BUILDER_CLT_VERSION=16.4.0.0.1.1747106510
+BUILDER_PATH=/Users/vagrant/electrum
 
 . "$(dirname "$0")/../build_tools_util.sh"
 
-
 CONTRIB_OSX="$(dirname "$(realpath "$0")")"
 CONTRIB="$CONTRIB_OSX/.."
-PROJECT_ROOT="$CONTRIB/.."
+PROJECT_ROOT="$(cd "$CONTRIB/.." && pwd -P)"
 CACHEDIR="$CONTRIB_OSX/.cache"
-export DLL_TARGET_DIR="$CACHEDIR/dlls"
-PIP_CACHE_DIR="$CACHEDIR/pip_cache"
-
-mkdir -p "$CACHEDIR" "$DLL_TARGET_DIR" "$PIP_CACHE_DIR"
+DOWNLOADS="$CACHEDIR/downloads"  # hash-checked downloads, kept between builds
+TOOLS="$CACHEDIR/tools"          # build tools, rebuilt when their pins or path change
+BUILDDIR="$CACHEDIR/build"       # everything else, recreated by every build
+export DLL_TARGET_DIR="$BUILDDIR/dlls"
+VENV_DIR="$CONTRIB_OSX/build-venv"
+PYTHON="/Library/Frameworks/Python.framework/Versions/$PY_VER_MAJOR/bin/python$PY_VER_MAJOR"
 
 cd "$PROJECT_ROOT"
 
-git -C "$PROJECT_ROOT" rev-parse 2>/dev/null || fail "Building outside a git clone is not supported."
+git -C "$PROJECT_ROOT" rev-parse || fail "Building outside a git clone is not supported."
+# left over by old CLT installs, and found by clang before the SDK's headers
+[ ! -e "$DEVELOPER_DIR/usr/include/c++" ] || fail "$DEVELOPER_DIR/usr/include/c++ exists (stale C++ headers)"
 
 
-which brew > /dev/null 2>&1 || fail "Please install brew from https://brew.sh/ to continue"
-which xcodebuild > /dev/null 2>&1 || fail "Please install xcode command line tools to continue"
+info "Checking the build environment"
+PROBLEMS=""
+problem() { PROBLEMS="$PROBLEMS"$'\n'"  - $1"; }
+[ "$(uname -m)" = x86_64 ] || problem "not an x86_64 Mac (or VM)"
+macos_version="$(sw_vers -productVersion)"
+[ "${macos_version%%.*}" = "$BUILDER_MACOS_MAJOR" ] \
+    || problem "macOS is $macos_version, not $BUILDER_MACOS_MAJOR"
+clt_version="$(pkgutil --pkg-info=com.apple.pkg.CLTools_Executables 2>/dev/null | awk '/^version:/ { print $2 }')"
+[ "$clt_version" = "$BUILDER_CLT_VERSION" ] \
+    || problem "the Command Line Tools are '${clt_version:-not installed}', not $BUILDER_CLT_VERSION"
+# clang searches these by default; Homebrew puts its headers and libraries there
+for d in /usr/local/include /usr/local/lib; do
+    [ -z "$(ls -A "$d" 2>/dev/null)" ] || problem "$d is not empty (Homebrew?)"
+done
+[ "$PROJECT_ROOT" = "$BUILDER_PATH" ] || problem "the clone is at $PROJECT_ROOT, not $BUILDER_PATH"
+# note: --force is less critical in other build scripts, but as the mac build is not doing a fresh clone,
+#       it is very useful here for reproducibility
+info "resetting git submodules."
+git submodule update --init --force
+# The checks below do not see files that a submodule's .gitignore hides (e.g. keepkeylib's *.pyc).
+git submodule foreach --quiet --recursive git clean -ffdxq
+# Remove what earlier builds put into the package directory. Anything else that is not committed
+# there would end up in the app.
+rm -f electrum/libsecp256k1.*.dylib electrum/libZXing.dylib electrum/libusb-1.0.dylib
+changed="$(git status --porcelain --untracked-files=no)"
+[ -z "$changed" ] || problem "the clone has local changes:"$'\n'"$changed"
+untracked="$(git status --porcelain --untracked-files=all --ignored -- electrum)"
+[ -z "$untracked" ] || problem "untracked files in electrum/ (try: git clean -ffdx -- electrum):"$'\n'"$untracked"
+writable="$(find electrum \( -perm -g+w -o -perm -o+w \) -print | head -n 3)"
+[ -z "$writable" ] || problem "group- or world-writable files; clone with umask 022:"$'\n'"$writable"
+git describe --tags --exact-match > /dev/null 2>&1 \
+    || warn "HEAD is not a release tag, so the apps cannot match a release."
+[ -z "$PROBLEMS" ] || warn "This is not the builder VM (see contrib/osx/README.md), so the apps might not match the release:$PROBLEMS"
+
+rm -rf "$BUILDDIR"
+mkdir -p "$DOWNLOADS" "$TOOLS" "$BUILDDIR" "$DLL_TARGET_DIR"
+
+# curl -q: ignore ~/.curlrc
+download() {  # url sha256 file
+    if [ ! -f "$3" ]; then
+        curl -q -fL --retry 3 -o "$3.part" "$1" || fail "Could not download $1"
+        mv "$3.part" "$3"
+    fi
+    echo "$2  $3" | shasum -a 256 -c > /dev/null || { rm -f "$3"; fail "checksum mismatch: $3"; }
+}
 
 
 info "Installing Python $PYTHON_VERSION"
 PKG_FILE="python-${PYTHON_VERSION}-macos11.pkg"
-if [ ! -f "$CACHEDIR/$PKG_FILE" ]; then
-    curl -o "$CACHEDIR/$PKG_FILE" "https://www.python.org/ftp/python/${PYTHON_VERSION}/$PKG_FILE"
-fi
-echo "8373e58da4ea146b3eb1c1f9834f19a319440b6b679b06050b1f9ee3237aa8e4  $CACHEDIR/$PKG_FILE" | shasum -a 256 -c \
-    || fail "python pkg checksum mismatched"
-sudo installer -pkg "$CACHEDIR/$PKG_FILE" -target / \
+download "https://www.python.org/ftp/python/${PYTHON_VERSION}/$PKG_FILE" \
+    8373e58da4ea146b3eb1c1f9834f19a319440b6b679b06050b1f9ee3237aa8e4 "$DOWNLOADS/$PKG_FILE"
+sudo installer -pkg "$DOWNLOADS/$PKG_FILE" -target / \
     || fail "failed to install python"
 
-# sanity check "python3" has the version we just installed.
-FOUND_PY_VERSION=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')
+# sanity check the installed Python has the version we just installed.
+FOUND_PY_VERSION=$("$PYTHON" -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')
 if [[ "$FOUND_PY_VERSION" != "$PYTHON_VERSION" ]]; then
     fail "python version mismatch: $FOUND_PY_VERSION != $PYTHON_VERSION"
 fi
 
 break_legacy_easy_install
 
+
+info "Installing build tools"
+# These replace Homebrew. They run on the build machine and are not part of the app.
+# Their install path is built in, so they are rebuilt when the clone has moved.
+[ "$(cat "$TOOLS/.path" 2>/dev/null)" = "$TOOLS" ] || { rm -rf "$TOOLS"; mkdir -p "$TOOLS"; echo "$TOOLS" > "$TOOLS/.path"; }
+mkdir -p "$TOOLS/bin"
+export PATH="$TOOLS/bin:$TOOLS/autotools/bin:$PATH"
+
+# GNU autotools, for libsecp256k1 and libusb. libtool is installed as glibtool and glibtoolize,
+# as macOS has its own, different libtool.
+AUTOTOOLS="m4/m4-1.4.19.tar.xz 63aede5c6d33b6d9b13511cd0be2cac046f2e70fd0a07aa9573a04a82783af96
+autoconf/autoconf-2.72.tar.xz ba885c1319578d6c94d46e9b0dceb4014caafe2490e437a0dbca3f270a223f5a
+automake/automake-1.17.tar.xz 8920c1fc411e13b90bf704ef9db6f29d540e76d232cb3b2c9f4dc4cc599bd990
+libtool/libtool-2.5.4.tar.xz f81f5860666b0bc7d84baddefa60d1cb9fa6fceb2398cc3baca6afaa60266675"
+export LIBTOOLIZE=glibtoolize
+if [ "$(cat "$TOOLS/autotools/.pins" 2>/dev/null)" != "$AUTOTOOLS" ]; then
+    rm -rf "$TOOLS/autotools" "$TOOLS/autotools-src"
+    mkdir -p "$TOOLS/autotools-src"
+    while read -r path sha256; do
+        tarball="$DOWNLOADS/$(basename "$path")"
+        download "https://ftp.gnu.org/gnu/$path" "$sha256" "$tarball"
+        tar -xJf "$tarball" -C "$TOOLS/autotools-src"
+        case "$path" in
+            libtool/*) prefix_flag="--program-prefix=g" ;;
+            *) prefix_flag="" ;;
+        esac
+        (
+            cd "$TOOLS/autotools-src/$(basename "$path" .tar.xz)"
+            ./configure --prefix="$TOOLS/autotools" $prefix_flag > configure.log
+            make "-j$CPU_COUNT" > make.log
+            make install > install.log
+        ) || fail "Could not build $(basename "$path" .tar.xz), see $TOOLS/autotools-src"
+    done <<< "$AUTOTOOLS"
+    rm -rf "$TOOLS/autotools-src"
+    echo "$AUTOTOOLS" > "$TOOLS/autotools/.pins"
+fi
+
+# cmake, for zxing-cpp: Kitware's universal build, unpacked by every build
+CMAKE_DIST=cmake-3.31.6-macos10.10-universal
+download "https://github.com/Kitware/CMake/releases/download/v3.31.6/$CMAKE_DIST.tar.gz" \
+    dc49fe67e0841e1d21b9e694d4858bbc06118165be5ebd8da0f2028216d56e6c "$DOWNLOADS/$CMAKE_DIST.tar.gz"
+mkdir "$BUILDDIR/cmake"
+tar -xzf "$DOWNLOADS/$CMAKE_DIST.tar.gz" -C "$BUILDDIR/cmake" --strip-components 3 \
+    "$CMAKE_DIST/CMake.app/Contents/bin/cmake" "$CMAKE_DIST/CMake.app/Contents/share" \
+    || fail "Could not unpack $CMAKE_DIST"
+export PATH="$BUILDDIR/cmake/bin:$PATH"
+
+# msgfmt (gettext) for the locale: CPython's msgfmt.py, which the python.org pkg ships
+MSGFMT_PY="/Library/Frameworks/Python.framework/Versions/$PY_VER_MAJOR/share/doc/python$PY_VER_MAJOR/examples/Tools/i18n/msgfmt.py"
+echo "6e2a25d5ca150ada9b6d3a68d4e37bc861e4f41bea01170a72d39bcb191e2a06  $MSGFMT_PY" | shasum -a 256 -c > /dev/null \
+    || fail "unexpected $MSGFMT_PY"
+printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$PYTHON" "$MSGFMT_PY" > "$TOOLS/bin/msgfmt"
+chmod +x "$TOOLS/bin/msgfmt"
+
+
 # create a fresh virtualenv
 # This helps to avoid older versions of pip-installed dependencies interfering with the build.
-VENV_DIR="$CONTRIB_OSX/build-venv"
 rm -rf "$VENV_DIR"
-python3 -m venv "$VENV_DIR"
+"$PYTHON" -m venv "$VENV_DIR"
 source "$VENV_DIR/bin/activate"
 
-# don't add debug info to compiled C files (e.g. when pip calls setuptools/wheel calls gcc)
-# see https://github.com/pypa/pip/issues/6505#issuecomment-526613584
-# note: this does not seem sufficient when cython is involved (although it is on linux, just not on mac... weird.)
-#       see additional "strip" pass on built files later in the file.
-export CFLAGS="-g0"
-
-# Do not build universal binaries. The default on macos 11+ and xcode 12+ is "-arch arm64 -arch x86_64"
-# but with that e.g. "hid.cpython-310-darwin.so" is not reproducible as built by clang.
-export ARCHFLAGS="-arch x86_64"
+# Settings for C extensions that pip compiles from source:
+# - ARCHFLAGS: build universal2 (x86_64 + arm64) binaries, which both apps need.
+# - CFLAGS: python.org's own flags (-O3 -DNDEBUG ...), with -g0 instead of -g and without -arch.
+#   They must be given in full: setuptools uses an exported CFLAGS instead of them, not in addition.
+export ARCHFLAGS="-arch x86_64 -arch arm64"
+EXT_CFLAGS="$("$PYTHON" -c 'import sysconfig; print(sysconfig.get_config_var("CFLAGS"))' \
+    | sed -E 's/^/ /; s/$/ /; s/ -arch [a-z0-9_]+//g; s/ -g / -g0 /g; s/ -g / -g0 /g; s/^ +//; s/ +$//')"
+info "C extensions: ARCHFLAGS=$ARCHFLAGS, CFLAGS=$EXT_CFLAGS"
+pip_install() {  # args...: C extensions get EXT_CFLAGS, which no other build should get
+    CFLAGS="$EXT_CFLAGS" CXXFLAGS="$EXT_CFLAGS" python3 -m pip install --no-build-isolation --no-dependencies \
+        --no-warn-script-location --no-cache-dir "$@"
+}
 
 info "Installing build dependencies"
 # note: re pip installing from PyPI,
@@ -77,52 +202,57 @@ info "Installing build dependencies"
 #       - the whole of "requirements-build-base.txt", which includes pip and friends, as it also includes "wheel",
 #         and I am not quite sure how to break the circular dependence there (I guess we could introduce
 #         "requirements-build-base-base.txt" with just wheel in it...)
-python3 -m pip install --no-build-isolation --no-dependencies --no-warn-script-location \
-    --cache-dir "$PIP_CACHE_DIR" -Ir ./contrib/deterministic-build/requirements-build-base.txt \
+pip_install -Ir ./contrib/deterministic-build/requirements-build-base.txt \
     || fail "Could not install build dependencies (base)"
-python3 -m pip install --no-build-isolation --no-dependencies --no-binary :all: --no-warn-script-location \
-    --cache-dir "$PIP_CACHE_DIR" -Ir ./contrib/deterministic-build/requirements-build-mac.txt \
+pip_install --no-binary :all: -Ir ./contrib/deterministic-build/requirements-build-mac.txt \
     || fail "Could not install build dependencies (mac)"
 
-info "Installing some build-time deps for compilation..."
-# cmake, wget and gcc@14 are required for zxing-cpp.
-# gcc can be removed with a C++ 20 compatible compiler becoming available (newer MacOS version)
-brew install autoconf automake libtool gettext coreutils pkgconfig cmake wget gcc@14
+
+info "Building native libraries"
+# All three as universal2 binaries in one pass, with Apple clang.
+(
+    export CC=clang CXX=clang++
+    CMAKE_OSX_ARCHITECTURES="x86_64;arm64" CFLAGS="-O2 -g0" CXXFLAGS="-O2 -g0" \
+        "$CONTRIB"/make_zxing.sh || fail "Could not build zxing-cpp dylib"
+    # (multi-arch builds of libsecp256k1 need --with-asm=no)
+    CFLAGS="-O2 -g0 $ARCHFLAGS" LDFLAGS="$ARCHFLAGS" \
+    AUTOCONF_FLAGS="--with-asm=no --with-valgrind=no --disable-dependency-tracking" \
+        "$CONTRIB"/make_libsecp256k1.sh || fail "Could not build libsecp"
+    # (make_libusb.sh sets its own LDFLAGS; the -arch flags reach the linker through CFLAGS)
+    CFLAGS="-O2 -g0 $ARCHFLAGS" AUTOCONF_FLAGS="--disable-dependency-tracking" \
+        "$CONTRIB"/make_libusb.sh || fail "Could not build libusb dylib"
+)
+cp -f "$DLL_TARGET_DIR"/libsecp256k1.*.dylib "$DLL_TARGET_DIR/libZXing.dylib" "$DLL_TARGET_DIR/libusb-1.0.dylib" \
+    "$PROJECT_ROOT/electrum/" || fail "Could not copy the native libraries"
+
 
 info "Building PyInstaller."
 PYINSTALLER_REPO="https://github.com/pyinstaller/pyinstaller.git"
 PYINSTALLER_COMMIT="306d4d92580fea7be7ff2c89ba112cdc6f73fac1"
 # ^ tag "v6.13.0"
 (
-    if [ -f "$CACHEDIR/pyinstaller/PyInstaller/bootloader/Darwin-64bit/runw" ]; then
-        info "pyinstaller already built, skipping"
-        exit 0
-    fi
-    cd "$PROJECT_ROOT"
     ELECTRUM_COMMIT_HASH=$(git rev-parse HEAD)
-    cd "$CACHEDIR"
-    rm -rf pyinstaller
-    mkdir pyinstaller
-    cd pyinstaller
+    mkdir "$BUILDDIR/pyinstaller"
+    cd "$BUILDDIR/pyinstaller"
     # Shallow clone
-    git init
+    git init -q
     git remote add origin $PYINSTALLER_REPO
-    git fetch --depth 1 origin $PYINSTALLER_COMMIT
-    git checkout -b pinned "${PYINSTALLER_COMMIT}^{commit}"
+    git fetch -q --depth 1 origin $PYINSTALLER_COMMIT
+    git checkout -q -b pinned "${PYINSTALLER_COMMIT}^{commit}"
     rm -fv PyInstaller/bootloader/Darwin-*/run* || true
     # add reproducible randomness. this ensures we build a different bootloader for each commit.
     # if we built the same one for all releases, that might also get anti-virus false positives
     echo "const char *electrum_tag = \"tagged by Electrum@$ELECTRUM_COMMIT_HASH\";" >> ./bootloader/src/pyi_main.c
     pushd bootloader
-    # compile bootloader
+    # compile bootloader (universal2 by default)
     python3 ./waf all CFLAGS="-static"
     popd
     # sanity check bootloader is there:
-    [[ -e "PyInstaller/bootloader/Darwin-64bit/runw" ]] || fail "Could not find runw in target dir!"
-)
+    [ "$(lipo -archs PyInstaller/bootloader/Darwin-64bit/runw)" = "x86_64 arm64" ] \
+        || fail "Could not find a universal2 runw in target dir!"
+) || fail "Could not build the PyInstaller bootloader"
 info "Installing PyInstaller."
-python3 -m pip install --no-build-isolation --no-dependencies \
-    --cache-dir "$PIP_CACHE_DIR" --no-warn-script-location "$CACHEDIR/pyinstaller"
+pip_install "$BUILDDIR/pyinstaller" || fail "Could not install PyInstaller"
 
 info "Using these versions for building $PACKAGE:"
 sw_vers
@@ -130,52 +260,16 @@ python3 --version
 echo -n "Pyinstaller "
 pyinstaller --version
 
-rm -rf ./dist
-
-info "resetting git submodules."
-# note: --force is less critical in other build scripts, but as the mac build is not doing a fresh clone,
-#       it is very useful here for reproducibility
-git submodule update --init --force
-
 info "preparing electrum-locale."
 (
-    if ! which msgfmt > /dev/null 2>&1; then
-        brew install gettext
-        brew link --force gettext
-    fi
     "$CONTRIB/locale/build_cleanlocale.sh"
+    # build_locale.sh ignores msgfmt errors
+    n_po=$(ls "$PROJECT_ROOT/electrum/locale/locale"/*/electrum.po | wc -l)
+    n_mo=$(ls "$PROJECT_ROOT/electrum/locale/locale"/*/LC_MESSAGES/electrum.mo | wc -l)
+    [ "$n_po" -eq "$n_mo" ] || fail "msgfmt failed for $((n_po - n_mo)) of $n_po languages"
     # we want the binary to have only compiled (.mo) locale files; not source (.po) files
     rm -r "$PROJECT_ROOT/electrum/locale/locale"/*/electrum.po
-)
-
-
-if ls "$DLL_TARGET_DIR"/libsecp256k1.*.dylib 1> /dev/null 2>&1; then
-    info "libsecp256k1 already built, skipping"
-else
-    info "Building libsecp256k1 dylib..."
-    "$CONTRIB"/make_libsecp256k1.sh || fail "Could not build libsecp"
-fi
-cp -f "$DLL_TARGET_DIR"/libsecp256k1.*.dylib "$PROJECT_ROOT/electrum" || fail "Could not copy libsecp256k1 dylib"
-
-if [ ! -f "$DLL_TARGET_DIR/libZXing.dylib" ]; then
-    info "Building zxing-cpp dylib..."
-    # Build zxing with the installed gcc 14 for C++20 support and statically link the runtimes into the library.
-    CC="$(brew --prefix gcc@14)/bin/gcc-14" \
-    CXX="$(brew --prefix gcc@14)/bin/g++-14" \
-    LDFLAGS="-static-libgcc -static-libstdc++ -Wl,-S" \
-        "$CONTRIB"/make_zxing.sh || fail "Could not build zxing-cpp dylib"
-else
-    info "Skipping zxing-cpp build: reusing already built dylib."
-fi
-cp -f "$DLL_TARGET_DIR/libZXing.dylib" "$PROJECT_ROOT/electrum/" || fail "Could not copy zxing-cpp dylib"
-
-if [ ! -f "$DLL_TARGET_DIR/libusb-1.0.dylib" ]; then
-    info "Building libusb dylib..."
-    "$CONTRIB"/make_libusb.sh || fail "Could not build libusb dylib"
-else
-    info "Skipping libusb build: reusing already built dylib."
-fi
-cp -f "$DLL_TARGET_DIR/libusb-1.0.dylib" "$PROJECT_ROOT/electrum/" || fail "Could not copy libusb dylib"
+) || fail "Could not prepare the locale"
 
 
 # opt out of compiling C extensions
@@ -185,26 +279,40 @@ export PROPCACHE_NO_EXTENSIONS=1
 export ELECTRUM_ECC_DONT_COMPILE=1
 
 info "Installing requirements..."
-python3 -m pip install --no-build-isolation --no-dependencies --no-binary :all: \
-    --cache-dir "$PIP_CACHE_DIR" --no-warn-script-location \
+pip_install --no-binary :all: \
     -Ir ./contrib/deterministic-build/requirements.txt \
     || fail "Could not install requirements"
 
 info "Installing hardware wallet requirements..."
-python3 -m pip install --no-build-isolation --no-dependencies --no-binary :all: --only-binary cryptography \
-    --cache-dir "$PIP_CACHE_DIR" --no-warn-script-location \
+pip_install --no-binary :all: --only-binary cryptography \
     -Ir ./contrib/deterministic-build/requirements-hw.txt \
     || fail "Could not install hardware wallet requirements"
 
 info "Installing dependencies specific to binaries..."
-python3 -m pip install --no-build-isolation --no-dependencies --no-binary :all: --only-binary PyQt6,PyQt6-Qt6,cryptography \
-    --cache-dir "$PIP_CACHE_DIR" --no-warn-script-location \
-    -Ir ./contrib/deterministic-build/requirements-binaries-mac.txt \
+# PyQt6-Qt6 has separate x86_64 and arm64 wheels, with the same files. pip installs both (hash-checked)
+# into their own directories, lipo adds the arm64 slice to each file in PyQt6/ that differs, and the
+# x86_64 directory is copied into the venv.
+awk -v qt="$BUILDDIR/requirements-qt6.txt" -v rest="$BUILDDIR/requirements-binaries-mac.txt" \
+    '/^PyQt6-Qt6==/ { in_qt = 1 } { print > (in_qt ? qt : rest) } in_qt && !/\\$/ { in_qt = 0 }' \
+    ./contrib/deterministic-build/requirements-binaries-mac.txt
+pip_install --no-binary :all: --only-binary PyQt6,cryptography \
+    -Ir "$BUILDDIR/requirements-binaries-mac.txt" \
     || fail "Could not install dependencies specific to binaries"
+for arch in x86_64 arm64; do
+    # (macosx_12_0: the wheel that runs on macOS 12)
+    pip_install --require-hashes --only-binary :all: --platform "macosx_12_0_$arch" --target "$BUILDDIR/qt6-$arch" \
+        -r "$BUILDDIR/requirements-qt6.txt" || fail "Could not install the PyQt6-Qt6 wheel for $arch"
+done
+while read -r f; do
+    x86_64="$BUILDDIR/qt6-x86_64/$f" arm64="$BUILDDIR/qt6-arm64/$f"
+    cmp -s "$arm64" "$x86_64" || lipo -create "$arm64" "$x86_64" -output "$x86_64" || fail "Could not fuse $f"
+done < <(cd "$BUILDDIR/qt6-arm64" && find PyQt6 -type f)
+cp -R "$BUILDDIR/qt6-x86_64/." "$VENV_DIR/lib/python$PY_VER_MAJOR/site-packages/" \
+    || fail "Could not install the fused PyQt6-Qt6"
 
 info "Building $PACKAGE..."
-python3 -m pip install --no-build-isolation --no-dependencies \
-    --cache-dir "$PIP_CACHE_DIR" --no-warn-script-location . > /dev/null || fail "Could not build $PACKAGE"
+rm -rf ./dist ./build ./Electrum.egg-info  # setuptools would reuse a stale build/lib
+pip_install . > /dev/null || fail "Could not build $PACKAGE"
 # pyinstaller needs to be able to "import electrum_ecc", for which we need libsecp256k1:
 # (or could try "pip install -e" instead)
 cp "$DLL_TARGET_DIR"/libsecp256k1.*.dylib "$VENV_DIR/lib/python$PY_VER_MAJOR/site-packages/electrum_ecc/"
@@ -218,16 +326,46 @@ info "Faking timestamps..."
 find . -exec touch -t '200101220000' {} + || true
 
 # note: no --dirty, as we have dirtied electrum/locale/ ourselves.
-VERSION=$(git describe --tags --always)
+# --abbrev: by default, the hash length depends on how many objects the clone has.
+VERSION=$(git describe --tags --always --abbrev=10)
 
-info "Building binary"
-ELECTRUM_VERSION=$VERSION pyinstaller --noconfirm --clean contrib/osx/pyinstaller.spec || fail "Could not build binary"
+# Prints one line per problem: a Mach-O file with another architecture than $2, a deployment
+# target above 12.0, or a library path outside the app and macOS.
+audit_app() {
+    find "$1" -type f | while read -r f; do
+        archs="$(lipo -archs "$f" 2>/dev/null)" || continue
+        [ "$archs" = "$2" ] || echo "  ${f#$1/}: architectures $archs"
+        minos="$(vtool -show-build "$f" 2>/dev/null | awk '$1 == "minos" { print $2; exit }')"
+        if [ -n "$minos" ] && [ "$(printf '%s\n12.0\n' "$minos" | sort -t. -k1,1n -k2,2n | tail -1)" != 12.0 ]; then
+            echo "  ${f#$1/}: minos $minos"
+        fi
+        otool -L "$f" | tail -n +2 | awk -v f="${f#$1/}" \
+            '$1 ~ /^\/(usr\/local|opt|Users|tmp|private)\// { print "  " f ": links " $1 }'
+    done
+}
 
-info "Finished building unsigned dist/${PACKAGE}.app. This hash should be reproducible:"
-find "dist/${PACKAGE}.app" -type f -print0 | sort -z | xargs -0 shasum -a 256 | shasum -a 256
+for arch in $ARCHS; do
+    info "Building binary for $arch"
+    ELECTRUM_VERSION=$VERSION ELECTRUM_TARGET_ARCH=$arch pyinstaller --noconfirm --clean \
+        --distpath "dist/$arch" --workpath "build/$arch" contrib/osx/pyinstaller.spec \
+        || fail "Could not build binary for $arch"
+    problems="$(audit_app "dist/$arch/$PACKAGE.app" "$arch")"
+    [ -z "$problems" ] || fail "dist/$arch/$PACKAGE.app:"$'\n'"$problems"
+done
 
-info "Creating unsigned .DMG"
-hdiutil create -fs HFS+ -volname $PACKAGE -srcfolder dist/$PACKAGE.app dist/electrum-$VERSION-unsigned.dmg || fail "Could not create .DMG"
+for arch in $ARCHS; do
+    info "Creating unsigned .DMG for $arch"
+    hdiutil create -fs HFS+ -volname $PACKAGE -srcfolder "dist/$arch/$PACKAGE.app" \
+        "dist/electrum-$VERSION-$arch-unsigned.dmg" || fail "Could not create .DMG"
+done
 
-info "App was built successfully but was not code signed. Users may get security warnings from macOS."
-info "Now you also need to run sign_osx.sh to codesign/notarize the binary."
+info "Finished building unsigned apps. These hashes should be reproducible:"
+for arch in $ARCHS; do
+    # one hash over all files, directories and symlinks of the app
+    "$PYTHON" "$CONTRIB_OSX/codesign_replay.py" manifest "dist/$arch/$PACKAGE.app" > "$BUILDDIR/$arch.manifest" \
+        || fail "Could not hash dist/$arch/$PACKAGE.app"
+    echo "$(shasum -a 256 < "$BUILDDIR/$arch.manifest" | cut -d ' ' -f 1)  dist/$arch/$PACKAGE.app"
+done
+
+info "Apps were built successfully but were not code signed. Users may get security warnings from macOS."
+info "Now you also need to run sign_osx.sh to codesign/notarize the binaries."
