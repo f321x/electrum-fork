@@ -1,66 +1,79 @@
 #!/usr/bin/env bash
+#
+# Checks that a release DMG contains the same app as your own unsigned build, apart from the
+# release manager's code signatures and notarization ticket. Compare one DMG per architecture:
+#
+#   ./contrib/osx/compare_dmg dist/electrum-$VERSION-arm64-unsigned.dmg electrum-$VERSION-arm64.dmg
+#
+# It checks that both DMGs have one volume with the same top-level items (just Electrum.app),
+# copies the release app's signatures onto a copy of your app, and then compares every file,
+# directory and symlink of the two apps (codesign_replay.py manifest).
+# The DMG files themselves are not compared, as hdiutil's output is not reproducible.
+
 set -e
 
 if [ $(uname) != "Darwin" ]; then
     echo "This script needs to be run on macOS."
     exit 1
 fi
+if [ $# -ne 2 ]; then
+    echo "usage: $0 <unsigned dmg> <release dmg>"
+    exit 1
+fi
 
+CONTRIB_OSX="$(dirname "$(realpath "$0")")"
 UNSIGNED_DMG="$1"
 RELEASE_DMG="$2"
-CONTRIB_OSX="$(dirname "$(grealpath "$0")")"
-PROJECT_ROOT="$CONTRIB_OSX/../.."
 WORKSPACE="/tmp/electrum_compare_dmg"
-WS_VOL1="$WORKSPACE/vol1"
-WS_VOL2="$WORKSPACE/vol2"
+REPLAY="$CONTRIB_OSX/codesign_replay.py"
 
-if [ -z "$UNSIGNED_DMG" ]; then
-    echo "usage: $0 <unsigned dmg> <release dmg>"
-    exit 1
-fi
-
-if [ -z "$RELEASE_DMG" ]; then
-    echo "usage: $0 <unsigned dmg> <release dmg>"
-    exit 1
-fi
-
-UNSIGNED_DMG=$(grealpath "$UNSIGNED_DMG")
-RELEASE_DMG=$(grealpath "$RELEASE_DMG")
-
-cd "$PROJECT_ROOT"
 rm -rf "$WORKSPACE"
-mkdir -p "$WORKSPACE" "$WS_VOL1" "$WS_VOL2"
+mkdir -p "$WORKSPACE"
 
-DMG_UNSIGNED_UNPACKED="$WORKSPACE/dmg1"
-DMG_RELEASE_UNPACKED="$WORKSPACE/dmg2"
+# Copies Electrum.app out of DMG $1 to directory $2, and lists the DMG's volume name and top-level
+# items in $2.toplevel. The DMG must have exactly one volume: users get all of them.
+# ditto keeps the symlinks inside the app as symlinks (cp -r follows them), but follows a symlink
+# given as its argument, so Electrum.app itself must be a directory. The copy must have as many
+# entries as the app on the DMG: on a case-sensitive DMG, names that differ only in case would
+# merge into one on the case-insensitive system volume.
+copy_app() {
+    local root="$2.mnt" vol app
+    mkdir -p "$root" "$2"
+    hdiutil attach -readonly -nobrowse -mountroot "$root" "$1" > /dev/null
+    vol="$(ls -A "$root")"
+    app="$root/$vol/Electrum.app"
+    if [ "$(ls -A "$root" | wc -l)" -eq 1 ] && [ -d "$app" ] && [ ! -L "$app" ] && ditto "$app" "$2/Electrum.app" \
+            && [ "$(find "$app" | wc -l)" -eq "$(find "$2/Electrum.app" | wc -l)" ]; then
+        { echo "$vol"; ls -A "$root/$vol"; } > "$2.toplevel"
+        hdiutil detach "$root/$vol" > /dev/null
+    else
+        echo "Could not copy Electrum.app out of $1, which must have one volume with an Electrum.app directory."
+        find "$root" -mindepth 1 -maxdepth 1 -exec hdiutil detach {} \; > /dev/null 2>&1 || true
+        return 1
+    fi
+}
 
-hdiutil attach -mountroot "$WS_VOL1" "$UNSIGNED_DMG"
-cp -r "$WS_VOL1"/Electrum "$DMG_UNSIGNED_UNPACKED"
-hdiutil detach "$WS_VOL1"/Electrum
-
-hdiutil attach -mountroot "$WS_VOL2" "$RELEASE_DMG"
-cp -r "$WS_VOL2"/Electrum "$DMG_RELEASE_UNPACKED"
-hdiutil detach "$WS_VOL2"/Electrum
-
-# copy signatures from RELEASE_DMG to UNSIGNED_DMG
-echo "Extracting signatures from release app..."
-QUIET="1" "$CONTRIB_OSX/extract_sigs.sh" "$DMG_RELEASE_UNPACKED"/Electrum.app
-echo "Applying extracted signatures to unsigned app..."
-QUIET="1" "$CONTRIB_OSX/apply_sigs.sh" "$DMG_UNSIGNED_UNPACKED"/Electrum.app mac_extracted_sigs.tar.gz
-
-rm mac_extracted_sigs.tar.gz
-rm -rf "$DMG_UNSIGNED_UNPACKED"
-
-set -x
-diff=$(diff -qr "$WORKSPACE/signed_app" "$DMG_RELEASE_UNPACKED") || diff="diff errored"
-set +x
-echo $diff
-if [ "$diff" ]; then
-    echo "DMGs do *not* match."
+copy_app "$UNSIGNED_DMG" "$WORKSPACE/unsigned"
+copy_app "$RELEASE_DMG" "$WORKSPACE/release"
+if ! diff "$WORKSPACE/unsigned.toplevel" "$WORKSPACE/release.toplevel"; then
+    echo "The DMGs do not hold the same items. Lines starting with < are your DMG, > the release."
     echo "failure"
     exit 1
-else
-    echo "DMGs match."
+fi
+
+echo "Copying the release app's signatures onto your app..."
+"$REPLAY" replay "$WORKSPACE/release/Electrum.app" "$WORKSPACE/unsigned/Electrum.app"
+
+"$REPLAY" manifest "$WORKSPACE/unsigned/Electrum.app" > "$WORKSPACE/unsigned.manifest"
+"$REPLAY" manifest "$WORKSPACE/release/Electrum.app" > "$WORKSPACE/release.manifest"
+if diff "$WORKSPACE/unsigned.manifest" "$WORKSPACE/release.manifest"; then
+    echo "The apps match: $(wc -l < "$WORKSPACE/release.manifest" | tr -d ' ') entries compared."
     echo "success"
+    rm -rf "$WORKSPACE"
     exit 0
+else
+    echo "The apps do *not* match. Lines starting with < are your build, > the release."
+    echo "Both apps are in $WORKSPACE."
+    echo "failure"
+    exit 1
 fi
