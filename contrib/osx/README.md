@@ -1,100 +1,92 @@
 Building macOS binaries
 =======================
 
-✓ _This binary should be reproducible, meaning you should be able to generate
+✓ _These binaries should be reproducible, meaning you should be able to generate
    binaries that match the official releases._
 
-- _Minimum supported target system (i.e. what end-users need): macOS 11_
+- _Minimum supported target system (i.e. what end-users need): macOS 12_
 
 This guide explains how to build Electrum binaries for macOS systems.
+
+There are two binaries, one per CPU architecture:
+- `electrum-$VERSION-x86_64.dmg` for Intel Macs,
+- `electrum-$VERSION-arm64.dmg` for Apple silicon Macs.
+
+Both are built on an x86_64 macOS, in one build environment: Python, the C extensions and
+the native libraries are universal2 (x86_64 + arm64) binaries, and PyInstaller thins each
+app to one architecture.
 
 
 ## Building the binary
 
-This needs to be done on a system running macOS or OS X.
+### 1. The builder VM
 
-The script is only tested on Intel-based (x86_64) Macs, and the binary built
-targets `x86_64` currently.
+The release binaries are built in an x86_64 macOS 15 (Sequoia) VM, using
+[OSX-KVM](https://github.com/kholia/OSX-KVM) on a Linux host. The guest must have:
+- macOS 15 (Sequoia), 15.3 or later (the Command Line Tools 16.4 need it). Turn off automatic
+  updates.
+- The Xcode Command Line Tools 16.4 (`CLTools_Executables` 16.4.0.0.1.1747106510),
+  not the full Xcode. 16.4 is the newest version Apple offers for macOS 15.
+- No Homebrew or MacPorts. In particular, `/usr/local/include` and `/usr/local/lib`
+  must be empty or absent, as clang searches them.
+- A user named `vagrant`, with `electrum` cloned directly into its home dir:
+  `/Users/vagrant/electrum`. The path ends up in the binaries.
 
-Notes about compatibility with different macOS versions:
-- In general the binary is not guaranteed to run on an older version of macOS
-  than what the build machine has. This is due to bundling the compiled Python into
-  the [PyInstaller binary](https://github.com/pyinstaller/pyinstaller/issues/1191).
-- The [bundled version of Qt](https://github.com/spesmilo/electrum/issues/3685) also
-  imposes a minimum supported macOS version.
-- If you want to build binaries that conform to the macOS "Gatekeeper", so as to
-  minimise the warnings users get, the binaries need to be codesigned with a
-  certificate issued by Apple, and starting with macOS 10.15 (targets) the binaries also
-  need to be notarized by Apple's central server. To be able to build
-  binaries that Apple will notarize (due to the requirements on the binaries themselves,
-  e.g. hardened runtime) the build machine needs at least macOS 10.14.
-  See [#6128](https://github.com/spesmilo/electrum/issues/6128).
-  - There are two tools that can be used to notarize a binary, both part of Xcode:
-    the old `altool` and the newer `notarytool`. `altool`
-    [was deprecated](https://developer.apple.com/news/?id=y5mjxqmn) by Apple.
-    `notarytool` requires Xcode 13+, and that in turn requires macOS 11.3+.
+The output should not depend on the host's CPU model or the amount of RAM.
 
-We currently build the release binaries on macOS 11.7.10, and these seem to run on
-11 or newer.
+Host requirements:
+- A CPU with VT-x/AMD-V, and AVX2, BMI1, BMI2, FMA, MOVBE and LZCNT (Intel Haswell or newer,
+  AMD Zen or newer). On Linux, this must list all six:
+  `grep -o -w -e avx2 -e bmi1 -e bmi2 -e fma -e movbe -e abm /proc/cpuinfo | sort -u`
+- The guest needs 4 GB of RAM, 2 or 4 vCPUs (4 build faster) and a 64 GB disk (sparse qcow2).
+  A build needs about 6 GB of disk space, including the Command Line Tools.
 
+Notes on OSX-KVM:
+- Choose the QEMU CPU model by the host CPU, and never use `-cpu host`:
+  - Intel Skylake or newer, and AMD: `-cpu Skylake-Client-v4,vendor=GenuineIntel,+invtsc,vmware-cpuid-freq=on`
+  - Intel Haswell: `-cpu Haswell-noTSX,stepping=3,vendor=GenuineIntel,+invtsc,vmware-cpuid-freq=on`
+    (without `stepping=3`, macOS panics: "Haswell pre-C0 steppings are not supported")
+  - Intel Broadwell: `-cpu Broadwell-noTSX,vendor=GenuineIntel,+invtsc,vmware-cpuid-freq=on`
+- Use `-smp 4,sockets=1,cores=4,threads=1` (or `-smp 2,sockets=1,cores=2,threads=1`). On AMD
+  hosts, the host's clocksource must be `tsc`
+  (`/sys/devices/system/clocksource/clocksource0/current_clocksource`).
+- Bind the SSH port forward and VNC to localhost, e.g. `hostfwd=tcp:127.0.0.1:2222-:22`.
+- Fetch the installer with `./fetch-macOS-v2.py` and choose Sequoia.
+- In Setup Assistant, skip the Apple ID, and create the `vagrant` user.
+- Enable SSH (System Settings > General > Sharing > Remote Login), and build over SSH.
+- Keep copies of the macOS installer and the Command Line Tools pkg: Apple removes old
+  versions from its servers.
 
-#### Notes about reproducibility
+Install the Command Line Tools in the guest:
 
-- We recommend creating a VM with a macOS guest, e.g. using VirtualBox,
-  and building there.
-- The guest should run macOS 11.7.10 (that specific version).
-- The unix username should be `vagrant`, and `electrum` should be cloned directly
-  to the user's home dir: `/Users/vagrant/electrum`.
-- Builders need to use the same version of Xcode; and note that
-  full Xcode and Xcode commandline tools differ!
-  We use the Xcode CLI tools as installed by brew. (version 13.2)
-
-  Sanity checks:
-    ```
-    $ sw_vers
-    ProductName:	macOS
-    ProductVersion:	11.7.10
-    BuildVersion:	20G1427
-    $ xcode-select -p
-    /Library/Developer/CommandLineTools
-    $ xcrun --show-sdk-path
-    /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
-    $ pkgutil --pkg-info=com.apple.pkg.CLTools_Executables
-    package-id: com.apple.pkg.CLTools_Executables
-    version: 13.2.0.0.1.1638488800
-    volume: /
-    location: /
-    install-time: XXXXXXXXXX
-    groups: com.apple.FindSystemFiles.pkg-group
-    $ gcc --version
-    Configured with: --prefix=/Library/Developer/CommandLineTools/usr --with-gxx-include-dir=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/4.2.1
-    Apple clang version 13.0.0 (clang-1300.0.29.30)
-    Target: x86_64-apple-darwin20.6.0
-    Thread model: posix
-    InstalledDir: /Library/Developer/CommandLineTools/usr/bin
-    ```
-- Installing extraneous brew packages can result in build differences.
-  For example, pyinstaller seems to pick up and bundle brew-installed `libffi`.
-  So having a dedicated "electrum binary builder macOS VM" is recommended.
-- Make sure that you are building from a fresh clone of electrum
-  (or run e.g. `git clean -ffxd` to rm all local changes).
+    touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+    softwareupdate --list        # note the "Label:" of "Command Line Tools for Xcode 16.4"
+    sudo softwareupdate --install "<that label>"
+    rm /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
 
 
-#### 1. Install brew
+### 2. Build Electrum
 
-Install [`brew`](https://brew.sh/).
-
-Let brew install the Xcode CLI tools.
-
-
-#### 2. Build Electrum
-
+    cd ~
+    git clone https://github.com/spesmilo/electrum.git
     cd electrum
+    git checkout "$VERSION"  # the tag to build
     ./contrib/osx/make_osx.sh
 
-This creates both a folder named Electrum.app and the .dmg file (both unsigned).
+Build from a fresh clone: files that are not committed can end up in the binaries. To reuse a
+clone, first run `git clean -ffdx` and make sure that `git status` shows no changes.
 
-##### 2.1. For release binaries, here be dragons
+It asks for your password once, to install Python from python.org. The script downloads its
+build tools (GNU autotools, cmake) into `contrib/osx/.cache`.
+
+The results are in `dist/`:
+- `x86_64/Electrum.app` and `electrum-$VERSION-x86_64-unsigned.dmg`,
+- `arm64/Electrum.app` and `electrum-$VERSION-arm64-unsigned.dmg`.
+
+At the end, the script prints a hash of each app. It should be the same for every builder.
+
+
+### 3. For release binaries, here be dragons
 
 If you want the binaries codesigned for macOS and notarised by Apple's central server,
 also run the `sign_osx.sh` script:
@@ -107,23 +99,29 @@ also run the `sign_osx.sh` script:
 
 (note: `APPLE_ID_PASSWORD` is an app-specific password, *not* the account password)
 
+This signs and notarizes both apps, and creates `dist/electrum-$VERSION-x86_64.dmg` and
+`dist/electrum-$VERSION-arm64.dmg`.
+
+Sign in the builder VM: `compare_dmg` expects the signature layout of its codesign.
+
 
 ## Verifying reproducibility and comparing against official binary
 
-Every user can verify that the official binary was created from the source code in this
+Every user can verify that the official binaries were created from the source code in this
 repository.
 
-1. Build your own binary as described above.
-2. Use the provided `compare_dmg` script to compare the binary you built with
-   the official release binary.
+1. Build your own binaries as described above.
+2. Use the provided `compare_dmg` script to compare each DMG you built with the official
+   release DMG of the same architecture:
     ```
-    $ ./contrib/osx/compare_dmg dist/electrum-*.dmg electrum_dmg_official_release.dmg
+    $ ./contrib/osx/compare_dmg dist/electrum-$VERSION-x86_64-unsigned.dmg electrum-$VERSION-x86_64.dmg
+    $ ./contrib/osx/compare_dmg dist/electrum-$VERSION-arm64-unsigned.dmg electrum-$VERSION-arm64.dmg
     ```
-   The `compare_dmg` script is mostly only needed as the official release binary is
-   codesigned and notarized. Otherwise, the built `.app` bundles should be byte-identical.
-   (Note that we are using `hdutil` to create the `.dmg`, and its output is not
-   deterministic, but we cannot compare the `.dmg` files directly anyway as they contain
-   codesigned files)
+   The official app is codesigned and notarized, so `compare_dmg` first copies its code
+   signatures and notarization ticket onto a copy of your app (`codesign_replay.py`). Then it
+   compares all files, directories and symlinks of the two apps.
+   (We cannot compare the `.dmg` files directly: `hdiutil`'s output is not deterministic,
+   and they contain codesigned files.)
 
 
 ## FAQ
@@ -145,8 +143,10 @@ Both these steps should be done during the build process.
 
 ### What is "codesigned" and/or "notarized", re the official release?
 
+For each architecture:
 - `make_osx.sh` builds a `.app`, which is unsigned/unnotarized
-  - at this point, this `.app` is ~"byte-for-byte" reproducible
+  (PyInstaller signs its binaries ad hoc, i.e. without a certificate)
+  - at this point, this `.app` is "byte-for-byte" reproducible
     - this is the sanity-check hash printed at the end of `make_osx.sh`
   - `make_osx.sh` creates a `.dmg` from the `.app`
     - this `.dmg` is not used for the official release at all, but used as the basis of
@@ -240,21 +240,18 @@ Now try again:
 
 #### To sign the executables with the self-signed certificate:
 
-Assuming you have the two unsigned outputs of `make_osx.sh` inside `~/electrum/dist`
-(e.g. `Electrum.app` and `electrum-4.5.4-1368-gc8db684cc-unsigned.dmg`).
+Assuming you have the outputs of `make_osx.sh` inside `~/electrum/dist`.
 
 In `~/electrum` run:
 
 `$ CODESIGN_CERT="signing_dummy" ./contrib/osx/sign_osx.sh`
 
-After `sign_osx.sh` finished, you will have a new `*.dmg` inside `electrum/dist`
-(without the `-unsigned` postfix) which is signed with your certificate.
+After `sign_osx.sh` finished, you will have two new `*.dmg` files inside `electrum/dist`
+(without the `-unsigned` postfix), signed with your certificate.
 
 #### To compare the unsigned executable with the self-signed executable:
 
-Running `compare_dmg` with `IS_NOTARIZED=false` should succeed:
-
-`$ IS_NOTARIZED=false ./electrum/contrib/osx/compare_dmg <unsigned executable> <self-signed executable>`
+`$ ./contrib/osx/compare_dmg <unsigned dmg> <self-signed dmg>` should succeed, for each architecture.
 
 
 ### Historical issues codesigning with production cert
