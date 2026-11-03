@@ -10,7 +10,7 @@ on:
         required: true
         default: 'all'
         type: choice
-        options: [all, windows, android, appimage, tarball]
+        options: [all, windows, android, appimage, tarball, macos]
       android_arch:
         description: 'Android architecture (when running android)'
         required: false
@@ -201,3 +201,134 @@ jobs:
           retention-days: ${{ env.ARTIFACT_RETENTION }}
           if-no-files-found: error
           compression-level: 0
+
+  macos:
+    name: "build: macOS"
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'macos' }}
+    # Same macOS and Command Line Tools as the builder VM (contrib/osx/README.md), so the app hashes at
+    # the end of the build log should match the builders' (the DMG files are not reproducible).
+    # make_osx.sh fails if GitHub changes the Command Line Tools. GitHub retires this image in fall 2027.
+    runs-on: macos-15-intel
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0    # for git describe / version detection
+
+      # make_osx.sh needs the builders' path. And clang searches /usr/local/{include,lib}, where
+      # the image has Homebrew's headers and libraries.
+      - name: Set up like a builder VM
+        run: |
+          sudo mkdir -p /Users/vagrant
+          sudo chown "$(id -u):$(id -g)" /Users/vagrant
+          umask 022  # file modes are part of the app
+          git clone --no-local "$GITHUB_WORKSPACE" /Users/vagrant/electrum
+          for d in /usr/local/include /usr/local/lib; do
+            if [ -e "$d" ]; then sudo mv "$d" "$d.hidden"; fi
+          done
+
+      - name: Build macOS binaries
+        working-directory: /Users/vagrant/electrum
+        run: ./contrib/osx/make_osx.sh
+
+      - name: List output
+        run: ls -lah /Users/vagrant/electrum/dist/
+
+      - name: Upload macOS DMGs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: electrum-macos-${{ github.sha }}
+          path: /Users/vagrant/electrum/dist/*.dmg
+          retention-days: ${{ env.ARTIFACT_RETENTION }}
+          if-no-files-found: error
+          compression-level: 0
+
+  macos-smoke:
+    name: "smoke test: macOS ${{ matrix.arch }} on ${{ matrix.runner }}"
+    needs: macos
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: macos-15-intel, arch: x86_64}
+          - {runner: macos-15, arch: arm64}
+          - {runner: macos-26, arch: arm64}
+          - {runner: macos-26, arch: x86_64}  # under Rosetta
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - name: Checkout entitlements.plist
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          sparse-checkout: contrib/osx/entitlements.plist
+          sparse-checkout-cone-mode: false
+
+      - name: Download macOS DMGs
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: electrum-macos-${{ github.sha }}
+          path: dmg
+
+      - name: Mount the DMG
+        run: |
+          mkdir -p "$RUNNER_TEMP/mnt"
+          hdiutil attach -readonly -nobrowse -mountpoint "$RUNNER_TEMP/mnt" dmg/electrum-*-${{ matrix.arch }}-unsigned.dmg
+          echo "APP=$RUNNER_TEMP/mnt/Electrum.app" >> "$GITHUB_ENV"
+
+      # PyInstaller signs every binary and the app ad hoc.
+      - name: Verify the signatures
+        run: codesign --verify --deep --strict "$APP"
+
+      # Release apps run with the hardened runtime and contrib/osx/entitlements.plist (sign_osx.sh),
+      # which restricts what the process may do. Test a copy signed the same way, but ad hoc.
+      - name: Sign a copy like a release
+        run: |
+          ditto "$APP" "$RUNNER_TEMP/Electrum.app"
+          codesign -f --deep -s - --entitlements=contrib/osx/entitlements.plist -o runtime "$RUNNER_TEMP/Electrum.app"
+          codesign --verify --deep --strict "$RUNNER_TEMP/Electrum.app"
+          echo "APP=$RUNNER_TEMP/Electrum.app" >> "$GITHUB_ENV"
+
+      # Loads Python, Qt, QtMultimedia, cryptography and the native libraries (libsecp256k1,
+      # zxing-cpp, libusb), and checks the process architecture: on an arm64 runner, an x86_64
+      # process runs under Rosetta.
+      - name: Run the app's version_info command
+        run: |
+          "$APP/Contents/MacOS/run_electrum" --offline -v -D "$RUNNER_TEMP/data" version_info > version_info.json 2> version_info.log \
+            || { cat version_info.log; exit 1; }
+          cat version_info.json version_info.log
+          grep -q 'On platform: macOS-[0-9.]*-${{ matrix.arch }}-' version_info.log \
+            || { echo "The process is not ${{ matrix.arch }}."; exit 1; }
+          grep -q 'successfully preloaded optional dependency: PyQt6.QtMultimedia' version_info.log \
+            || { echo "QtMultimedia did not load."; exit 1; }
+          python3 - "$APP" <<'PY'
+          import json, os, sys
+          info = json.load(open("version_info.json"))
+          app = os.path.realpath(sys.argv[1]) + "/"
+          bad = [k for k in ["qt.version", "cryptography.version"] if not info.get(k)]
+          # (the loaders fall back to system-wide libraries)
+          libs = ["libsecp256k1.path", "libZXing.path", "libusb.path"]
+          bad += [k for k in libs if not os.path.realpath(info.get(k) or "/").startswith(app)]
+          sys.exit(f"not loaded from the app: {bad}" if bad else 0)
+          PY
+
+      # Opens the first-run wizard, which then waits for input. Fails if the app exits, the wizard does
+      # not open, or the app logs an error (Electrum's crash reporter catches exceptions, so the app
+      # keeps running).
+      - name: Start the GUI
+        run: |
+          "$APP/Contents/MacOS/run_electrum" --offline -v -D "$RUNNER_TEMP/gui" > gui.log 2>&1 &
+          pid=$!
+          for i in $(seq 90); do  # a first start under Rosetta takes about 20 s
+            if grep -q load_next_component gui.log || ! kill -0 "$pid" 2> /dev/null; then break; fi
+            sleep 1
+          done
+          sleep 5  # time for errors while the first page is built
+          alive=yes
+          kill "$pid" 2> /dev/null || alive=no
+          wait "$pid" 2> /dev/null || true
+          echo "== log without debug lines:"
+          { grep -v -F ' | D | ' gui.log || true; } | tail -n 40
+          if [ "$alive" = no ]; then echo "The GUI exited."; exit 1; fi
+          if ! grep -q load_next_component gui.log; then echo "The wizard did not open."; exit 1; fi
+          if grep -F -e ' | E | ' -e ' | C | ' gui.log; then echo "The GUI logged errors."; exit 1; fi
