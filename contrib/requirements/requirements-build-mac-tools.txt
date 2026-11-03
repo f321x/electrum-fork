@@ -1,0 +1,4 @@
+# Build tools for contrib/osx/make_osx.sh, installed from binary wheels into their own venv.
+# They run on the build machine and are not part of the app.
+cmake>=3.31,<4  # zxing-cpp
+delocate  # delocate-merge, to fuse the x86_64 and arm64 PyQt6-Qt6 wheels
