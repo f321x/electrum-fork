@@ -29,14 +29,19 @@
 #  http://backreference.org/2010/11/17/dnssec-verification-with-dig/
 #  https://github.com/rthalley/dnspython/blob/master/tests/test_dnssec.py
 
+import asyncio
 import logging
+import secrets
+import ssl
+import struct
 
+import aiorpcx
 import dns
 import dns.name
-import dns.asyncquery
 import dns.dnssec
+import dns.exception
 import dns.message
-import dns.asyncresolver
+import dns.rcode
 import dns.rdataclass
 import dns.rdatatype
 import dns.rdtypes.ANY.NS
@@ -54,7 +59,8 @@ import dns.rdtypes.IN.A
 import dns.rdtypes.IN.AAAA
 
 from .logging import get_logger
-from typing import Tuple
+from .util import ESocksProxy, ca_path, wait_for2
+from typing import Optional, Tuple
 
 
 _logger = get_logger(__name__)
@@ -69,12 +75,112 @@ trust_anchors = [
     dns.rrset.from_text('.', 1    , 'IN', 'DNSKEY', '257 3 8 AwEAAaz/tAm8yTn4Mfeh5eyI96WSVexTBAvkMgJzkKTOiW1vkIbzxeF3+/4RgWOq7HrxRixHlFlExOLAJr5emLvN7SWXgnLh4+B5xQlNVz8Og8kvArMtNROxVQuCaSnIDdD5LKyWbRd2n9WGe2R8PzgCmr3EgVLrjyBxWezF0jLHwVN8efS3rCj/EWgvIWgb9tarpVUDK/b58Da+sqqls3eNbuv7pr+eoZG+SrDK6nWeL3c6H5Apxz7LjVc1uTIdsIXxuOLYA4/ilBmSVIzuDWfdRUfhHdY6+cn8HFRm+2hM8AnXGXws9555KrUB5qihylGa8subX2Nn6UwNR1AkUTV74bU='),
 ]
 
+# DNS-over-TLS resolvers (RFC 7858): Google, Quad9, Cloudflare.
+# We connect to their IP addresses, which their certificates are valid for.
+RESOLVERS = [('8.8.8.8', 853), ('9.9.9.9', 853), ('1.1.1.1', 853)]
 
-async def _query_signed(ns, sub, _type) -> Tuple[dns.rrset.RRset, dns.rrset.RRset]:
+QUERY_TIMEOUT_DIRECT = 5
+# Tor only retries a stream on another circuit after 10 seconds
+QUERY_TIMEOUT_PROXIED = 15
+# for a whole lookup, including the unvalidated fallback
+LOOKUP_TIMEOUT = 60
+# queries are padded to a multiple of this (RFC 8467), so that their size reveals less about the name
+QUERY_PADDING = 128
+
+_NETWORK_ERRORS = (OSError, EOFError, asyncio.TimeoutError, aiorpcx.socks.SOCKSError, dns.exception.DNSException)
+
+
+class _TLSTransport:
+    """Sends DNS queries over TLS (RFC 7858) to the first of RESOLVERS that works, through the
+    proxy if there is one. All queries of a lookup go over one connection. Not for concurrent use."""
+
+    def __init__(self, proxy: Optional[ESocksProxy]):
+        self._proxy = proxy
+        self._timeout = QUERY_TIMEOUT_PROXIED if proxy else QUERY_TIMEOUT_DIRECT
+        self._resolvers = list(RESOLVERS)
+        self._connection: Optional[Tuple[asyncio.StreamReader, asyncio.StreamWriter]] = None
+        self._ssl_context = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH, cafile=ca_path)
+
+    async def send(self, q: dns.message.Message) -> dns.message.Message:
+        """Raises DNSException if no resolver answers."""
+        errors = []
+        while self._resolvers:
+            host, port = self._resolvers[0]
+            try:
+                response = await self._query(host, port, q)
+            except _NETWORK_ERRORS as e:
+                errors.append(f'{host}: {e!r}')
+            else:
+                if response.rcode() != dns.rcode.REFUSED:
+                    return response
+                errors.append(f'{host}: REFUSED')
+            # don't use this resolver again for the rest of the lookup
+            self.close()
+            self._resolvers.pop(0)
+        raise dns.exception.DNSException(f'no resolver answered: {errors}')
+
+    async def _query(self, host: str, port: int, q: dns.message.Message) -> dns.message.Message:
+        reused = self._connection is not None
+        try:
+            return await self._exchange(host, port, q)
+        except _NETWORK_ERRORS:
+            if not reused:
+                raise
+        # the resolver might have closed the connection since the last query, try once more on a new one
+        return await self._exchange(host, port, q)
+
+    async def _exchange(self, host: str, port: int, q: dns.message.Message) -> dns.message.Message:
+        if self._connection is None:
+            self._connection = await wait_for2(self._open_connection(host, port), self._timeout)
+        reader, writer = self._connection
+
+        async def roundtrip() -> dns.message.Message:
+            wire = q.to_wire()
+            writer.write(struct.pack('!H', len(wire)) + wire)
+            await writer.drain()
+            length, = struct.unpack('!H', await reader.readexactly(2))
+            return dns.message.from_wire(await reader.readexactly(length))
+
+        try:
+            response = await wait_for2(roundtrip(), self._timeout)
+            if not q.is_response(response):
+                raise dns.exception.DNSException('response does not match the query')
+            return response
+        except BaseException:
+            self.close()  # we don't know where in the stream we are
+            raise
+
+    async def _open_connection(self, host: str, port: int) -> Tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        # the certificate gets checked against `host`, an IP address
+        if self._proxy:
+            return await self._proxy.open_connection(host, port, ssl=self._ssl_context)
+        return await asyncio.open_connection(host, port, ssl=self._ssl_context)
+
+    def close(self) -> None:
+        if self._connection is not None:
+            self._connection[1].close()
+            self._connection = None
+
+
+def _make_transport() -> _TLSTransport:
+    from .network import Network
+    proxy = ESocksProxy.from_network_settings(Network.get_instance())
+    if proxy is not None and isinstance(proxy.auth, aiorpcx.socks.SOCKSRandomAuth):
+        # Tor would use a new circuit for each connection. Use one circuit for the
+        # whole lookup instead, still separate from our other traffic.
+        proxy.auth = aiorpcx.socks.SOCKSUserAuth(secrets.token_hex(16), secrets.token_hex(16))
+    return _TLSTransport(proxy)
+
+
+def _make_query(name, rdtype, *, want_dnssec: bool = False) -> dns.message.Message:
+    return dns.message.make_query(name, rdtype, use_edns=0, want_dnssec=want_dnssec, pad=QUERY_PADDING)
+
+
+async def _query_signed(transport: _TLSTransport, sub, _type) -> Tuple[dns.rrset.RRset, dns.rrset.RRset]:
     """Returns the (not yet validated) rrset and its rrsig."""
     name = dns.name.from_text(sub)
-    q = dns.message.make_query(name, _type, want_dnssec=True)
-    response = await dns.asyncquery.tcp(q, ns, timeout=5)
+    q = _make_query(name, _type, want_dnssec=True)
+    response = await transport.send(q)
     assert response.rcode() == 0, 'No answer'
     # only accept the queried name and type, otherwise any validly signed rrset of the zone could be replayed
     rrset = response.get_rrset(response.answer, name, dns.rdataclass.IN, _type)
@@ -86,19 +192,19 @@ async def _query_signed(ns, sub, _type) -> Tuple[dns.rrset.RRset, dns.rrset.RRse
     return rrset, rrsig
 
 
-async def _check_query(ns, sub, _type, keys) -> dns.rrset.RRset:
-    rrset, rrsig = await _query_signed(ns, sub, _type)
+async def _check_query(transport: _TLSTransport, sub, _type, keys) -> dns.rrset.RRset:
+    rrset, rrsig = await _query_signed(transport, sub, _type)
     dns.dnssec.validate(rrset, rrsig, keys)
     return rrset
 
 
-async def _get_and_validate(ns, url, _type) -> dns.rrset.RRset:
+async def _get_and_validate(transport: _TLSTransport, url, _type) -> dns.rrset.RRset:
     # get trusted root key
     root_rrset = None
     for dnskey_rr in trust_anchors:
         try:
             # Check if there is a valid signature for the root dnskey
-            root_rrset = await _check_query(ns, '', dns.rdatatype.DNSKEY, {dns.name.root: dnskey_rr})
+            root_rrset = await _check_query(transport, '', dns.rdatatype.DNSKEY, {dns.name.root: dnskey_rr})
             break
         except dns.dnssec.ValidationFailure:
             # It's OK as long as one key validates
@@ -112,17 +218,17 @@ async def _get_and_validate(ns, url, _type) -> dns.rrset.RRset:
         sub = f'{label}.{sub}'
         name = dns.name.from_text(sub)
         # If server is authoritative, don't fetch DNSKEY
-        query = dns.message.make_query(sub, dns.rdatatype.NS)
-        response = await dns.asyncquery.udp(query, ns, 3)
+        query = _make_query(sub, dns.rdatatype.NS)
+        response = await transport.send(query)
         assert response.rcode() == dns.rcode.NOERROR, "query error"
         rrset = response.authority[0] if len(response.authority) > 0 else response.answer[0]
         rr = rrset[0]
         if rr.rdtype == dns.rdatatype.SOA:
             continue
         # get DNSKEY (not yet validated)
-        rrset, rrsig = await _query_signed(ns, sub, dns.rdatatype.DNSKEY)
+        rrset, rrsig = await _query_signed(transport, sub, dns.rdatatype.DNSKEY)
         # get DS (signed by parent)
-        ds_rrset = await _check_query(ns, sub, dns.rdatatype.DS, keys)
+        ds_rrset = await _check_query(transport, sub, dns.rdatatype.DS, keys)
         # find the DNSKEYs committed to by the signed DS
         ds_keys = []
         for dnskey in rrset:
@@ -142,27 +248,47 @@ async def _get_and_validate(ns, url, _type) -> dns.rrset.RRset:
         # set key for next iteration
         keys = {name: rrset}
     # get TXT record (signed by zone)
-    rrset = await _check_query(ns, url, _type, keys)
+    rrset = await _check_query(transport, url, _type, keys)
     return rrset
+
+
+async def _resolve_unvalidated(transport: _TLSTransport, url, rtype) -> dns.rrset.RRset:
+    name = dns.name.from_text(url)
+    response = await transport.send(_make_query(name, rtype))
+    rrset = response.get_rrset(response.answer, name, dns.rdataclass.IN, rtype)
+    if rrset is None:
+        raise dns.exception.DNSException(
+            f'no {dns.rdatatype.to_text(rtype)} record for {url!r}: {dns.rcode.to_text(response.rcode())}')
+    return rrset
+
+
+async def _query(transport: _TLSTransport, url: str, rtype) -> Tuple[dns.rrset.RRset, bool]:
+    try:
+        out = await _get_and_validate(transport, url, rtype)
+        validated = True
+    except Exception as e:
+        log_level = logging.WARNING if isinstance(e, ImportError) else logging.INFO
+        _logger.log(log_level, f"DNSSEC error: {repr(e)}")
+        # same transport, so that this does not leak to the system resolver
+        out = await _resolve_unvalidated(transport, url, rtype)
+        validated = False
+    return out, validated
 
 
 async def query(url: str, rtype: dns.rdatatype.RdataType) -> Tuple[dns.rrset.RRset, bool]:
     """Try to do DNS resolution, including DNSSEC.
     'validated' shows whether the DNSSEC checks passed. DNS is completely INSECURE without DNSSEC,
     so the caller must carefully consider whether the response can be used for anything if validated=False.
+
+    We ask one of RESOLVERS, over TLS, through the network proxy if one is enabled: a SOCKS proxy
+    cannot carry UDP, and Tor's RESOLVE extension only does A/AAAA/PTR records (see
+    https://spec.torproject.org/socks-extensions.html). TLS keeps the names we look up from
+    e.g. a Tor exit. The resolver sees them, but it cannot forge answers, as we check DNSSEC.
     """
-    # FIXME this method is not using the network proxy. (although the proxy might not support UDP?)
-    #       if the proxy is a Tor SOCKS proxy, we could use Tor's "RESOLVE" extension command.
-    #         (see https://spec.torproject.org/socks-extensions.html)
-    # 8.8.8.8 is Google's public DNS server
-    nameservers = ['8.8.8.8']
-    ns = nameservers[0]
+    transport = _make_transport()
     try:
-        out = await _get_and_validate(ns, url, rtype)
-        validated = True
-    except Exception as e:
-        log_level = logging.WARNING if isinstance(e, ImportError) else logging.INFO
-        _logger.log(log_level, f"DNSSEC error: {repr(e)}")
-        out = await dns.asyncresolver.resolve(url, rtype)
-        validated = False
-    return out, validated
+        return await wait_for2(_query(transport, url, rtype), LOOKUP_TIMEOUT)
+    except asyncio.TimeoutError as e:
+        raise dns.exception.Timeout(timeout=LOOKUP_TIMEOUT) from e
+    finally:
+        transport.close()
