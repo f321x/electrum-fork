@@ -282,22 +282,38 @@ def _allocate_fee_budget_among_route(
     return placeholder_fee
 
 
-def _choose_next_trampoline(
+def _choose_trampolines(
+    *,
+    my_pubkey: bytes,
     my_trampoline: bytes,
-    trampolines: Iterable[bytes],
-    failed_routes: Iterable[Sequence[str]],
-) -> bytes:
-    trampolines = set(trampolines)
-    if my_trampoline in trampolines:
-        trampolines.discard(my_trampoline)
-    for r in failed_routes:
-        if len(r) > 2:
-            t2 = bytes.fromhex(r[-1])
-            if t2 in trampolines:
-                trampolines.discard(t2)
-    if not trampolines:
+    invoice_pubkey: bytes,
+    is_legacy: bool,
+    invoice_trampolines: Set[bytes],
+    next_trampolines: Iterable[bytes],
+    failed_routes: Set[Tuple[bytes, ...]],
+) -> Tuple[bytes, ...]:
+    """Returns the trampolines to add after my_trampoline, such that the route has not failed yet."""
+    paths = [()]
+    # maybe add a trampoline that my_trampoline can reach
+    next_trampolines = [t for t in next_trampolines if t != my_pubkey]
+    if next_trampolines and (is_legacy or my_trampoline not in invoice_trampolines):
+        paths = [(t,) for t in next_trampolines if t != my_trampoline]
+    # maybe add invoice trampoline
+    if not is_legacy and invoice_trampolines:
+        e2e_paths = []
+        for p in paths:
+            if (p[-1] if p else my_trampoline) in invoice_trampolines:
+                e2e_paths.append(p)
+            else:
+                e2e_paths.extend(p + (t,) for t in invoice_trampolines)
+        paths = e2e_paths
+    def route_node_ids(path):
+        node_ids = (my_trampoline,) + path
+        return node_ids if node_ids[-1] == invoice_pubkey else node_ids + (invoice_pubkey,)
+    paths = [p for p in paths if route_node_ids(p) not in failed_routes]
+    if not paths:
         raise NoPathFound('all routes have failed')
-    return random.choice(list(trampolines))
+    return random.choice(paths)
 
 
 def create_trampoline_route(
@@ -311,7 +327,7 @@ def create_trampoline_route(
         r_tags,
         trampoline_fee_level: int,
         next_trampolines: dict,
-        failed_routes: Iterable[Sequence[str]],
+        failed_routes: Set[Tuple[bytes, ...]],
         budget: PaymentFeeBudget,
 ) -> LNPaymentTRoute:
     # we decide whether to convert to a legacy payment
@@ -328,12 +344,19 @@ def create_trampoline_route(
         route, start_node=my_pubkey, end_node=my_trampoline, fee_info=(0, 0, 0)
     )
 
-    next_trampolines.pop(my_pubkey, None)
-    next_trampolines_ids = list(next_trampolines.keys())
+    trampolines = _choose_trampolines(
+        my_pubkey=my_pubkey,
+        my_trampoline=my_trampoline,
+        invoice_pubkey=invoice_pubkey,
+        is_legacy=is_legacy,
+        invoice_trampolines=invoice_trampolines,
+        next_trampolines=next_trampolines,
+        failed_routes=failed_routes,
+    )
+    for i, trampoline in enumerate(trampolines):
+        # we know the fees of my_trampoline to the trampolines it suggested
+        _extend_trampoline_route(route, end_node=trampoline, fee_info=next_trampolines.get(trampoline) if i == 0 else None)
     if is_legacy:
-        if next_trampolines:
-            trampoline_id = _choose_next_trampoline(my_trampoline, next_trampolines_ids, failed_routes)
-            _extend_trampoline_route(route, end_node=trampoline_id, fee_info = next_trampolines[trampoline_id])
         # the last trampoline onion must contain routing hints for the last trampoline
         # node to find the recipient
         # Due to space constraints it is not guaranteed for all route hints to get included in the onion
@@ -344,16 +367,6 @@ def create_trampoline_route(
         route[-1].invoice_routing_info = invoice_routing_info
         route[-1].invoice_features = invoice_features
         route[-1].outgoing_node_id = invoice_pubkey
-    else:
-        next_trampoline = my_trampoline
-        # maybe add second trampoline
-        if next_trampolines and next_trampoline not in invoice_trampolines:
-            next_trampoline = _choose_next_trampoline(next_trampoline, next_trampolines_ids, failed_routes)
-            _extend_trampoline_route(route, end_node=next_trampoline, fee_info=next_trampolines[next_trampoline])
-        # maybe add invoice trampoline
-        if invoice_trampolines and next_trampoline not in invoice_trampolines:
-            invoice_trampoline = _choose_next_trampoline(next_trampoline, invoice_trampolines, failed_routes)
-            _extend_trampoline_route(route, end_node=invoice_trampoline)
 
     # Add final edge. note: eclair requires an encrypted t-onion blob even in legacy case.
     # Also needed for fees for last TF!
@@ -471,7 +484,7 @@ def create_trampoline_route_and_onion(
         local_height: int,
         trampoline_fee_level: int,
         next_trampolines: dict,
-        failed_routes: Iterable[Sequence[str]],
+        failed_routes: Set[Tuple[bytes, ...]],
         budget: PaymentFeeBudget,
 ) -> Tuple[LNPaymentTRoute, OnionPacket, int, int]:
     # create route for the trampoline_onion

@@ -2770,6 +2770,18 @@ class TestPeerForwarding(TestPeer):
         with self.assertRaises(NoPathFound):
             graph = self.create_square_graph(direct=False, is_legacy=True)
             await self._run_trampoline_payment(graph, include_routing_hints=False)
+        with self.assertRaises(NoPathFound):
+            graph = self.create_square_graph(direct=False, is_legacy=True)
+            graph.workers['bob'].network.config.TEST_FAIL_HTLCS_WITH_TEMP_NODE_FAILURE = True
+            await self._run_trampoline_payment(graph, attempts=30)
+        # temporary node failures raise the fee level instead of retrying the same route
+        log, = graph.workers['alice'].logs.values()
+        self.assertEqual(list(range(7)), [htlc_log.trampoline_fee_level for htlc_log in log])
+        # direct payments are not retried
+        with self.assertRaises(NoPathFound):
+            await self._run_trampoline_payment(graph, destination_name='bob', attempts=30)
+        _, log = graph.workers['alice'].logs.values()
+        self.assertEqual(1, len(log))
 
     async def test_payment_trampoline_e2e_alice_t1_dave(self):
         with self.assertRaises(PaymentDone):
@@ -2828,15 +2840,17 @@ class TestPeerForwarding(TestPeer):
         bob_alice_channel.constraints.flags = bob_alice_channel.constraints.flags ^ CF_ANNOUNCE_CHANNEL
         self.assertFalse(bob_alice_channel.is_public())
 
-        with self.subTest(msg="carol is not a trampoline: two attempts fail"):
+        with self.subTest(msg="carol is not a trampoline: fails without retrying the same route"):
             with self.assertRaises(NoPathFound):
                 await self._run_trampoline_payment(
                     graph, sender_name='alice',
                     destination_name='edward',
                     trampoline_forwarders=('bob', 'dave'),
                     trampoline_users=('alice', 'bob'),
-                    attempts=2,
+                    attempts=30,
                 )
+            log, = graph.workers['alice'].logs.values()
+            self.assertEqual([OnionFailureCode.UNKNOWN_NEXT_PEER], [htlc_log.failure_msg.code for htlc_log in log])
         with self.subTest(msg="carol is a trampoline: one attempt fails"):
             with self.assertRaises(NoPathFound):
                 await self._run_trampoline_payment(

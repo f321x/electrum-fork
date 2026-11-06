@@ -886,7 +886,7 @@ class PaySession(Logger):
 
         self.uses_trampoline = uses_trampoline
         self.trampoline_fee_level = initial_trampoline_fee_level
-        self.failed_trampoline_routes = []
+        self.failed_trampoline_routes = set()  # type: Set[Tuple[bytes, ...]]  # failed at the current fee level
         self.next_trampolines = dict() # node_id -> next_trampoline -> tuple
         self._sent_buckets = dict()  # psecret_bucket -> (amount_sent, amount_failed)
 
@@ -905,7 +905,7 @@ class PaySession(Logger):
     def maybe_raise_trampoline_fee(self, htlc_log: HtlcLog):
         if htlc_log.trampoline_fee_level == self.trampoline_fee_level:
             self.trampoline_fee_level += 1
-            self.failed_trampoline_routes = []
+            self.failed_trampoline_routes = set()
             self.logger.info(f'raising trampoline fee level {self.trampoline_fee_level}')
         else:
             self.logger.info(f'NOT raising trampoline fee level, already at {self.trampoline_fee_level}')
@@ -928,22 +928,19 @@ class PaySession(Logger):
         elif failure_msg.code in (
                 OnionFailureCode.UNKNOWN_NEXT_PEER,
                 OnionFailureCode.TEMPORARY_NODE_FAILURE):
-            trampoline_route = htlc_log.route
-            r = []
-            for hop in trampoline_route:
-                r.append(hop.end_node.hex())
-                if hop.end_node == node_id:
-                    # we break at the node sending the error, so that
-                    # _choose_next_trampoline can discard the last item
-                    break
-            self.logger.info(f'failed trampoline route: {r}')
-            if r not in self.failed_trampoline_routes:
-                self.failed_trampoline_routes.append(r)
-            else:
-                pass  # maybe the route was reused between different MPP parts
+            if htlc_log.trampoline_fee_level is None:  # direct payment, a retry would be identical
+                raise PaymentFailure(failure_msg.code_name())
             if failure_msg.code == OnionFailureCode.UNKNOWN_NEXT_PEER:
                 self.next_trampolines[node_id] = decode_next_trampolines(failure_msg.data)
                 self.logger.info(f'received {self.next_trampolines[node_id]=}')
+            route = tuple(edge.end_node for edge in htlc_log.route)
+            if failure_msg.code == OnionFailureCode.TEMPORARY_NODE_FAILURE and len(route) == 2:
+                # e.g. eclair lacking liquidity to the recipient: retry with a higher fee
+                self.maybe_raise_trampoline_fee(htlc_log)
+            elif htlc_log.trampoline_fee_level == self.trampoline_fee_level:
+                # do not retry this route at the current fee level
+                self.logger.info(f'failed trampoline route: {[x.hex() for x in route]}')
+                self.failed_trampoline_routes.add(route)
         else:
             raise PaymentFailure(failure_msg.code_name())
 
