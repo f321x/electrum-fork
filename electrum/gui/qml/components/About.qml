@@ -40,11 +40,18 @@ Pane {
                 text: BUILD.electrum_version
             }
             Label {
-                text: qsTr('Protocol version')
+                text: qsTr('Protocol Version')
                 Layout.alignment: Qt.AlignRight
             }
             Label {
                 text: BUILD.protocol_version
+            }
+            Label {
+                text: qsTr('Python Version')
+                Layout.alignment: Qt.AlignRight
+            }
+            Label {
+                text: BUILD.python_version
             }
             Label {
                 text: qsTr('Qt Version')

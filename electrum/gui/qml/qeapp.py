@@ -5,6 +5,7 @@ import os
 import sys
 import html
 import threading
+import platform as py_platform
 from functools import partial
 from typing import TYPE_CHECKING, Set, List, Optional, Callable
 
@@ -593,6 +594,7 @@ class ElectrumQmlApplication(QGuiApplication):
         self.context.setContextProperty('BUILD', {
             'electrum_version': version.ELECTRUM_VERSION,
             'protocol_version': f"[{version.PROTOCOL_VERSION_MIN}, {version.PROTOCOL_VERSION_MAX}]",
+            'python_version': py_platform.python_version(),
             'qt_version': QT_VERSION_STR,
             'pyqt_version': PYQT_VERSION_STR
         })
