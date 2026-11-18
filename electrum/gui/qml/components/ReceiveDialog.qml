@@ -18,8 +18,6 @@ ElDialog {
     // when 'offer' is set, the dialog shows a reusable Lightning offer instead of a request
     property string offer: ''
     readonly property bool isOffer: offer !== ''
-    property var offerAmountSat: 0
-    property string offerMessage: ''
     property bool isLightning: request.isLightning
 
     property string _bolt11: request.bolt11
@@ -131,6 +129,7 @@ ElDialog {
                         visible: !request.amount.isEmpty
                         valid: !request.amount.isEmpty
                         amount: request.amount
+                        msatPrecision: true
                     }
                     Label {
                         visible: request.amount.isEmpty
@@ -213,7 +212,7 @@ ElDialog {
 
     Component.onCompleted: {
         if (dialog.isOffer) {
-            request.setOffer(dialog.offer, dialog.offerAmountSat, dialog.offerMessage)
+            request.setOffer(dialog.offer)
         } else {
             request.key = dialog.key
         }
