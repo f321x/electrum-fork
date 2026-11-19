@@ -90,6 +90,7 @@ ENV ANDROID_SDK_BUILD_TOOLS_MAJOR_V="36"
 ENV ANDROID_SDK_BUILD_TOOLS_VERSION="36.0.0"
 
 # download platforms, API, build tools
+# note: sdkmanager downloads these from dl.google.com, without a hash pinned here. We trust dl.google.com.
 RUN ${ANDROID_SDK_MANAGER} "platforms;android-${ANDROID_SDK_BUILD_TOOLS_MAJOR_V}" > /dev/null && \
     ${ANDROID_SDK_MANAGER} "build-tools;${ANDROID_SDK_BUILD_TOOLS_VERSION}" > /dev/null && \
     ${ANDROID_SDK_MANAGER} "extras;android;m2repository" > /dev/null && \
