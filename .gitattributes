@@ -10,3 +10,4 @@
 *.jar    binary
 *.png    binary
 *.zip    binary
+*.dat    binary

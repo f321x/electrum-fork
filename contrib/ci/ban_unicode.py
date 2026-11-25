@@ -24,7 +24,7 @@ EXCLUDE_PATH_PREFIX = {
     "tests/",
 }
 EXCLUDE_EXTENSIONS = {
-    ".jpg", ".jpeg", ".png", ".ttf", ".otf", ".pdn", ".icns", ".ico", ".gif",
+    ".jpg", ".jpeg", ".png", ".ttf", ".otf", ".pdn", ".icns", ".ico", ".gif", ".dat",
 }
 UNICODE_WHITELIST = {
     "💬", "🗯", "⚠", chr(0xfe0f), "✓", "▷", "▽", "…", "•", "█", "™", "≈",
