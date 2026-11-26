@@ -46,7 +46,6 @@ from electrum import lnmsg
 from electrum.logging import console_stderr_handler, Logger
 from electrum.lnonion import OnionFailureCode, OnionRoutingFailure, OnionHopsDataSingle, OnionPacket, OnionParsingError
 from electrum.lnutil import LOCAL, REMOTE, UpdateAddHtlc, RecvMPPResolution, RevocationStore
-from electrum.lnutil import ReceivedMPPHtlc, ReceivedMPPStatus
 from electrum.invoices import PR_PAID, PR_UNPAID, PR_INFLIGHT, Invoice, PR_FAILED
 from electrum.interface import GracefulDisconnect
 from electrum.fee_policy import FeeTimeEstimates, FEE_ETA_TARGETS
@@ -2810,52 +2809,62 @@ class TestPeerForwarding(TestPeer):
         with self.assertRaises(PaymentDone):
             await f()
 
-    async def test_forwarding_set_settles_with_preimage_over_forwarding_failure(self):
-        """Regression test for a theft against trampoline-forwarding nodes.
+    async def test_trampoline_forwarder_settles_if_recipient_fulfills_only_one_htlc(self):
+        """bob trampoline-forwards a payment from alice to dave, as two htlcs. dave fulfills one of
+        them, and fails the other one only after bob's outgoing payment has ended, while alice is
+        offline. bob has paid for the preimage, so he must fulfill alice's htlcs, not fail them."""
+        # bob's routing fees for two htlcs to dave must fit into the trampoline fee paid by alice
+        self.GRAPH_DEFINITIONS['square_graph']['bob']['channels']['dave'] = [low_fee_channel.copy()]
+        graph = self.create_square_graph(direct=True, test_mpp_consolidation=True)
+        alice_w, bob_w, dave_w = graph.workers['alice'], graph.workers['bob'], graph.workers['dave']
+        alice_w.config.INITIAL_TRAMPOLINE_FEE_LEVEL = 6  # the first attempt gets forwarded
+        electrum.trampoline._TRAMPOLINE_NODES_UNITTESTS = {
+            bob_w.name: LNPeerAddr(host="127.0.0.1", port=9735, pubkey=bob_w.node_keypair.pubkey),
+        }
+        peers = graph.peers.values()
+        bob_alice_peer, dave_peer = graph.peers[('bob', 'alice')], graph.peers[('dave', 'bob')]
+        dave_chan = graph.channels[('dave', 'bob')][0]
 
-        When a node forwards a (bucketed/MPP) payment and one downstream part is fulfilled while
-        another fails, the forwarder learns the preimage but a forwarding failure may also get
-        recorded. For a SETTLING incoming set, knowing the preimage must take precedence: the
-        forwarder has to settle the incoming htlcs (claiming the money it already paid
-        downstream), not fail them back."""
-        graph = self.prepare_chans_and_peers_in_graph(self.GRAPH_DEFINITIONS['single_chan'])
-        bob_w = graph.workers['bob']
-        peer = graph.peers[('bob', 'alice')]
-        chan_id = list(bob_w.channels.keys())[0]
-
-        def make_settling_set(payment_hash):
-            payment_secret = os.urandom(32)
-            payment_key = (payment_hash + payment_secret).hex()
-            htlc = UpdateAddHtlc(
-                amount_msat=1000, payment_hash=payment_hash, cltv_abs=600_000,
-                htlc_id=0, timestamp=int(time.time()))
-            mpp_htlc = ReceivedMPPHtlc(channel_id=chan_id, htlc=htlc, unprocessed_onion="00" * 10)
-            mpp_set = ReceivedMPPStatus(resolution=RecvMPPResolution.SETTLING, htlcs=frozenset({mpp_htlc}))
-            bob_w.received_mpp_htlcs[payment_key] = mpp_set
-            return payment_key, mpp_set
-
-        failure = OnionRoutingFailure(code=OnionFailureCode.TEMPORARY_NODE_FAILURE, data=b'')
-
-        # Case 1: forwarding failure recorded AND preimage known -> must settle with preimage.
+        # dave holds the htlcs, so that we can resolve them one by one
         preimage = os.urandom(32)
-        payment_hash = sha256(preimage)
-        payment_key, mpp_set = make_settling_set(payment_hash)
-        bob_w.save_forwarding_failure(payment_key, failure_message=failure)
-        bob_w.save_preimage(payment_hash, preimage)
-        error, settle_preimage, callback = peer._check_final_mpp_set_state(payment_key, mpp_set)
-        self.assertIsNone(error)
-        self.assertEqual(preimage, settle_preimage)
-        self.assertIsNone(callback)
-        self.assertEqual(RecvMPPResolution.SETTLING, bob_w.received_mpp_htlcs[payment_key].resolution)
+        lnaddr, pay_req = self.prepare_invoice(dave_w, payment_hash=sha256(preimage))
+        dave_received_htlcs = asyncio.Event()
+        async def hold_invoice_cb(payment_hash):
+            dave_received_htlcs.set()
+        dave_w.register_hold_invoice(lnaddr.paymenthash, hold_invoice_cb)
 
-        # Case 2 (control): forwarding failure recorded and NO preimage -> fail the set back.
-        payment_hash2 = sha256(os.urandom(32))
-        payment_key2, mpp_set2 = make_settling_set(payment_hash2)
-        bob_w.save_forwarding_failure(payment_key2, failure_message=failure)
-        error2, settle_preimage2, callback2 = peer._check_final_mpp_set_state(payment_key2, mpp_set2)
-        self.assertIsNotNone(error2)
-        self.assertIsNone(settle_preimage2)
-        self.assertEqual(RecvMPPResolution.FAILED, bob_w.received_mpp_htlcs[payment_key2].resolution)
+        async def pay():
+            pay_task = asyncio.create_task(alice_w.pay_invoice(pay_req, attempts=1))
+            await dave_received_htlcs.wait()
+            ((payment_key, mpp_set),) = dave_w.received_mpp_htlcs.items()
+            del dave_w.received_mpp_htlcs[payment_key]  # so that dave's htlc_switch does not settle the other htlc
+            mpp_htlc1, mpp_htlc2 = mpp_set.htlcs
+            with mock.patch.object(bob_alice_peer, '_run_htlc_switch_iteration'):  # alice is offline
+                dave_peer._fulfill_htlc(dave_chan, mpp_htlc1.htlc.htlc_id, preimage)
+                while any(paysession.is_active for paysession in bob_w._paysessions.values()):
+                    await asyncio.sleep(0.01)
+                error = OnionRoutingFailure(code=OnionFailureCode.MPP_TIMEOUT, data=b'')
+                onion_packet = dave_peer._parse_onion_packet(mpp_htlc2.unprocessed_onion)
+                error_bytes = error.to_wire_msg(onion_packet, dave_peer.privkey, dave_w.network.get_local_height())
+                dave_peer.fail_htlc(chan=dave_chan, htlc_id=mpp_htlc2.htlc.htlc_id, error_bytes=error_bytes)
+                while any(bob_w.active_forwardings.values()):  # outgoing htlcs not resolved yet
+                    await asyncio.sleep(0.01)
+            success, log = await pay_task
+            self.assertTrue(success)  # bob fulfilled alice's htlcs
+            raise SuccessfulTest()
+
+        async def f():
+            await self._activate_trampoline(alice_w)
+            async with OldTaskGroup() as group:
+                for peer in peers:
+                    await group.spawn(peer._message_loop())
+                    await group.spawn(peer.htlc_switch())
+                for peer in peers:
+                    await peer.initialized
+                await group.spawn(pay())
+
+        with self.assertRaises(SuccessfulTest):
+            await f()
 
     async def test_payment_trampoline_legacy(self):
         # alice -> T1_bob -> carol -> dave
