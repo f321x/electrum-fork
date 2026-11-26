@@ -33,6 +33,7 @@ import asyncio
 import logging
 
 import aiohttp
+from aiohttp_socks import ProxyConnectionError, ProxyTimeoutError, ProxyError
 import dns
 import dns.name
 import dns.asyncquery
@@ -60,6 +61,7 @@ import dns.rdtypes.IN.A
 import dns.rdtypes.IN.AAAA
 
 from .logging import get_logger
+from .util import make_aiohttp_session, async_timeout
 from typing import Tuple, Optional, Sequence, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -82,6 +84,10 @@ trust_anchors = [
 # public fallback nameserver, tried after the system/DHCP nameservers, or alone if those cannot
 # be determined (e.g. no /etc/resolv.conf, some mobile setups). Google Public DNS.
 FALLBACK_NAMESERVER = '8.8.8.8'
+
+# time limit for a whole lookup over DoH: for setting up the connection through the proxy, which can
+# take more than 10 seconds (onion endpoint, new Tor circuit), and for all queries sent over it
+DOH_LOOKUP_TIMEOUT = 30  # seconds
 
 
 class DNSTransport:
@@ -124,34 +130,32 @@ class LocalTransport(DNSTransport):
 
 
 class DoHTransport(DNSTransport):
-    """DNS-over-HTTPS, tunneled through the proxy via Network.async_send_http_on_proxy
+    """DNS-over-HTTPS, tunneled through the proxy by the given aiohttp session
     (aiohttp + SOCKS, with rdns so the DoH hostname is resolved through the proxy).
+    All queries of a lookup are sent over that one session, so they share a connection
+    instead of each setting up its own through the proxy.
     Used when a proxy is configured: SOCKS cannot carry UDP, its RESOLVE command cannot
     transport TXT records, nor the DNSSEC records we need for verification. We run real
     DNS over an HTTPS stream through the proxy instead."""
 
-    def __init__(self, doh_endpoint: str):
+    def __init__(self, session: aiohttp.ClientSession, doh_endpoint: str):
+        self.session = session
         self.doh_endpoint = doh_endpoint
 
     async def send(self, q: dns.message.Message) -> dns.message.Message:
-        from .network import Network
-
-        async def on_finish(resp):
-            resp.raise_for_status()
-            return await resp.read()
-
+        headers = {
+            'content-type': 'application/dns-message',
+            'accept': 'application/dns-message',
+        }
         try:
-            raw = await Network.async_send_http_on_proxy(
-                'post', self.doh_endpoint,
-                body=q.to_wire(),
-                headers={
-                    'content-type': 'application/dns-message',
-                    'accept': 'application/dns-message',
-                },
-                on_finish=on_finish,
-                timeout=5,
-            )
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            async with self.session.post(self.doh_endpoint, data=q.to_wire(), headers=headers) as resp:
+                resp.raise_for_status()
+                raw = await resp.read()
+        except (
+                aiohttp.ClientError, asyncio.TimeoutError,
+                # make_aiohttp_session only converts these once they leave its context
+                ProxyConnectionError, ProxyTimeoutError, ProxyError,
+        ) as e:
             raise dns.exception.DNSException(f"DoH request failed: {e!r}") from e
         return dns.message.from_wire(raw)
 
@@ -256,6 +260,22 @@ async def _resolve_unvalidated(transport: DNSTransport, url, rtype) -> dns.rrset
     raise dns.exception.DNSException(f"no {dns.rdatatype.to_text(rtype)} answer for {url!r}")
 
 
+async def _query_over_transport(
+    transport: DNSTransport,
+    url: str,
+    rtype: dns.rdatatype.RdataType,
+) -> Tuple[dns.rrset.RRset, bool]:
+    try:
+        out = await _get_and_validate(transport, url, rtype)
+        validated = True
+    except Exception as e:
+        log_level = logging.WARNING if isinstance(e, ImportError) else logging.INFO
+        _logger.log(log_level, f"DNSSEC error: {repr(e)}")
+        out = await _resolve_unvalidated(transport, url, rtype)
+        validated = False
+    return out, validated
+
+
 async def query(
     url: str,
     rtype: dns.rdatatype.RdataType,
@@ -273,14 +293,12 @@ async def query(
     from .network import Network
     network = Network.get_instance()
     proxy: Optional[ProxySettings] = network.proxy if network else None
-    transport = DoHTransport(proxy.doh_endpoint) if proxy is not None and proxy.enabled and proxy.doh_endpoint \
-        else LocalTransport()
-    try:
-        out = await _get_and_validate(transport, url, rtype)
-        validated = True
-    except Exception as e:
-        log_level = logging.WARNING if isinstance(e, ImportError) else logging.INFO
-        _logger.log(log_level, f"DNSSEC error: {repr(e)}")
-        out = await _resolve_unvalidated(transport, url, rtype)
-        validated = False
-    return out, validated
+    if proxy is not None and proxy.enabled and proxy.doh_endpoint:
+        try:
+            async with async_timeout(DOH_LOOKUP_TIMEOUT):
+                # no timeout per request, the one above is for the whole lookup
+                async with make_aiohttp_session(proxy, timeout=aiohttp.ClientTimeout(total=None)) as session:
+                    return await _query_over_transport(DoHTransport(session, proxy.doh_endpoint), url, rtype)
+        except asyncio.TimeoutError as e:
+            raise dns.exception.Timeout(timeout=DOH_LOOKUP_TIMEOUT) from e
+    return await _query_over_transport(LocalTransport(), url, rtype)
