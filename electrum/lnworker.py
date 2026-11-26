@@ -898,10 +898,6 @@ class PaySession(Logger):
         pkey = sha256(self.payment_key)
         return f"{self.payment_hash[:4].hex()}-{pkey[:2].hex()}"
 
-    @property
-    def number_htlcs_inflight(self) -> int:
-        return self._nhtlcs_inflight
-
     def maybe_raise_trampoline_fee(self, htlc_log: HtlcLog):
         if htlc_log.trampoline_fee_level == self.trampoline_fee_level:
             self.trampoline_fee_level += 1
@@ -951,12 +947,17 @@ class PaySession(Logger):
         self.logger.info(f"waiting... amount_inflight={self._amount_inflight}. nhtlcs_inflight={self._nhtlcs_inflight}")
         htlc_log = await self.sent_htlcs_q.get()
         self._amount_inflight -= htlc_log.amount_msat
-        self._nhtlcs_inflight -= 1
-        if self._amount_inflight < 0 or self._nhtlcs_inflight < 0:
-            raise Exception(f"amount_inflight={self._amount_inflight}, nhtlcs_inflight={self._nhtlcs_inflight}. both should be >= 0 !")
+        if self._amount_inflight < 0:
+            raise Exception(f"amount_inflight={self._amount_inflight} should be >= 0 !")
         return htlc_log
 
     def add_new_htlc(self, sent_htlc_info: SentHtlcInfo):
+        """ PaySession htlc lifecycle:
+        1. htlc gets added here
+        2. htlc_(failed|fulfilled) removes htlc via on_htlc_resolved
+        3. on_htlc_resolved puts htlc log on sent_htlcs_q(ueue) (failed bucket parts: only once the whole bucket failed)
+        4. pay_to_node, while still running, consumes htlc log via wait_for_one_htlc_to_resolve
+        """
         self._nhtlcs_inflight += 1
         self._amount_inflight += sent_htlc_info.amount_receiver_msat
         if self._amount_inflight > self.amount_to_pay:  # safety belts
@@ -981,26 +982,28 @@ class PaySession(Logger):
             self._sent_buckets[bkey] = amount_sent, amount_failed
             if amount_sent != amount_failed:
                 self.logger.info('bucket still active...')
-                # No HtlcLog will be queued for this htlc (the last failing part of the bucket will)
-                # but it must be taken out of the in-flight count here
-                self._nhtlcs_inflight -= 1
                 return None
             self.logger.info('bucket failed')
             return amount_sent
         # not using trampoline buckets
         return shi.amount_receiver_msat
 
+    def on_htlc_resolved(self, htlc_log: Optional[HtlcLog]) -> None:
+        assert self._nhtlcs_inflight > 0
+        self._nhtlcs_inflight -= 1
+        if htlc_log is not None:
+            self.sent_htlcs_q.put_nowait(htlc_log)
+
+    def has_unprocessed_htlcs(self) -> bool:
+        """Unprocessed as in inflight htlc or not-yet consumed htlc log on sent_htlcs_q"""
+        return self._nhtlcs_inflight > 0 or not self.sent_htlcs_q.empty()
+
     def get_outstanding_amount_to_send(self) -> int:
         return self.amount_to_pay - self._amount_inflight
 
     def can_be_deleted(self) -> bool:
         """Returns True iff finished sending htlcs AND all pending htlcs have resolved."""
-        if self.is_active:
-            return False
-        # note: no one is consuming from sent_htlcs_q anymore
-        nhtlcs_resolved = self.sent_htlcs_q.qsize()
-        assert nhtlcs_resolved <= self._nhtlcs_inflight
-        return nhtlcs_resolved == self._nhtlcs_inflight
+        return not self.is_active and self._nhtlcs_inflight == 0
 
 
 class LNWallet(Logger):
@@ -2133,7 +2136,7 @@ class LNWallet(Logger):
                     log.append(htlc_log)
                     await self._process_htlc_log(
                         paysession=paysession, htlc_log=htlc_log, is_forwarding_trampoline=bool(fwd_trampoline_onion))
-                    if paysession.number_htlcs_inflight < 1:
+                    if not paysession.has_unprocessed_htlcs():
                         break
                     # wait a bit, more failures might come
                     try:
@@ -3283,13 +3286,12 @@ class LNWallet(Logger):
                 self.network.path_finder.update_num_inflight_htlcs(shi.route, add_htlcs=False)
             payment_key = payment_hash + shi.payment_secret_orig
             paysession = self._paysessions[payment_key]
-            q = paysession.sent_htlcs_q
             htlc_log = HtlcLog(
                 success=True,
                 route=shi.route,
                 amount_msat=shi.amount_receiver_msat,
                 trampoline_fee_level=shi.trampoline_fee_level)
-            q.put_nowait(htlc_log)
+            paysession.on_htlc_resolved(htlc_log)
             if paysession.can_be_deleted():
                 self._paysessions.pop(payment_key)
                 paysession_active = False
@@ -3333,7 +3335,6 @@ class LNWallet(Logger):
                 self.network.path_finder.update_num_inflight_htlcs(shi.route, add_htlcs=False)
             payment_okey = payment_hash + shi.payment_secret_orig
             paysession = self._paysessions[payment_okey]
-            q = paysession.sent_htlcs_q
             # detect if it is part of a bucket
             # if yes, wait until the bucket completely failed
             route = shi.route
@@ -3354,6 +3355,7 @@ class LNWallet(Logger):
                 sender_idx = None
             self.logger.info(f"htlc_failed {failure_message}")
             amount_receiver_msat = paysession.on_htlc_fail_get_fail_amt_to_propagate(shi)
+            htlc_log = None
             if amount_receiver_msat is not None:
                 if shi.trampoline_route:
                     route = shi.trampoline_route
@@ -3365,7 +3367,7 @@ class LNWallet(Logger):
                     failure_msg=failure_message,
                     sender_idx=sender_idx,
                     trampoline_fee_level=shi.trampoline_fee_level)
-                q.put_nowait(htlc_log)
+            paysession.on_htlc_resolved(htlc_log)
             if paysession.can_be_deleted():
                 self._paysessions.pop(payment_okey)
                 paysession_active = False
