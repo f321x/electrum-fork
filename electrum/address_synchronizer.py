@@ -27,14 +27,14 @@ import dataclasses
 import threading
 import itertools
 from collections import defaultdict
-from typing import TYPE_CHECKING, Dict, Optional, Set, Tuple, NamedTuple, Sequence
+from typing import TYPE_CHECKING, Dict, Optional, Set, Tuple, NamedTuple, Sequence, Iterable, List
 
 from .crypto import sha256
 from . import bitcoin, util
 from .bitcoin import COINBASE_MATURITY
 from .util import (
     profiler, bfh, TxMinedInfo, UnrelatedTransactionException, UnverifiedTxSignature, InvalidTxSignature,
-    UnverifiableTxSignature, with_lock, OldTaskGroup,
+    UnverifiableTxSignature, MissingTxParents, with_lock, OldTaskGroup,
 )
 from .transaction import (
     Transaction, TxOutput, TxInput, PartialTxInput, TxOutpoint, PartialTransaction, tx_from_any,
@@ -62,6 +62,8 @@ TX_HEIGHT_UNCONFIRMED = 0
 
 TX_TIMESTAMP_INF = 999_999_999_999
 TX_HEIGHT_INF = 10 ** 9
+
+MAX_HELD_ORPHAN_TXS = 100  # see AddressSynchronizer._orphan_parents
 
 
 from enum import IntEnum, auto
@@ -103,8 +105,12 @@ class AddressSynchronizer(Logger, EventListener):
         self.future_tx = {}  # type: Dict[str, int]  # txid -> wanted (abs) height
         # Txs the server claims are mined but still pending verification:
         self.unverified_tx = defaultdict(int)  # type: Dict[str, int]  # txid -> height. Access with self.lock.
-        # Txs received from the server that it claims are mined, held until verified:
-        self._held_txs = {}  # type: Dict[str, Transaction]  # txid -> tx. Access with self.lock.
+        # Txs received from the server that cannot be added yet. Access with self.lock.
+        # Those it claims are mined (see unverified_tx) are held until verified:
+        self._held_txs = {}  # type: Dict[str, Transaction]  # txid -> tx
+        # Orphans are held until their missing parents are added: a taproot input that spends one of our coins
+        # cannot be verified without the outputs spent by the other inputs.
+        self._orphan_parents = {}  # type: Dict[str, Set[str]]  # txid of a held tx -> txids of its missing parents
         # Txs the server claims are in the mempool:
         self.unconfirmed_tx = defaultdict(int)  # type: Dict[str, int]  # txid -> height. Access with self.lock.
         # thread local storage for caching stuff
@@ -300,6 +306,15 @@ class AddressSynchronizer(Logger, EventListener):
         list of addresses has increased. This will return True even if the
         transaction was already in self.db.
         """
+        with self.lock:
+            is_added = self._add_transaction(tx, allow_unrelated=allow_unrelated, is_new=is_new)
+            if is_added:
+                # the held txs that waited for tx are added as db operations of their own
+                self._add_txs_from_server(self._pop_held_orphan_txs(tx.txid()))
+            return is_added
+
+    def _add_transaction(self, tx: Transaction, *, allow_unrelated=False, is_new=True) -> bool:
+        """Adds tx to the wallet history, as one db operation. See add_transaction."""
         assert tx, tx
         # note: tx.is_complete() is not necessarily True; tx might be partial
         # but it *needs* to have a txid:
@@ -329,9 +344,9 @@ class AddressSynchronizer(Logger, EventListener):
             checked_tx = tx if is_new_witness else stored_tx  # db keeps a complete tx
             try:
                 self._verify_new_inputs(checked_tx, is_new_witness=is_new_witness)
-            except UnverifiedTxSignature:
+            except UnverifiedTxSignature as e:
                 if not is_new_witness:
-                    self.remove_transaction(tx_hash)
+                    self._remove_tx_failing_verification(tx_hash, e)
                 raise
             # Find all conflicting transactions.
             # In case of a conflict,
@@ -400,7 +415,7 @@ class AddressSynchronizer(Logger, EventListener):
                                 self._verify_txin_scripts(spender_tx, prevouts={ser}, prev_txs={tx_hash: tx})
                             except UnverifiedTxSignature as e:
                                 self.logger.warning(f"removing tx {next_tx}: {e!r}")
-                                self.remove_transaction(next_tx)
+                                self._remove_tx_failing_verification(next_tx, e)
                                 continue
                         is_new_txi = self.db.add_txi_addr(next_tx, addr, ser, v)
                         self._add_tx_to_local_history(next_tx)
@@ -439,8 +454,9 @@ class AddressSynchronizer(Logger, EventListener):
         Parent transactions not yet stored in the db can be passed through prev_txs.
         Ignores mined, partial and unsigned transactions.
         Raises InvalidTxSignature if a txin is not valid.
-        Raises UnverifiableTxSignature if that could not be determined: a taproot signature commits to all
-        spent outputs, and one is missing; the interpreter fails.
+        Raises MissingTxParents if that cannot be determined without parent txs that are missing: a taproot
+        signature commits to the outputs spent by all inputs.
+        Raises UnverifiableTxSignature if the interpreter fails.
         """
         if not prevouts or not tx.is_complete():
             return
@@ -460,7 +476,8 @@ class AddressSynchronizer(Logger, EventListener):
             raise InvalidTxSignature() from e
         except MissingSpentOutputs as e:
             self.logger.info(f"tx {tx.txid()}: {e!r}")
-            raise UnverifiableTxSignature() from e
+            parent_txids = {txin.prevout.txid.hex() for txin, txout in zip(tx.inputs(), spent_outputs) if txout is None}
+            raise MissingTxParents(parent_txids) from e
         except Exception as e:
             # A bug in the interpreter.
             # If it propagated, a tx could disconnect us from every server, or keep the wallet from loading.
@@ -478,9 +495,31 @@ class AddressSynchronizer(Logger, EventListener):
         for txid in to_remove:
             self._remove_transaction(txid)
 
-    def _remove_transaction(self, tx_hash: str) -> None:
+    def _remove_tx_failing_verification(self, tx_hash: str, e: UnverifiedTxSignature) -> None:
+        """Removes a stored tx that did not pass script verification, and its descendants, from the wallet history.
+        If it only misses parent txs, they are held instead: until those parents are added, and for the
+        descendants, until the txs they spend from are added again.
+        """
+        if not isinstance(e, MissingTxParents):
+            self.remove_transaction(tx_hash)
+            return
+        txids = [tx_hash, *self.get_depending_transactions(tx_hash)]
+        txs = [self._remove_transaction(txid, keep_height=True) for txid in txids]
+        for txid, tx in zip(txids, txs):
+            if tx is None:
+                continue
+            if txid == tx_hash:
+                missing_parents = e.parent_txids
+            else:
+                missing_parents = {txin.prevout.txid.hex() for txin in tx.inputs()}.intersection(txids)
+            self._hold_orphan_tx(tx, missing_parents)
+
+    def _remove_transaction(self, tx_hash: str, *, keep_height: bool = False) -> Optional[Transaction]:
         """Removes a single transaction from the wallet history, and attempts
          to undo all effects of the tx (spending inputs, creating outputs, etc).
+         Returns the transaction, if we had it.
+         keep_height: for a tx that is held, to be added again: we keep what the server claims its height is,
+         and its verification.
         """
         def remove_from_spent_outpoints():
             # undo spends in spent_outpoints
@@ -508,15 +547,17 @@ class AddressSynchronizer(Logger, EventListener):
             self.db.remove_txi(tx_hash)
             self.db.remove_txo(tx_hash)
             self.db.remove_tx_fee(tx_hash)
-            self.db.remove_verified_tx(tx_hash)
-            self.unverified_tx.pop(tx_hash, None)
-            self.unconfirmed_tx.pop(tx_hash, None)
+            if not keep_height:
+                self.db.remove_verified_tx(tx_hash)
+                self.unverified_tx.pop(tx_hash, None)
+                self.unconfirmed_tx.pop(tx_hash, None)
             if tx:
                 for idx, txo in enumerate(tx.outputs()):
                     scripthash = bitcoin.script_to_scripthash(txo.scriptpubkey)
                     prevout = TxOutpoint(bfh(tx_hash), idx)
                     self.db.remove_prevout_by_scripthash(scripthash, prevout=prevout, value=txo.value)
         util.trigger_callback('adb_removed_tx', self, tx_hash, tx)
+        return tx
 
     @with_lock
     def get_depending_transactions(self, tx_hash: str) -> Set[str]:
@@ -537,6 +578,7 @@ class AddressSynchronizer(Logger, EventListener):
     def receive_tx_callback(self, tx: Transaction, *, tx_height: Optional[int] = None) -> None:
         txid = tx.txid()
         assert txid is not None
+        self._pop_held_tx(txid)
         if tx_height is not None:
             # note: tx_height is only set by the unit tests: to inject a tx into the history
             self.add_unverified_or_unconfirmed_tx(txid, tx_height)
@@ -544,13 +586,7 @@ class AddressSynchronizer(Logger, EventListener):
             # the server claims tx is mined: add it once verified, so that its scripts need not be verified
             self._held_txs[txid] = tx
             return
-        self._held_txs.pop(txid, None)
-        try:
-            self.add_transaction(tx, allow_unrelated=True)
-        except UnverifiedTxSignature as e:
-            # We stay connected: if a bug in the script interpreter is the cause, we would disconnect from
-            # every server. If the tx gets mined, it is added once verified.
-            self.logger.warning(f"rejected tx {txid}: {e!r}")
+        self._add_txs_from_server([tx])
 
     @with_lock
     def receive_history_callback(self, addr: str, hist: Sequence[Tuple[str, int]], tx_fees: Dict[str, int]):
@@ -565,6 +601,11 @@ class AddressSynchronizer(Logger, EventListener):
                 self.invalidate_cache()
                 if self.verifier:
                     self.verifier.remove_spv_proof_for_tx(tx_hash)
+        # a held orphan that the server no longer lists is dropped: it may have been replaced
+        listed_txids = {tx_hash for tx_hash, _height in hist}
+        for tx_hash, _height in self.db.get_addr_history(addr):
+            if tx_hash in self._orphan_parents and tx_hash not in listed_txids:
+                self._pop_held_tx(tx_hash)
         self.db.set_addr_history(addr, hist)
 
         for tx_hash, tx_height in hist:
@@ -578,7 +619,7 @@ class AddressSynchronizer(Logger, EventListener):
                 self.add_transaction(tx, allow_unrelated=True, is_new=False)
             except UnverifiedTxSignature as e:
                 # the stored tx may have been sent by another server, with an invalid witness.
-                # _request_missing_txs will ask the current server for it
+                # _request_missing_txs will ask the current server for it, unless it is held
                 self.logger.warning(f"removed tx {tx_hash}: {e!r}")
                 continue
             # if we already had this tx, see if its height changed (e.g. local->unconfirmed)
@@ -760,24 +801,73 @@ class AddressSynchronizer(Logger, EventListener):
             self._add_held_tx(tx_hash)
         util.trigger_callback('adb_added_verified_tx', self, tx_hash)
 
+    def _add_txs_from_server(self, txs: Iterable[Transaction]) -> None:
+        """Adds txs received from the server, each as a db operation of its own, and the held txs that waited
+        for them. A tx that cannot be verified without parent txs that are missing is held, until they are added.
+        """
+        txs = list(txs)
+        while txs:
+            tx = txs.pop(0)
+            try:
+                is_added = self._add_transaction(tx, allow_unrelated=True)
+            except MissingTxParents as e:
+                self._hold_orphan_tx(tx, e.parent_txids)
+            except UnverifiedTxSignature as e:
+                # We stay connected: if a bug in the script interpreter is the cause, we would disconnect from
+                # every server. If the tx gets mined, it is added once verified.
+                self.logger.warning(f"rejected tx {tx.txid()}: {e!r}")
+            else:
+                if is_added:
+                    txs += self._pop_held_orphan_txs(tx.txid())
+
     def _add_held_tx(self, tx_hash: str) -> None:
-        tx = self._held_txs.pop(tx_hash, None)
-        if tx is None:
-            return
-        try:
-            self.add_transaction(tx, allow_unrelated=True)
-        except UnverifiedTxSignature as e:
-            # tx is not at the height the server claimed: as in receive_tx_callback, we stay connected
-            self.logger.warning(f"rejected tx {tx_hash}: {e!r}")
+        tx = self._pop_held_tx(tx_hash)
+        if tx is not None:
+            # if tx is not at the height the server claimed, its scripts are verified
+            self._add_txs_from_server([tx])
+
+    def _hold_orphan_tx(self, tx: Transaction, missing_parents: Set[str]) -> None:
+        txid = tx.txid()
+        self.logger.info(f"holding tx {txid} until {len(missing_parents)} missing parents are added")
+        self._pop_held_tx(txid)
+        self._held_txs[txid] = tx
+        self._orphan_parents[txid] = set(missing_parents)
+        if len(self._orphan_parents) > MAX_HELD_ORPHAN_TXS:
+            # the server chooses what we hold: the oldest orphan is dropped
+            self._pop_held_tx(next(iter(self._orphan_parents)))
+
+    def _pop_held_orphan_txs(self, parent_txid: str) -> List[Transaction]:
+        """Returns the held txs that were only missing this parent, in the order they were received."""
+        txs = []
+        for txid, missing_parents in list(self._orphan_parents.items()):
+            if parent_txid not in missing_parents:
+                continue
+            missing_parents.remove(parent_txid)
+            if missing_parents:
+                continue
+            if txid in self.unverified_tx:
+                # the server now claims it is mined: it stays held until verified
+                del self._orphan_parents[txid]
+            else:
+                txs.append(self._pop_held_tx(txid))
+        return txs
+
+    def _pop_held_tx(self, tx_hash: str) -> Optional[Transaction]:
+        self._orphan_parents.pop(tx_hash, None)
+        return self._held_txs.pop(tx_hash, None)
 
     @with_lock
     def is_held_tx(self, tx_hash: str) -> bool:
-        # not if the server no longer claims it is mined
-        return tx_hash in self._held_txs and tx_hash in self.unverified_tx
+        """Returns whether tx_hash is held to be added later: it need not be requested from the server."""
+        if tx_hash not in self._held_txs:
+            return False
+        # a tx held until verified is requested again if the server no longer claims it is mined
+        return tx_hash in self.unverified_tx or tx_hash in self._orphan_parents
 
     @with_lock
     def clear_held_txs(self) -> None:
         self._held_txs.clear()
+        self._orphan_parents.clear()
 
     @with_lock
     def get_unverified_txs(self) -> Dict[str, int]:

@@ -244,7 +244,7 @@ class Synchronizer(SynchronizerBase):
             if tx and not isinstance(tx, PartialTransaction):
                 continue  # already have complete tx
             if self.adb.is_held_tx(tx_hash):
-                continue  # added once verified
+                continue  # added once verified, or once its missing parents are added
             transaction_hashes.append(tx_hash)
             # note: tx_height might change by the time we get the raw_tx
             self.requested_tx.add(tx_hash)

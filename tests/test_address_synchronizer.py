@@ -59,6 +59,24 @@ def spend(
     return Transaction(tx.serialize())
 
 
+def spend_taproot(utxos: Sequence[Tuple[Transaction, int]], outputs: Sequence[Tuple[str, int]]) -> Transaction:
+    """Returns a tx spending the given outputs: (parent tx, output index). The inputs that spend a coin of
+    ADDR_MINE_P2TR are signed. The others get a witness that is not valid."""
+    txins = []
+    for parent, out_idx in utxos:
+        txin = PartialTxInput(prevout=TxOutpoint(txid=bytes.fromhex(parent.txid()), out_idx=out_idx), script_sig=b'')
+        txin.witness_utxo = parent.outputs()[out_idx]
+        txins.append(txin)
+    txouts = [PartialTxOutput.from_address_and_value(addr, value) for addr, value in outputs]
+    psbt = PartialTransaction.from_io(txins, txouts, locktime=0, BIP69_sort=False)
+    for txin_idx, txin in enumerate(txins):
+        if txin.address == ADDR_MINE_P2TR:
+            txin.witness = construct_witness([psbt.sign_txin(txin_idx, KEY_MINE.get_secret_bytes())])
+        else:
+            txin.witness = construct_witness([b'foreign'])
+    return Transaction(psbt.serialize_to_network())
+
+
 def with_witness(tx: Transaction, witness: Sequence[bytes]) -> Transaction:
     """Returns tx with another witness: same txid."""
     txins = [TxInput(prevout=txin.prevout, script_sig=txin.script_sig, nsequence=txin.nsequence,
@@ -185,43 +203,42 @@ class TestAddressSynchronizerScripts(ElectrumTestCase):
         self.adb.add_address(ADDR_MINE_P2TR)
         funding_tx = fund(ADDR_MINE_P2TR, 100_000, n=1)
         foreign_funding_tx = fund(ADDR_OTHER, 50_000, n=2)
-        our_txin = PartialTxInput(prevout=TxOutpoint(txid=bytes.fromhex(funding_tx.txid()), out_idx=0))
-        our_txin.witness_utxo = funding_tx.outputs()[0]
-        foreign_txin = PartialTxInput(prevout=TxOutpoint(txid=bytes.fromhex(foreign_funding_tx.txid()), out_idx=0),
-                                      script_sig=b'', witness=construct_witness([b'foreign']))
-        foreign_txin.witness_utxo = foreign_funding_tx.outputs()[0]
-        psbt = PartialTransaction.from_io(
-            [our_txin, foreign_txin], [PartialTxOutput.from_address_and_value(ADDR_OTHER, 140_000)],
-            locktime=0, BIP69_sort=False)
-        our_txin.script_sig = b''
-        our_txin.witness = construct_witness([psbt.sign_txin(0, KEY_MINE.get_secret_bytes())])
-        tx = Transaction(psbt.serialize_to_network())
+        tx = spend_taproot([(funding_tx, 0), (foreign_funding_tx, 0)], [(ADDR_OTHER, 140_000)])
         self._receive(funding_tx)
-        self._receive(tx)
-        self.assertFalse(self._has(tx))
         # a tx that does not come from the server
         with self.assertRaises(UnverifiableTxSignature):
             self.adb.add_transaction(tx)
-        self._receive(foreign_funding_tx)
+        self.assertFalse(self.adb.is_held_tx(tx.txid()))
+        # received from the server, it is held until the parent is added
         self._receive(tx)
+        self.assertFalse(self._has(tx))
+        self._receive(foreign_funding_tx)
         self.assertTrue(self._has(tx))
 
     async def test_taproot_tx_before_parent(self):
         # a taproot signature commits to the outputs spent by all inputs: here, two outputs of the parent being added
         self.adb.add_address(ADDR_MINE_P2TR)
         funding_tx = fund(ADDR_MINE_P2TR, 100_000, 50_000)
-        txins = [PartialTxInput(prevout=TxOutpoint(txid=bytes.fromhex(funding_tx.txid()), out_idx=n)) for n in (0, 1)]
-        for txin, txout in zip(txins, funding_tx.outputs()):
-            txin.witness_utxo = txout
-        psbt = PartialTransaction.from_io(
-            txins, [PartialTxOutput.from_address_and_value(ADDR_OTHER, 140_000)], locktime=0, BIP69_sort=False)
-        for txin_idx, txin in enumerate(txins):
-            txin.script_sig = b''
-            txin.witness = construct_witness([psbt.sign_txin(txin_idx, KEY_MINE.get_secret_bytes())])
-        tx = Transaction(psbt.serialize_to_network())
+        tx = spend_taproot([(funding_tx, 0), (funding_tx, 1)], [(ADDR_OTHER, 140_000)])
         self._receive(tx)
         self._receive(funding_tx)
         self.assertEqual(2, len(self.adb.db.get_txi_addr(tx.txid(), ADDR_MINE_P2TR)))
+
+    async def test_taproot_tx_before_two_parents(self):
+        # the first parent alone does not let us verify the tx: it leaves the db with its child, until the second one
+        self.adb.add_address(ADDR_MINE_P2TR)
+        funding_txs = [fund(ADDR_MINE_P2TR, 100_000, n=1), fund(ADDR_MINE_P2TR, 50_000, n=2)]
+        tx = spend_taproot([(funding_tx, 0) for funding_tx in funding_txs], [(ADDR_MINE, 140_000)])
+        child_tx = spend(tx, [(ADDR_OTHER, 130_000)])
+        for t in (tx, child_tx, funding_txs[0]):
+            self._receive(t)
+        self.assertFalse(self._has(tx))
+        self.assertFalse(self._has(child_tx))
+        self._receive(funding_txs[1])
+        self.assertEqual(2, len(self.adb.db.get_txi_addr(tx.txid(), ADDR_MINE_P2TR)))
+        self.assertEqual([ADDR_MINE], self.adb.db.get_txi_addresses(child_tx.txid()))
+        for t in (tx, child_tx):
+            self.assertEqual(TX_HEIGHT_UNCONFIRMED, self.adb.get_tx_height(t.txid()).height())
 
     async def test_input_spending_missing_output_of_stored_tx(self):
         # funding_tx has a single output: the input is handled as if its parent was unknown
@@ -283,6 +300,20 @@ class TestAddressSynchronizerScripts(ElectrumTestCase):
         self.assertEqual([ADDR_MINE_2], self.adb.db.get_txo_addresses(funding_tx.txid()))
         self.assertEqual([ADDR_MINE_2], self.adb.db.get_txo_addresses(other_funding_tx.txid()))
 
+    async def test_history_update_with_stored_tx_missing_a_parent(self):
+        funding_txs = [fund(ADDR_MINE_P2TR, 100_000, n=1), fund(ADDR_MINE_P2TR, 50_000, n=2)]
+        tx = spend_taproot([(funding_tx, 0) for funding_tx in funding_txs], [(ADDR_OTHER, 140_000)])
+        for t in (funding_txs[0], tx):
+            self._receive(t)  # not related to our addresses yet
+        self.adb.add_address(ADDR_MINE_P2TR)
+        hist = [(t.txid(), TX_HEIGHT_UNCONFIRMED) for t in (tx, funding_txs[0])]
+        self.adb.receive_history_callback(ADDR_MINE_P2TR, hist, {})
+        self.assertFalse(self._has(tx))
+        self.assertTrue(self.adb.is_held_tx(tx.txid()))
+        # a parent that does not come from the server
+        self.adb.add_transaction(funding_txs[1])
+        self.assertEqual(2, len(self.adb.db.get_txi_addr(tx.txid(), ADDR_MINE_P2TR)))
+
     async def test_verified_tx_is_not_checked(self):
         self._receive(self.funding_tx)
         self.adb.add_verified_tx(self.fake_tx.txid(), mined_info(100))
@@ -320,6 +351,74 @@ class TestAddressSynchronizerScripts(ElectrumTestCase):
         Synchronizer._reset(sync)
         return sync
 
+    def _orphan_tx(self, *, n: int = 1, value: int = 140_000) -> Tuple[Transaction, Transaction]:
+        """Returns a tx that spends one of our taproot coins, and a coin of a parent that we do not have: it
+        is held when the server sends it. Returns that parent too."""
+        self.adb.add_address(ADDR_MINE_P2TR)
+        funding_tx, missing_parent = fund(ADDR_MINE_P2TR, 100_000, n=n), fund(ADDR_OTHER, 50_000, n=n + 1)
+        self._receive(funding_tx)
+        return spend_taproot([(funding_tx, 0), (missing_parent, 0)], [(ADDR_OTHER, value)]), missing_parent
+
+    async def test_orphan_txs_are_added_in_the_order_received(self):
+        # the tx received last replaces the other one
+        tx, missing_parent = self._orphan_tx()
+        replacement_tx, _ = self._orphan_tx(value=130_000)
+        for t in (tx, replacement_tx, missing_parent):
+            self._receive(t)
+        self.assertFalse(self._has(tx))
+        self.assertTrue(self._has(replacement_tx))
+
+    async def test_orphan_tx_is_verified_once_all_parents_are_added(self):
+        self.adb.add_address(ADDR_MINE_P2TR)
+        funding_txs = [fund(ADDR_MINE_P2TR, 100_000, n=n) for n in (1, 2, 3)]
+        tx = spend_taproot([(funding_tx, 0) for funding_tx in funding_txs], [(ADDR_OTHER, 290_000)])
+        self._receive(funding_txs[0])
+        self._receive(tx)
+        with mock.patch('electrum.address_synchronizer.verify_input', wraps=verify_input) as verify:
+            self._receive(funding_txs[1])
+            self.assertEqual(0, verify.call_count)
+            self._receive(funding_txs[2])
+        self.assertEqual(3, verify.call_count)
+
+    async def test_oldest_orphan_tx_is_dropped_if_too_many(self):
+        (tx, missing_parent), (tx2, _) = [self._orphan_tx(n=n) for n in (1, 3)]
+        with mock.patch('electrum.address_synchronizer.MAX_HELD_ORPHAN_TXS', 1):
+            for t in (tx, tx2, missing_parent):
+                self._receive(t)
+        self.assertFalse(self._has(tx))
+        self.assertTrue(self.adb.is_held_tx(tx2.txid()))
+
+    async def test_orphan_tx_no_longer_listed_is_dropped(self):
+        # the server may have replaced it: it would replace the new tx when its parent is added
+        tx, missing_parent = self._orphan_tx()
+        hist = [(tx.inputs()[0].prevout.txid.hex(), TX_HEIGHT_UNCONFIRMED), (tx.txid(), TX_HEIGHT_UNCONFIRMED),
+                (self.tx.txid(), 100)]
+        self.adb.receive_history_callback(ADDR_MINE_P2TR, hist, {})
+        self._receive(tx)
+        self.adb.receive_tx_callback(self.tx)
+        self.adb.receive_history_callback(ADDR_MINE_P2TR, hist, {})
+        self.assertTrue(self.adb.is_held_tx(tx.txid()))
+        self.adb.receive_history_callback(ADDR_MINE_P2TR, hist[:1], {})
+        self.assertFalse(self.adb.is_held_tx(tx.txid()))
+        self._receive(missing_parent)
+        self.assertFalse(self._has(tx))
+        # a tx held until verified is kept: the verifier finds out if it is not at the height claimed
+        self.assertTrue(self.adb.is_held_tx(self.tx.txid()))
+
+    async def test_orphan_tx_claimed_mined_is_added_once_verified(self):
+        sync = self._make_synchronizer()
+        tx, missing_parent = self._orphan_tx()
+        fake_tx = with_outputs(tx, [(ADDR_OTHER, 149_000)])
+        self._receive(fake_tx)
+        self.adb.add_unverified_or_unconfirmed_tx(fake_tx.txid(), 100)
+        await sync._request_missing_txs([(fake_tx.txid(), 100)])
+        self.assertEqual(set(), sync.requested_tx)
+        # its scripts are not verified when the parent is added
+        self._receive(missing_parent)
+        self.assertFalse(self._has(fake_tx))
+        self.adb.add_verified_tx(fake_tx.txid(), mined_info(100))
+        self.assertTrue(self._has(fake_tx))
+
     async def test_held_tx_is_not_requested_again(self):
         self.adb.add_unverified_or_unconfirmed_tx(self.tx.txid(), 100)
         sync = self._make_synchronizer()
@@ -341,8 +440,13 @@ class TestAddressSynchronizerScripts(ElectrumTestCase):
         self.adb.add_unverified_or_unconfirmed_tx(self.tx.txid(), 100)
         sync = self._make_synchronizer()
         self.adb.receive_tx_callback(self.tx)
+        orphan_tx, missing_parent = self._orphan_tx()
+        self._receive(orphan_tx)
         Synchronizer._reset(sync)
         self.assertFalse(self.adb.is_held_tx(self.tx.txid()))
         self.adb.add_verified_tx(self.tx.txid(), mined_info(100))
         self.assertFalse(self._has(self.tx))
+        self.assertFalse(self.adb.is_held_tx(orphan_tx.txid()))
+        self._receive(missing_parent)
+        self.assertFalse(self._has(orphan_tx))
 

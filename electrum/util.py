@@ -204,6 +204,13 @@ class UnverifiableTxSignature(UnverifiedTxSignature):
         return _("The signatures of this transaction cannot be verified.")
 
 
+class MissingTxParents(UnverifiableTxSignature):
+    """The signatures cannot be verified without parent txs that we do not have."""
+    def __init__(self, parent_txids: Set[str]):
+        super().__init__()
+        self.parent_txids = parent_txids
+
+
 class FileImportFailed(Exception):
     def __init__(self, message=''):
         self.message = str(message)
